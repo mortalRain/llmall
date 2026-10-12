@@ -1,0 +1,74 @@
+# ============================================================================
+# Seata Server 1.5.2 配置（挂到容器的 /seata-server/resources/application.yml）
+#
+# 为什么 1.5.x 用 application.yml 而不是 registry.conf/file.conf：
+#   1.5.0 起服务端改成 Spring Boot 应用，配置统一走 application.yml；
+#   1.4.2 镜像里那两个 .conf 在 1.5.2 镜像中**已经不存在**，继续挂只会造成
+#   "改了配置不生效"。旧文件保留在仓库里仅供 1.4.2 参考。
+#
+# 关键三项（对应 1.4.2 的 registry.conf + file.conf）：
+#   registry → Nacos（注册到 SEATA_GROUP/默认集群，客户端按 vgroup-mapping 找过来）
+#   store    → db（会话落 seata 库，TC 重启不丢事务）
+#   console  → 7091 控制台（1.5.1 起才有，账号见下）
+# ============================================================================
+
+server:
+  port: 7091                              # 控制台端口
+
+spring:
+  application:
+    name: seata-server
+
+logging:
+  config: classpath:logback-spring.xml
+  file:
+    path: ${user.home}/logs/seata
+
+console:
+  user:
+    username: seata                       # 浏览器登录控制台用（http://<VM_IP>:7091）
+    password: seata
+
+seata:
+  config:
+    type: file                            # 服务端配置只认本文件，不引入 Nacos 配置中心（少一个失败点）
+
+  registry:
+    type: nacos
+    nacos:
+      application: seata-server
+      server-addr: 192.168.189.128:8848
+      group: SEATA_GROUP
+      namespace: ""
+      cluster: default                    # 必须与客户端 service.vgroupMapping.xxx=default 一致
+      username: ""
+      password: ""                        # Nacos 未开鉴权，见 M0 文档
+
+  server:
+    service-port: 8091                    # 客户端连接的 TC 端口
+
+  store:
+    mode: db                              # 会话/锁都落库
+    db:
+      datasource: druid
+      db-type: mysql
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      url: jdbc:mysql://192.168.189.128:3306/seata?useUnicode=true&characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+      user: root
+      password: "123"
+      min-conn: 5
+      max-conn: 30
+      # 1.5.x 的表名清单：distributed_lock 是新增的第 4 张表（1.4.2 没有，
+      # 见 sql/merged/03b-seata-server-1.5.2-upgrade.sql），少了它定时任务抢不到锁。
+      global-table: global_table
+      branch-table: branch_table
+      lock-table: lock_table
+      distributed-lock-table: distributed_lock
+      query-limit: 100
+      max-wait: 5000
+
+  security:
+    secretKey: SeataSecretKey0c382ef121d778043159209298fd40bf3850a017
+    tokenValidityInMilliseconds: 1800000
+    ignore:
+      urls: /,/**/*.css,/**/*.js,/**/*.html,/**/*.map,/**/*.svg,/**/*.png,/**/*.ico,/console-fe/public/**,/api/v1/auth/login

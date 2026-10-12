@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>llmall</artifactId>
+        <groupId>com.tongcheng</groupId>
+        <version>1.0.0</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>llmall-trade-service</artifactId>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+    </properties>
+
+    <dependencies>
+        <!--common-->
+        <dependency>
+            <groupId>com.tongcheng</groupId>
+            <artifactId>llmall-common</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+        <!--api-->
+        <dependency>
+            <groupId>com.tongcheng</groupId>
+            <artifactId>llmall-api</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+        <!--web-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <!--数据库-->
+        <dependency>
+            <groupId>mysql</groupId>
+            <artifactId>mysql-connector-java</artifactId>
+        </dependency>
+        <!--mybatis-->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-boot-starter</artifactId>
+        </dependency>
+        <!--nacos 服务注册发现-->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+        <!--AMQP依赖-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+        <!--Seata AT：跨服务强一致（TM 角色）。
+            注意：依赖在不在与"用不用"是两件事 —— 由 application.yaml 的 seata.enabled 控制，
+            false 时 GlobalTransactionScanner 不注册，@GlobalTransactional 完全不生效。-->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-seata</artifactId>
+        </dependency>
+        <!-- 注意：这里**故意不引** spring-cloud-starter-alibaba-sentinel。
+             引了才能让它声明的 fallbackFactory 生效，但实测本机 Sentinel 初始化不稳
+             （eager 注册 NPE / SentinelHealthIndicator NPE / ContextUtil 静态初始化失败），
+             而项目至今没有任何 @SentinelResource 与规则 —— 引进来只有启动失败的风险、没有限流收益。
+             代价：PayClient/ItemClient/ShopClient 的降级类不生效（见 application.yaml 的说明）。-->
+    </dependencies>
+    <build>
+        <finalName>${project.artifactId}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

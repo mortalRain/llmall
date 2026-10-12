@@ -1,0 +1,83 @@
+[
+    {
+        "id": "item",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/items/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-item-service"
+    },
+    {
+        "id": "shop",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/shops/**", "_genkey_1": "/shop-types", "_genkey_2": "/shop-types/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-shop-service"
+    },
+    {
+        "id": "cart",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/carts/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-cart-service"
+    },
+    {
+        "id": "user",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/users/**", "_genkey_1": "/addresses/**", "_genkey_2": "/points/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-user-service"
+    },
+    {
+        "id": "trade",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/orders/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-trade-service"
+    },
+    {
+        "id": "pay",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/pay-orders/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-pay-service"
+    },
+    {
+        "id": "content",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/blogs/**", "_genkey_1": "/follows/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-content-service"
+    },
+    {
+        "id": "search",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/search/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-search-service"
+    },
+    {
+        "id": "promotion",
+        "predicates": [{
+            "name": "Path",
+            "args": {"_genkey_0": "/vouchers/**"}
+        }],
+        "filters": [],
+        "uri": "lb://llmall-promotion-service"
+    }
+]

@@ -1,0 +1,109 @@
+server:
+  port: 8085
+# Seata AT 强一致分支（默认关闭）：
+#   false → 只引依赖不使用：GlobalTransactionScanner 不注册，@GlobalTransactional 不生效，
+#           下单链路仍走原来的"本地事务 + 消息表"，项目不依赖 Seata 也能跑起来；
+#   true  → 下单走 AT 全局事务（前提：Seata Server 已启动，见 docker/seata/ 与 M0 文档）。
+# 这个开关同时就是"双方案对照压测"的开关：同一份代码、同一个场景，只翻这一个值。
+seata:
+  enabled: false
+  application-id: llmall-trade-service
+  tx-service-group: llmall-tx-group
+  enable-auto-data-source-proxy: true
+  data-source-proxy-mode: AT
+  service:
+    vgroup-mapping:
+      llmall-tx-group: default
+  registry:
+    type: nacos
+    nacos:
+      application: seata-server
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+      group: SEATA_GROUP
+      cluster: default
+  config:
+    type: file
+spring:
+  application:
+    name: llmall-trade-service
+  profiles:
+    active: local
+  datasource:
+    url: jdbc:mysql://${llmall.db.host}:3306/llmall-trade?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: root
+    password: ${llmall.db.pw}
+  cloud:
+    sentinel:
+      transport:
+        # Sentinel 控制台地址：默认值按"控制台与应用同机（宿主 8090）"取，
+        # 换环境（控制台在 VM / 云服务器上）用启动参数 --llmall.sentinel.dashboard=ip:8090、
+        # 环境变量 LLMALL_SENTINEL_DASHBOARD，或 Nacos 配置里加 llmall.sentinel.dashboard 覆盖，均无需改代码。
+        # 控制台自身默认端口是 8080，会和网关冲突，启动时必须显式指定 8090。
+        # 控制台不在线只是连接告警，不影响 @SentinelResource 定义的限流/降级生效。
+        dashboard: ${llmall.sentinel.dashboard:localhost:8090}
+    nacos:
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+  rabbitmq:
+    host: ${LLMALL_MQ_HOST:192.168.189.128} # 容器化时由 LLMALL_MQ_HOST 覆盖（VM 上容器名是 mq）
+    port: 5672 # 端口
+    virtual-host: /llmall # 虚拟主机
+    username: llmall # 用户名
+    password: 123 # 密码
+mybatis-plus:
+  configuration:
+    default-enum-type-handler: com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler
+  global-config:
+    db-config:
+      update-strategy: not_null
+      id-type: auto
+logging:
+  level:
+    # info 而非 debug：Feign 日志级别已降为 BASIC，com.llmall 若仍是 debug，
+    # 会把每条 MyBatis SQL 与参数都打出来（噪音大、拖慢压测，且可能把参数里的敏感值写进日志）。
+    com.llmall: info
+  pattern:
+    dateformat: HH:mm:ss:SSS
+  file:
+    path: "logs/${spring.application.name}"
+llmall:
+  jwt:
+    location: classpath:llmall.jks
+    alias: llmall
+    password: llmall123
+    tokenTTL: 30m
+  trade:
+    # 订单支付超时（秒）：超过该时间未支付，延迟消息会关单并回滚库存。
+    # 默认 15 分钟 —— 原来代码里写死了 10 秒，用户还没输完密码订单就被自动关掉，
+    # 表现为"去支付却变成已取消"。想演示超时关单，临时改成 30 并重启 llmall-trade-service 即可。
+    order-timeout-seconds: 900
+    # 延迟消息查不到支付状态（支付服务不可用）时的最大重投次数，默认 5。
+    # 超过后**不再自动关单**，只打 ERROR 日志让订单保持待付款等人工处理：
+    # 未知状态绝不能当成"未支付"，关错单会让已付款用户钱货两空。
+    order-close-max-retry: 5
+    # 兜底扫描"超时却仍是待付款"订单的固定间隔（毫秒），默认 300000（5 分钟）。
+    # 用于补延迟消息丢失/服务重启期间漏掉的关单，判定口径与延迟消息完全一致。
+    order-scan-interval-ms: 300000
+  # 【凭证一】llmall.internal.token：网关认证通过后注入的"本请求经过网关"凭证，
+  # 同时也是 UserInfoInterceptor 判断 user-info 头是否可信的依据
+  # （服务监听 0.0.0.0，直连端口可以自己伪造 user-info，必须靠这个凭证区分是不是"自己人"）。
+  # 网关会剥离外部请求自带的该头并在认证通过后重新注入，因此外部无法伪造；
+  # 注意：任何登录用户的请求都带着它 —— 所以它**不能**用来判断"这是服务间调用"。
+  # 生产环境请改由配置中心/密钥管理下发，并配合内网隔离。
+  internal:
+    token: llmall-internal-demo-token
+    # 【凭证二】llmall.internal.service-token：**只给服务间调用**用的凭证，
+    # 用于"标记订单已支付"这类绝不能让用户触发的内部接口。
+    # 与上面那条的根本区别：网关注入 x-internal-token（用户请求也有），
+    # 但对 x-service-token **只剥离、不注入** —— 外部（哪怕是已登录用户）永远拿不到，
+    # 只有真正的服务调用方（如 llmall-pay-service 的 Feign）才持有它。
+    # 必须显式配置：不配置则内部接口一律 403（fail-closed），宁可内部调用报错也不能对外开放。
+    service-token: llmall-service-demo-token
+# 【已知短板·别当成有兜底】本服务声明了 PayClient/ItemClient/ShopClient 的 fallbackFactory，
+# 但它**不会生效**：Spring Cloud 默认的 DefaultTargeter 不读 fallback（只有 Sentinel 的 Feign Builder 才消费它），
+# 而本环境没有启用 Sentinel —— 实测其初始化在本机不稳（eager 注册 NPE、SentinelHealthIndicator 抛
+# ExceptionInInitializerError、ContextUtil 静态初始化失败），且项目至今没有任何 @SentinelResource 与规则，
+# 启用它只会增加"服务起不来"的面。要真正拿到降级能力，得先解决 Sentinel 初始化并配上规则。
+# keytool -genkeypair -alias llmall -keyalg RSA -keypass llmall123 -keystore llmall.jks -storepass llmall123
+
+# ---------------------------------------------------------------------------\r\n# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。\r\n# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+\r\n# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：\r\n#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs\r\n# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；\r\n# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。\r\n# ---------------------------------------------------------------------------\r\nknife4j:\r\n  enable: true\r\n  setting:\r\n    language: zh_cn\r\nspringdoc:\r\n  api-docs:\r\n    path: /v3/api-docs\r\n  # 每个服务是一个独立限界上下文，直接扫本应用全部 controller，不必按包名逐个列举\r\n  group-configs:\r\n    - group: default\r\n      paths-to-match: '/**'\r\n      packages-to-scan: com.llmall\r\n

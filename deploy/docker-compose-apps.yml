@@ -1,0 +1,125 @@
+# ============================================================================
+# 本地生活到店服务平台 · 应用编排（11 个服务 + 网关）
+#
+# 前置：
+#   1. 中间件已就绪（本文件 assumes 同一 docker 网络内有 mysql / redis / nacos / rabbitmq）
+#      中间件可用 ../docker/docker-compose-infra-lite.yml 起
+#   2. 镜像已构建：docker build -f deploy/Dockerfile -t local-life/llmall:1.0.0 ..
+#   3. Nacos 里已导入共享配置（见 ../nacos-config/README.md）
+#
+# 启动：
+#   docker compose -f deploy/docker-compose-apps.yml --profile core up -d     # 最小集（开发/演示够用）
+#   docker compose -f deploy/docker-compose-apps.yml --profile full up -d     # 全量 11 个服务
+#
+# 内存提示：每个服务限 256M（JVM 堆 192M），11 个服务约 2.2G。
+#          若服务器只有 4G，请用 core profile 或按需挑选服务。
+# ============================================================================
+
+x-app: &app
+  image: local-life/llmall:1.0.0
+  restart: unless-stopped
+  environment: &app-env
+    TZ: Asia/Shanghai
+    # 以下变量通过 Spring 的宽松绑定覆盖各服务配置里的占位符（llmall.db.host / llmall.redis.host ...）
+    NACOS_ADDR: ${NACOS_ADDR:-nacos:8848}
+    NACOS_NAMESPACE: ${NACOS_NAMESPACE:-public}
+    LLMALL_DB_HOST: ${LLMALL_DB_HOST:-mysql}
+    LLMALL_DB_PW: ${LLMALL_DB_PW:-123}
+    LLMALL_REDIS_HOST: ${LLMALL_REDIS_HOST:-redis}
+    LLMALL_REDIS_PW: ${LLMALL_REDIS_PW:-123}
+    LLMALL_MQ_HOST: ${LLMALL_MQ_HOST:-rabbitmq}
+    LLMALL_ES_HOST: ${LLMALL_ES_HOST:-elasticsearch}
+    # ⚠️ 默认值对应"用 docker/docker-compose-infra-lite.yml 从零起的一整套"（redis/rabbitmq 都是容器）。
+    #    VM 现役环境不一样：RabbitMQ 容器叫 **mq**、Redis 是**原生安装**（要填宿主 IP），
+    #    照默认值起会 UnknownHostException —— 具体值见 .env.example 顶部说明。
+    # Sentinel 控制台：控制台跑在宿主（Windows）8090，容器经 VMnet8 网关回连宿主，
+    # 需要 Windows 放行 8090 入站；控制台若也搬进容器，改成 sentinel-dashboard:8090 即可。
+    # 注意规则是「控制台 → 客户端 8719」反向推送：只配了地址但控制台回不到容器时，
+    # 表现为"机器列表看得到、规则推不下去"（详见 deploy/部署说明.md 的 Sentinel 一节）。
+    LLMALL_SENTINEL_DASHBOARD: ${LLMALL_SENTINEL_DASHBOARD:-192.168.189.1:8090}
+    JAVA_OPTS: "-Xms64m -Xmx192m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dspring.jmx.enabled=false -Dfile.encoding=UTF-8 -Dserver.shutdown=graceful -Dspring.lifecycle.timeout-per-shutdown-phase=30s"
+  networks:
+    - local-life
+  mem_limit: 256m
+  # 停机时给在途请求与定时任务 40 秒收尾：默认只有 10 秒，JVM 被 SIGKILL 会截断正在处理的下单/核销
+  stop_grace_period: 40s
+  # 健康探针：容器里没有 curl，用 wget；服务端口各不相同（8080/8081/8082/8084~8089/8093），
+  # 所以逐个探测已知端口，任一返回 status:UP 即视为健康。start_period 覆盖 Spring 冷启动。
+  healthcheck:
+    test: ["CMD-SHELL", "for p in 8080 8081 8082 8084 8085 8086 8087 8088 8089 8093; do wget -q -O- http://127.0.0.1:$$p/actuator/health 2>/dev/null | grep -q '\"status\":\"UP\"' && exit 0; done; exit 1"]
+    interval: 30s
+    timeout: 15s
+    retries: 5
+    start_period: 90s
+
+services:
+
+  # ---------------- 网关 ----------------
+  gateway:
+    <<: *app
+    container_name: gateway
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-gateway.jar" ]
+    ports:
+      - "8080:8080"
+    profiles: [ "core", "full" ]
+
+  # ---------------- 核心业务服务 ----------------
+  llmall-user-service:
+    <<: *app
+    container_name: llmall-user-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-user-service.jar" ]
+    profiles: [ "core", "full" ]
+
+  llmall-shop-service:
+    <<: *app
+    container_name: llmall-shop-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-shop-service.jar" ]
+    profiles: [ "core", "full" ]
+
+  llmall-item-service:
+    <<: *app
+    container_name: llmall-item-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-item-service.jar" ]
+    profiles: [ "core", "full" ]
+
+  llmall-content-service:
+    <<: *app
+    container_name: llmall-content-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-content-service.jar" ]
+    profiles: [ "core", "full" ]
+
+  llmall-trade-service:
+    <<: *app
+    container_name: llmall-trade-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-trade-service.jar" ]
+    profiles: [ "full" ]
+
+  # ---------------- 其余服务（full profile） ----------------
+  llmall-cart-service:
+    <<: *app
+    container_name: llmall-cart-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-cart-service.jar" ]
+    profiles: [ "full" ]
+
+  llmall-pay-service:
+    <<: *app
+    container_name: llmall-pay-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-pay-service.jar" ]
+    profiles: [ "full" ]
+
+  llmall-promotion-service:
+    <<: *app
+    container_name: llmall-promotion-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-promotion-service.jar" ]
+    profiles: [ "full" ]
+
+  llmall-search-service:
+    <<: *app
+    container_name: llmall-search-service
+    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-search-service.jar" ]
+    profiles: [ "full" ]
+
+networks:
+  local-life:
+    external: true
+    name: ${APP_NETWORK:-local-life}

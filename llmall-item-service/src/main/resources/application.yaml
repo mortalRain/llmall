@@ -1,0 +1,80 @@
+server:
+  port: 8081
+# Seata AT：本服务是 RM（扣库存的参与方）。默认关闭，见 llmall-trade-service 里的同名字段说明。
+seata:
+  enabled: false
+  application-id: llmall-item-service
+  tx-service-group: llmall-tx-group
+  enable-auto-data-source-proxy: true
+  data-source-proxy-mode: AT
+  service:
+    vgroup-mapping:
+      llmall-tx-group: default
+  registry:
+    type: nacos
+    nacos:
+      application: seata-server
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+      group: SEATA_GROUP
+      cluster: default
+  config:
+    type: file
+spring:
+  application:
+    name: llmall-item-service
+  profiles:
+    # 必须用 local：dev 里的 llmall.db.host 是容器名 mysql，只有在 docker 网络里才解析得到，
+    # 在 IDEA / 本机 java -jar 下会报 java.net.UnknownHostException: mysql（实测踩过）
+    active: local
+  datasource:
+    url: jdbc:mysql://${llmall.db.host}:3306/llmall-item?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: root
+    password: ${llmall.db.pw}
+  cloud:
+    sentinel:
+      transport:
+        # Sentinel 控制台地址：默认值按"控制台与应用同机（宿主 8090）"取，
+        # 换环境（控制台在 VM / 云服务器上）用启动参数 --llmall.sentinel.dashboard=ip:8090、
+        # 环境变量 LLMALL_SENTINEL_DASHBOARD，或 Nacos 配置里加 llmall.sentinel.dashboard 覆盖，均无需改代码。
+        # 控制台自身默认端口是 8080，会和网关冲突，启动时必须显式指定 8090。
+        # 控制台不在线只是连接告警，不影响 @SentinelResource 定义的限流/降级生效。
+        dashboard: ${llmall.sentinel.dashboard:localhost:8090}
+    nacos:
+      discovery:
+        server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+mybatis-plus:
+  configuration:
+    default-enum-type-handler: com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler
+  global-config:
+    db-config:
+      update-strategy: not_null
+      id-type: auto
+logging:
+  level:
+    # info 而非 debug：Feign 日志级别已降为 BASIC，com.llmall 若仍是 debug，
+    # 会把每条 MyBatis SQL 与参数都打出来（噪音大、拖慢压测，且可能把参数里的敏感值写进日志）。
+    com.llmall: info
+  pattern:
+    dateformat: HH:mm:ss:SSS
+  file:
+    path: "logs/${spring.application.name}"
+llmall:
+  jwt:
+    location: classpath:llmall.jks
+    alias: llmall
+    password: llmall123
+    tokenTTL: 30m
+  # 服务间内部调用凭证（默认值见下）。
+  # 用途：UserInfoInterceptor 只在该请求头与下面这个值完全一致时才采信 user-info 头 ——
+  # 因为服务监听 0.0.0.0，"我能收到 user-info 头"并不等于"这个身份来自网关"，
+  # 直连服务端口的人可以自己写一个 user-info 冒充任意用户。凭证由网关（认证通过后）
+  # 与 Feign 调用（DefaultFeignConfig）注入，网关会剥离外部请求自带的同名头。
+  # 默认值 llmall-internal-demo-token 仅用于本地演示：生产应由网关注入/配置中心下发，
+  # 该值不对外暴露，并配合内网隔离。**全项目所有服务必须配置成同一个值**，否则会出现
+  # "网关进来的请求全部未登录"或"服务间调用被当成伪造头"。
+  internal:
+    token: llmall-internal-demo-token
+# keytool -genkeypair -alias llmall -keyalg RSA -keypass llmall123 -keystore llmall.jks -storepass llmall123
+
+# ---------------------------------------------------------------------------\r\n# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。\r\n# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+\r\n# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：\r\n#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs\r\n# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；\r\n# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。\r\n# ---------------------------------------------------------------------------\r\nknife4j:\r\n  enable: true\r\n  setting:\r\n    language: zh_cn\r\nspringdoc:\r\n  api-docs:\r\n    path: /v3/api-docs\r\n  # 每个服务是一个独立限界上下文，直接扫本应用全部 controller，不必按包名逐个列举\r\n  group-configs:\r\n    - group: default\r\n      paths-to-match: '/**'\r\n      packages-to-scan: com.llmall\r\n

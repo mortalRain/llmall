@@ -1,0 +1,5 @@
+spring:
+  elasticsearch:
+    uris: http://${llmall.es.host}:9200
+    connection-timeout: 3s
+    socket-timeout: 30s

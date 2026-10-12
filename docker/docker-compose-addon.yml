@@ -1,0 +1,88 @@
+# 基础设施补充编排：Seata + Elasticsearch + Kibana
+#
+# 背景：你的 VM（192.168.189.128）里 Docker 已经在跑 MySQL / Nacos / RabbitMQ / Redis，
+#       本文件【只补充】Seata 与 ES 栈，并接入与它们**同一个**容器网络，避免端口与数据卷冲突。
+#
+# 用法：
+#   1) 网络名已统一为 local-life（与 docker-compose-infra-lite.yml、llmall/deploy 下两份 compose 一致），
+#      若还没建过：`docker network create local-life`（三份 compose 共用，只需建一次）
+#   2) `docker compose -f docker-compose-addon.yml up -d`
+#   3) `docker compose -f docker-compose-addon.yml ps` 确认三个容器都 Up
+#
+# 注意：ES 需要宿主（VM）内核参数 vm.max_map_count >= 262144，见 M0-环境搭建说明.md
+
+services:
+  # ---------------- Seata Server 1.5.2（与 SCA 2021.0.4.0 带的客户端 1.5.2 对齐）----------------
+  # 为什么是 1.5.2：SCA 2021.0.4.0 的 BOM 里 seata 客户端就是 1.5.2，而 Seata 官方要求
+  #   **服务端 ≥ 客户端**；1.4.2 服务端属于反方向错配（实测能用，但不受支持）。
+  # 为什么配置是 application.yml：1.5.0 起服务端改为 Spring Boot 应用，1.4.2 的
+  #   registry.conf/file.conf 在 1.5.2 镜像里**已不存在**；旧文件保留在 ./seata/ 仅供 1.4.2 参考。
+  seata-server:
+    image: seataio/seata-server:1.5.2
+    container_name: seata-server
+    ports:
+      - "8091:8091"   # Seata 服务端口（客户端连接用）
+      - "7091:7091"   # 用户控制台（1.5.1 起才有，账号见 ./seata/application.yml 的 console.user）
+    environment:
+      # 必须显式指定注册 IP：容器默认会把 172.x 容器内网 IP 注册进 Nacos，Windows/其它机器连不上。
+      # 1.5.2 的 ContainerHelper 认这个变量（实测：不设时注册 172.19.0.2，设了即注册 192.168.189.128）。
+      - SEATA_IP=${VM_IP:-192.168.189.128}
+      - TZ=Asia/Shanghai              # 时区口径统一 CST
+    volumes:
+      - ./seata/application.yml:/seata-server/resources/application.yml:ro
+      # Alpine 镜像没有 tzdata（连 jre/lib/zi 都缺），必须挂宿主时区文件，否则 JVM 仍打 UTC 日志
+      - /etc/localtime:/etc/localtime:ro
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro
+    networks:
+      - infra-net
+    restart: unless-stopped
+
+  # ---------------- Elasticsearch 7.17.x（与 Spring Boot 2.7 的 spring-data-elasticsearch 4.4 对齐）----------------
+  elasticsearch:
+    image: elasticsearch:7.17.10
+    container_name: es
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m      # 单机小内存配置，避免和 Nacos 抢内存
+      - xpack.security.enabled=false
+      - bootstrap.memory_lock=true
+      - TZ=Asia/Shanghai
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+      - ./es/plugins:/usr/share/elasticsearch/plugins   # 把 IK 分词器解压到这里（目录名必须是 ik）
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    networks:
+      - infra-net
+    restart: unless-stopped
+
+  # ---------------- Kibana（可选，用来调索引、演示搜索效果）----------------
+  kibana:
+    image: kibana:7.17.10
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - I18N_LOCALE=zh-CN
+      - TZ=Asia/Shanghai
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - infra-net
+    restart: unless-stopped
+
+networks:
+  # 网络名统一到 local-life（与另外两份 compose 相同），Seata / ES 才能被应用容器按名字访问
+  # （应用侧容器里 LLMALL_ES_HOST=elasticsearch 就是靠这个网络解析的）。
+  infra-net:
+    external: true
+    name: ${APP_NETWORK:-local-life}
+
+volumes:
+  es-data:

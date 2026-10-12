@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: llmall-promotion-service
+  profiles:
+    active: local
+  cloud:
+    nacos:
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+      discovery:
+        namespace: ${NACOS_NAMESPACE:public}
+      config:
+        server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+        file-extension: yaml
+        shared-configs:
+          - dataId: shared-jdbc.yaml
+            refresh: true
+          - dataId: shared-mybatis.yaml
+            refresh: true
+          - dataId: shared-redis.yaml
+            refresh: true
+          - dataId: shared-mq.yaml
+            refresh: true
+          - dataId: shared-log.yaml
+            refresh: true
+          - dataId: shared-swagger.yaml
+            refresh: true

@@ -1,0 +1,35 @@
+server:
+  port: 8089
+feign:
+  okhttp:
+    enabled: true
+  sentinel:
+    enabled: true
+spring:
+  cloud:
+    sentinel:
+      # eager=true：启动即向控制台注册。默认是惰性的（false），要等第一次请求进来才注册，
+      # 结果就是"服务已经起来了、控制台里却什么都没有"，很容易误判成控制台没连上（实测踩过）。
+      # eager=false：**不要再改成 true**。eager=true 会在启动期就去连 Sentinel 控制台，
+      # 控制台没起（开发常态）时 SentinelAutoConfiguration 初始化直接 NPE → 整个服务启动失败（实测踩过）。
+      # 代价：控制台要等第一次请求进来才看到实例，这比"服务起不来"划算得多。
+      eager: false
+      transport:
+        dashboard: ${llmall.sentinel.dashboard:localhost:8090}
+      http-method-specify: true
+llmall:
+  swagger:
+    title: "同城生活电商综合服务系统 · 内容社区服务接口文档"
+    package: com.llmall.content.controller
+  db:
+    database: llmall-content
+  # 服务间内部调用凭证（默认值见下）。
+  # 用途：UserInfoInterceptor 只在该请求头与下面这个值完全一致时才采信 user-info 头 ——
+  # 服务监听 0.0.0.0，"能收到 user-info 头"不代表身份来自网关，直连端口可以自己伪造一个。
+  # 凭证由网关（认证通过后）与 Feign（DefaultFeignConfig）注入，网关会剥离外部自带的同名头。
+  # llmall-internal-demo-token 仅用于本地演示：生产应由网关注入/配置中心下发且不对外暴露，
+  # 并配合内网隔离；全项目所有服务必须配置成同一个值，否则会出现"请求全部未登录"。
+  internal:
+    token: llmall-internal-demo-token
+
+# ---------------------------------------------------------------------------\r\n# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。\r\n# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+\r\n# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：\r\n#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs\r\n# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；\r\n# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。\r\n# ---------------------------------------------------------------------------\r\nknife4j:\r\n  enable: true\r\n  setting:\r\n    language: zh_cn\r\nspringdoc:\r\n  api-docs:\r\n    path: /v3/api-docs\r\n  # 每个服务是一个独立限界上下文，直接扫本应用全部 controller，不必按包名逐个列举\r\n  group-configs:\r\n    - group: default\r\n      paths-to-match: '/**'\r\n      packages-to-scan: com.llmall\r\n

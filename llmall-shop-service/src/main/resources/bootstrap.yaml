@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: llmall-shop-service # 核心标识，Nacos 注册与配置都依赖它
+  profiles:
+    active: local
+  cloud:
+    nacos:
+      # 支持环境变量覆盖：本地开发用 192.168.189.128，容器/云服务器上用 NACOS_ADDR=nacos:8848
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+      # 服务发现
+      discovery:
+        namespace: ${NACOS_NAMESPACE:public}
+      # 配置中心
+      config:
+        server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+        file-extension: yaml
+        shared-configs:
+          - dataId: shared-jdbc.yaml
+            refresh: true
+          - dataId: shared-mybatis.yaml
+            refresh: true
+          - dataId: shared-redis.yaml
+            refresh: true
+          - dataId: shared-mq.yaml
+            refresh: true
+          - dataId: shared-log.yaml
+            refresh: true
+          - dataId: shared-swagger.yaml
+            refresh: true

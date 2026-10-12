@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: llmall-cart-service # 核心标识，Nacos、日志配置都依赖它
+  profiles:
+    active: local
+  cloud:
+    nacos:
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+      # 服务发现配置
+      discovery:
+        namespace: ${NACOS_NAMESPACE:public}
+      # 配置中心配置
+      config:
+        server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+        file-extension: yaml
+        shared-configs:
+          - dataId: shared-jdbc.yaml
+            refresh: true
+          - dataId: shared-log.yaml
+            refresh: true
+          - dataId: shared-swagger.yaml
+            refresh: true

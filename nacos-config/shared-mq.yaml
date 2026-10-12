@@ -1,0 +1,14 @@
+spring:
+  rabbitmq:
+    host: ${llmall.mq.host}
+    port: 5672
+    virtual-host: /llmall
+    username: llmall
+    password: 123
+    listener:
+      simple:
+        prefetch: 1
+        # Keep auto-ack globally; a service needing manual ack overrides it locally.
+        retry:
+          enabled: true
+          max-attempts: 3

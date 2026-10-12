@@ -1,0 +1,98 @@
+server:
+  port: 8080
+llmall:
+  jwt:
+    location: classpath:llmall.jks
+    alias: llmall
+    password: llmall123
+    tokenTTL: 30m      # 无感刷新时网关签发的新 access token 有效期
+    refreshTTL: 7d     # 与 llmall-user-service 保持一致（真正校验以 Redis 白名单为准）
+  redis:
+    host: ${LLMALL_REDIS_HOST:192.168.189.128}   # 容器化时由 LLMALL_REDIS_HOST 覆盖
+    pw: ${LLMALL_REDIS_PW:123456}   # 实测：虚拟机 Redis 的密码是 123456（不是 123）
+  # 服务间内部调用凭证：网关在"认证通过"后把它注入 x-internal-token 头一并转给下游。
+  # 为什么必须由网关注入：下游服务监听 0.0.0.0，只凭 user-info 头无法区分"经网关的可信请求"
+  # 与"直连服务端口自己伪造的请求"，因此 UserInfoInterceptor 要求两者同时具备才采信身份。
+  # 网关在入口处已剥离客户端自带的同名头，所以这个值不会流到外部。
+  # 所有服务（含网关自己）的 llmall.internal.token 必须一致；生产应由配置中心/密钥管理下发。
+  internal:
+    token: llmall-internal-demo-token
+  auth:
+    # ★【唯一权威来源】鉴权白名单只在这里生效 —— AuthProperties(@ConfigurationProperties("llmall.auth"))
+    # 只存在于网关模块，各业务服务的 yaml 里曾经也抄了一份 llmall.auth.excludePaths，但**没有任何读取方**，
+    # 属于典型的"死配置"：它不报错、看起来像已经限制了访问，实际完全不起作用（假安全）。
+    # 那几份已经删除；需要新增白名单请只改这里，并注意下面的"路径 + 方法"两条规则。
+    #
+    # 【只读白名单】这里的路径**只对安全方法（GET/HEAD/OPTIONS）生效**：
+    # 过滤器的判断是"路径 + 方法"两个维度，非安全方法一律走鉴权。
+    # 之所以必须这样：AntPathMatcher 的 `/**` 匹配任意多段路径，如果只按路径放行，
+    # 一条 /items/** （本意是"商品详情免登录可浏览"）就会把 DELETE /items/{id}、
+    # PUT /items/stock/restore（无限加库存）、PUT /items（改价/上下架）一起放出去。
+    # 因此：**只读路径不要写成 /**，写接口永远不要出现在这个清单里**。
+    excludePaths:
+      # 搜索：检索/热词/建议/附近公开（未登录也能搜）
+      - /search
+      - /search/hot-words
+      - /search/suggest
+      - /search/nearby
+      # 商品：只有列表/详情/分类/门店商品这些读接口公开
+      - /items
+      - /items/*
+      - /items/shop/*
+      - /items/categories
+      - /items/page
+      # 门店与门店类型（读）
+      - /shops
+      - /shops/*
+      - /shop-types
+      - /shop-types/
+      # 内容域：笔记列表/详情、"门店下笔记列表"公开可读（未登录也能看评价）
+      - /blogs
+      - /blogs/*
+      - /blogs/shop/**
+      - /blogs/*/comments
+      - /blogs/*/liked
+      - /blogs/*/liked-users
+      # 促销域：券列表是"未登录也能看有哪些券"的公开读接口，领取/秒杀/我的券需登录
+      - /vouchers/list
+      # 自测路径：由 llmall.debug.enabled 开关控制（**默认已关闭**，关闭时该路径没有对应端点即 404）。
+      # 需要跑越权验收（scripts/verify-auth.ps1）时，临时把 llmall-user-service 的该开关打开即可。
+      - /users/_debug/**
+    # 【公开写接口白名单】列表里的接口本身就是写方法（POST/PUT/...），无法靠"安全方法"规则
+    # 自动放行，必须显式登记。登记原则：只有"未登录也必须能调"的接口才配出现在这里，
+    # 目前仅限认证流程本身（登录/短信登录/发验证码）。
+    unsafeExcludePaths:
+      - /users/login
+      - /users/login/sms
+      - /users/code
+spring:
+  cloud:
+    sentinel:
+      transport:
+        # Sentinel 控制台地址：默认值按"控制台与应用同机（宿主 8090）"取，
+        # 换环境（控制台在 VM / 云服务器上）用启动参数 --llmall.sentinel.dashboard=ip:8090、
+        # 环境变量 LLMALL_SENTINEL_DASHBOARD，或 Nacos 配置里加 llmall.sentinel.dashboard 覆盖，均无需改代码。
+        # 控制台自身默认端口是 8080，会和网关冲突，启动时必须显式指定 8090。
+        # 控制台不在线只是连接告警，不影响 @SentinelResource 定义的限流/降级生效。
+        dashboard: ${llmall.sentinel.dashboard:localhost:8090}
+    gateway:
+      # 跨域：演示前端可能以 file:// 或其它端口打开，需要网关放行 CORS
+      # 生产环境请把 allowedOriginPatterns 收紧为具体域名
+      globalcors:
+        add-to-simple-url-handler-mapping: true
+        cors-configurations:
+          '[/**]':
+            allowedOriginPatterns: "*"
+            allowedMethods: "*"
+            allowedHeaders: "*"
+            allowCredentials: true
+            maxAge: 3600
+  redis:
+    host: ${llmall.redis.host}
+    port: 6379
+    password: ${llmall.redis.pw}
+    lettuce:
+      pool:
+        max-active: 10
+        max-idle: 10
+        min-idle: 1

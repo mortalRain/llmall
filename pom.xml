@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.tongcheng</groupId>
+    <artifactId>llmall</artifactId>
+    <packaging>pom</packaging>
+    <version>1.0.0</version>
+    <modules>
+        <!-- ===== 共享库（非服务）===== -->
+        <module>llmall-common</module>
+        <module>llmall-api</module>
+        <!-- ===== 网关 ===== -->
+        <module>llmall-gateway</module>
+        <!-- ===== 业务服务：一个域一个服务、一个服务一个库 ===== -->
+        <module>llmall-user-service</module>
+        <module>llmall-shop-service</module>
+        <module>llmall-item-service</module>
+        <module>llmall-cart-service</module>
+        <module>llmall-trade-service</module>
+        <module>llmall-pay-service</module>
+        <module>llmall-promotion-service</module>
+        <module>llmall-content-service</module>
+        <module>llmall-search-service</module>
+        <!--
+            单体遗留模块：不再参与构建，仅作为「单体 → 微服务拆分」的对照参考保留在目录里。
+            单体版已移动到 D:\dsh\legacy\legacy-monolith 作为「单体→微服务」对照素材，需要时可取消注释：<module>legacy-monolith</module>
+        -->
+    </modules>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.7.18</version>
+        <relativePath/>
+    </parent>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <org.projectlombok.version>1.18.30</org.projectlombok.version>
+        <!-- 版本组合说明（成套对齐，别再单独动其中一个）：
+             Spring Boot 2.7.18 = 2.7 线最终版（含安全补丁）
+             Spring Cloud 2021.0.8 = 与 Boot 2.7.x 同批发布的对应版本
+             Spring Cloud Alibaba 2021.0.6.2 = 官方适配 Boot 2.7.x + SC 2021.0.8 的版本，
+               它带来的 Nacos client 2.2.3 / Sentinel 1.8.6 / Seata 1.5.2 与我们的服务端配套 -->
+        <spring-cloud.version>2021.0.8</spring-cloud.version>
+        <spring-cloud-alibaba.version>2021.0.6.2</spring-cloud-alibaba.version>
+        <!-- MyBatis-Plus 3.5.3.2：官方声明支持 Spring Boot 2.7（原来的 3.4.2 发布于 2021 年，
+             早于 Boot 2.7，属"能用但没被这套组合验证过"）。 -->
+        <mybatis-plus.version>3.5.3.2</mybatis-plus.version>
+        <hutool.version>5.8.25</hutool.version>
+        <!-- 注意：**不再手写 mysql 驱动版本**，交给 spring-boot-dependencies 管理（2.7.18 → 8.0.33）。
+             原先钉 8.0.23 等于人为把驱动按在 2020 年的版本上，且与 Boot 的其余托管版本不同步。 -->
+    </properties>
+
+    <!-- 对依赖包进行管理 -->
+    <dependencyManagement>
+        <dependencies>
+            <!--spring cloud-->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!--spring cloud alibaba-->
+            <dependency>
+                <groupId>com.alibaba.cloud</groupId>
+                <artifactId>spring-cloud-alibaba-dependencies</artifactId>
+                <version>${spring-cloud-alibaba.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- 数据库驱动包管理 -->
+            <dependency>
+                <groupId>mysql</groupId>
+                <artifactId>mysql-connector-java</artifactId>
+                <version>${mysql.version}</version>
+            </dependency>
+            <!-- mybatis plus 管理 -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-boot-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <!--hutool工具包-->
+            <dependency>
+                <groupId>cn.hutool</groupId>
+                <artifactId>hutool-all</artifactId>
+                <version>${hutool.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+    <dependencies>
+        <!-- lombok 管理 -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${org.projectlombok.version}</version>
+        </dependency>
+        <!--单元测试-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--健康检查与运行时指标：所有服务/网关统一暴露 /actuator/health（容器与编排判断"真可用"的依据）。
+            注意：**不要**把 /actuator/** 加进网关白名单 —— 运维端点只允许内网直连服务端口。-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <!-- Prometheus 指标导出（/actuator/prometheus）：压测与容量规划要看 QPS/RT/连接池/JVM，
+            光有 health 不够。版本由 Boot 管理，与 micrometer-core 同批。 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- 统一产物名：各模块产出 target/<artifactId>.jar，便于 Dockerfile / 部署脚本按固定路径取包 -->
+        <finalName>${project.artifactId}</finalName>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.8.1</version>
+                    <configuration>
+                        <source>11</source> <!-- depending on your project -->
+                        <target>11</target> <!-- depending on your project -->
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

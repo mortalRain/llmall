@@ -1,0 +1,13 @@
+llmall:
+  db:
+    host: 192.168.189.128
+    pw: 123
+  redis:
+    host: 192.168.189.128
+    pw: 123456   # 实测：虚拟机 Redis 的密码是 123456（不是 123）
+  mq:
+    host: 192.168.189.128
+  es:
+    # ES 部署在 Windows 宿主（不占 VM 内存），服务也在宿主 IDEA 里跑 → 直连 localhost。
+    # 若以后服务进 VM 容器：改成 192.168.189.1（VMnet8 上的宿主地址），与 Sentinel 控制台同一套路。
+    host: localhost
