@@ -103,5 +103,15 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <!-- Sentinel 规则集（SentinelRuleConfig）需要编译期可见 sentinel-core 的类型。
+             用 provided 而不是 compile：
+               ① 真正的运行期依赖由**各服务**自己引入 starter（这样"哪个服务有 Sentinel"是显式的）；
+               ② 不把 sentinel 通过 common 传染给所有模块（网关是 WebFlux，用不到 MVC 那套适配器）。
+             SentinelRuleConfig 上有 @ConditionalOnClass(SphU)，因此没引 sentinel 的模块会被安全跳过。 -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-sentinel</artifactId>
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
 </project>

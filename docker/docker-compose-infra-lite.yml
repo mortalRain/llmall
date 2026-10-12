@@ -81,16 +81,31 @@ services:
   rabbitmq:
     image: rabbitmq:3.11-management
     container_name: mq                         # 与 VM 现役容器名一致（历史原因叫 mq，别改成 rabbitmq）
+    # ★ hostname 必须显式固定：RabbitMQ 的节点名是 rabbit@<hostname>，而 docker 默认用**容器 ID** 当 hostname。
+    #   容器一重建（升级镜像、改配置、VM 迁移）节点名就变，mnesia 里旧节点的数据会全部变成孤儿目录 ——
+    #   表现为"数据卷明明还在，但 vhost/队列/交换机全没了，只有 env 里那个默认用户"（实测踩过）。
+    #   固定成 mq 之后，重建容器仍然复用同一份节点数据。
+    hostname: mq
     environment:
       RABBITMQ_DEFAULT_USER: llmall
       RABBITMQ_DEFAULT_PASS: "123"
       RABBITMQ_DEFAULT_VHOST: /llmall
+      # ★ 延迟消息插件：trade 的"超时未支付自动关单"依赖 x-delayed-message 交换机。
+      #   镜像里预装了插件但**默认不启用**，且启用状态写在 /etc/rabbitmq/enabled_plugins（容器层，不在数据卷里）——
+      #   容器一重建就回到未启用状态，症状是 trade-service 启动即失败：
+      #   "Failed to declare queue(s):[trade.delay.order.queue] / NOT_FOUND"（实测踩过）。
+      #   把启用文件放进数据卷，并在初始化后执行一次：
+      #     docker exec mq sh -c "rabbitmq-plugins enable rabbitmq_delayed_message_exchange && \
+      #                           cp /etc/rabbitmq/enabled_plugins /var/lib/rabbitmq/enabled_plugins"
+      RABBITMQ_ENABLED_PLUGINS_FILE: /var/lib/rabbitmq/enabled_plugins
       # 内存水位：到 40% 就阻塞生产者而不是被 OOM 杀掉
       RABBITMQ_VM_MEMORY_HIGH_WATERMARK: "0.4"
       TZ: Asia/Shanghai                    # 时区口径统一 CST（VM 实测：光有 TZ 不够，还要挂时区文件，见下）
     volumes:
       # rabbitmq 镜像不带 tzdata，只设 TZ 时日志仍是 UTC —— 必须把宿主的时区文件挂进去
       - /etc/localtime:/etc/localtime:ro
+      # 数据（mnesia：vhost/用户/队列/交换机/消息）必须落卷，否则容器一删全没
+      - mq-data:/var/lib/rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -141,6 +156,9 @@ services:
 volumes:
   mysql-data:
   es-data:
+  # RabbitMQ 的 mnesia 数据（vhost/用户/队列/交换机/未被消费的消息）。
+  # 不落卷时容器一删全清，配合 hostname 固定才能真正做到"重建容器不丢 MQ 状态"。
+  mq-data:
 
 # 把 compose 的「默认网络」改名成共用的 external 网络：
 #   ① 本文件里所有服务（含以后新增的）自动接入，不必逐个写 networks:；

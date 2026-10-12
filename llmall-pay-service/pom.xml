@@ -60,7 +60,23 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
-    </dependencies>
+            <!-- Sentinel：熔断降级 + 限流。
+             为什么必须引：Feign 的 fallbackFactory **只有**在 Sentinel 作为 Feign 的 Targeter 时才生效
+             （Spring Cloud 默认的 DefaultTargeter 会直接忽略 fallback），
+             不引就会出现"同一个 ItemClient，在有 Sentinel 的服务里失败走兜底、在这里失败直接抛异常"的行为分叉。
+             历史上它导致过启动期 NPE（eager 注册 / 健康指标 / ContextUtil 静态初始化），
+             对应规避已落在配置里：shared-log.yaml 关掉 sentinel 健康指标，各服务 sentinel.eager: false。-->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-sentinel</artifactId>
+        </dependency>
+        <!-- Feign 换 OkHttp：HttpURLConnection 没有连接池，且**默认读超时是无限等待** ——
+             下游一旦卡住，调用方线程会被一起拖死（表现为整条链路雪崩）。
+             超时值见各自 application.yaml 的 feign.client.config.default。-->
+        <dependency>
+            <groupId>io.github.openfeign</groupId>
+            <artifactId>feign-okhttp</artifactId>
+        </dependency></dependencies>
     <build>
         <finalName>${project.artifactId}</finalName>
         <plugins>

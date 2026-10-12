@@ -61,11 +61,24 @@
             <groupId>com.alibaba.cloud</groupId>
             <artifactId>spring-cloud-starter-alibaba-seata</artifactId>
         </dependency>
-        <!-- 注意：这里**故意不引** spring-cloud-starter-alibaba-sentinel。
-             引了才能让它声明的 fallbackFactory 生效，但实测本机 Sentinel 初始化不稳
-             （eager 注册 NPE / SentinelHealthIndicator NPE / ContextUtil 静态初始化失败），
-             而项目至今没有任何 @SentinelResource 与规则 —— 引进来只有启动失败的风险、没有限流收益。
-             代价：PayClient/ItemClient/ShopClient 的降级类不生效（见 application.yaml 的说明）。-->
+        <!-- Sentinel + OkHttp（与 cart/content/promotion/search/shop 保持同一套口径）。
+             这里原本**故意不引** sentinel，当时的结论是"没有 @SentinelResource 与规则，引进来只增加启动风险"。
+             但那个结论漏掉了一半事实：Feign 的 fallbackFactory **只有** Sentinel 作为 Targeter 时才生效，
+             不引的代价是 PayClient/ItemClient/ShopClient 的降级类在本服务里完全不执行 ——
+             于是同一个 ItemClient 在 cart 里失败返回兜底、在 trade 里失败直接抛异常，
+             "同一故障两种行为"比"没有降级"更难排查。现在改为统一引入，并补上最小规则集
+             （见 llmall-common 的 SentinelRuleConfig）。历史上 Sentinel 的启动期 NPE 已由配置规避：
+             shared-log.yaml 关掉 sentinel 健康指标、各服务 sentinel.eager: false。-->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-sentinel</artifactId>
+        </dependency>
+        <!-- Feign 换 OkHttp：HttpURLConnection 无连接池且**无读超时**（默认无限等待），
+             下游卡住会把调用方线程拖死。超时见 application.yaml 的 feign.client.config.default。-->
+        <dependency>
+            <groupId>io.github.openfeign</groupId>
+            <artifactId>feign-okhttp</artifactId>
+        </dependency>
     </dependencies>
     <build>
         <finalName>${project.artifactId}</finalName>

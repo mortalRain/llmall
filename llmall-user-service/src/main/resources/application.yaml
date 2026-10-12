@@ -1,5 +1,20 @@
 server:
   port: 8084
+
+feign:
+  # OkHttp 连接池（配合上面 pom 里的 feign-okhttp），避免每次调用都新建 TCP 连接
+  okhttp:
+    enabled: true
+  # ★ 让 Feign 的 fallbackFactory 真正生效（llmall-api 里声明的 ItemClientFallback/PayClientFallback/ShopClientFallback）
+  sentinel:
+    enabled: true
+  client:
+    config:
+      default:
+        # 连接 2s / 读取 5s：必须显式配 —— Feign 默认**没有读超时**，
+        # 下游 hang 住时调用方会一直等，最终把线程池和连接池一起耗尽（而不是快速失败 + 走兜底）。
+        connectTimeout: 2000
+        readTimeout: 5000
 spring:
   application:
     name: llmall-user-service

@@ -1,9 +1,12 @@
 package com.llmall.item.controller;
 import com.llmall.api.dto.ItemDTO;
 import com.llmall.api.dto.OrderDetailDTO;
+import com.alibaba.csp.sentinel.annotation.SentinelResource;
+import com.alibaba.csp.sentinel.slots.block.BlockException;
 import com.llmall.common.constant.AuthConstants;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.common.exception.BadRequestException;
+import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.utils.BeanUtils;
 
@@ -58,8 +61,22 @@ public class ItemController {
 
     @Operation(summary = "分页查询商品（支持关键词/分类/门店/类型/价格区间筛选，默认只返回上架商品）")
     @GetMapping("/page")
+    // Sentinel 热点资源埋点：这是全站最热的读接口，规则见 llmall-common 的 SentinelRuleConfig
+    // （QPS 快速失败限流 + 异常比例熔断）。被限流/熔断时走 blockHandler，给出可读提示而不是 500 堆栈。
+    @SentinelResource(value = "itemPage", blockHandler = "pageQueryBlocked")
     public PageDTO<ItemDTO> queryItemByPage(ItemPageQuery query) {
         return itemService.pageQuery(query);
+    }
+
+    /**
+     * itemPage 的限流/熔断兜底。
+     *
+     * <p>签名必须与原方法一致、并在末尾多一个 {@link BlockException} —— 这是 Sentinel 注解的硬性约定，
+     * 写错的话不会报错，只会在真正触发时抛 {@code Error: block handler not found}，
+     * 属于"平时看不出、出事时才炸"的典型。
+     */
+    public PageDTO<ItemDTO> pageQueryBlocked(ItemPageQuery query, BlockException ex) {
+        throw new BizIllegalException("商品列表访问过于频繁，请稍后再试");
     }
 
     @Operation(summary = "商品分类聚合（商城首页筛选用）")
