@@ -3,6 +3,7 @@ package com.llmall.promotion.controller;
 import io.swagger.v3.oas.annotations.enums.ParameterIn;
 
 import com.llmall.common.exception.ForbiddenException;
+import com.llmall.promotion.domain.dto.VoucherPwDTO;
 import com.llmall.promotion.domain.vo.SeckillResultVO;
 import com.llmall.promotion.domain.vo.UserVoucherVO;
 import com.llmall.promotion.domain.vo.VoucherVO;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -75,20 +77,21 @@ public class VoucherController {
     }
 
     @Operation(summary = "领取普通券（一人一张；有库存配置的券会条件扣减库存），返回 user_voucher.id")
-    @Parameter(name = "pw", description = "支付密码：仅当券是付费券（pay_value>0）时必填", in = ParameterIn.QUERY)
     @PostMapping("/{id}/receive")
     public Long receive(@PathVariable("id") Long id,
-                        @RequestParam(value = "pw", required = false) String pw) {
+                        @RequestBody(required = false) VoucherPwDTO body) {
         // Z3：券有售价（pay_value>0，例如"89 元买 100 元代金券"）时必须真的收到这笔钱才发券，
         // 所以这里把支付密码透传给业务层；pay_value=0 的营销券仍然免费领取。
+        // 密码走请求体而不是 URL query：query 会进访问日志/浏览器历史/Referer（见 VoucherPwDTO 注释）。
+        String pw = body == null ? null : body.getPw();
         return voucherService.receive(id, pw);
     }
 
     @Operation(summary = "秒杀抢券（Redis+Lua 原子预扣，返回秒杀凭证 token；落库由 MQ 异步完成）")
-    @Parameter(name = "pw", description = "支付密码：仅当券是付费券（pay_value>0）时必填", in = ParameterIn.QUERY)
     @PostMapping("/seckill/{id}")
     public String seckill(@PathVariable("id") Long id,
-                          @RequestParam(value = "pw", required = false) String pw) {
+                          @RequestBody(required = false) VoucherPwDTO body) {
+        String pw = body == null ? null : body.getPw();
         return voucherService.seckill(id, pw);
     }
 

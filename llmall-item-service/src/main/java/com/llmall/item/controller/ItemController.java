@@ -1,8 +1,10 @@
 package com.llmall.item.controller;
 import com.llmall.api.dto.ItemDTO;
 import com.llmall.api.dto.OrderDetailDTO;
+import com.llmall.common.constant.AuthConstants;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.common.exception.BadRequestException;
+import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.utils.BeanUtils;
 
 import com.llmall.item.domain.po.Item;
@@ -11,6 +13,8 @@ import com.llmall.item.service.IItemService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import io.swagger.v3.oas.annotations.Operation;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 import javax.validation.Valid;
 import java.util.List;
@@ -23,6 +27,34 @@ import java.util.Map;
 public class ItemController {
 
     private final IItemService itemService;
+
+    /**
+     * 服务间调用凭证（配置项 {@code llmall.internal.service-token}）。
+     * <p>没有默认值：**配置缺失时一律拒绝**（fail-closed）—— 不能因为"运维忘了配"，
+     * 就把改库存、改商品、删商品这类管理接口变成"登录即可调用"的公开接口。
+     */
+    @Value("${llmall.internal.service-token:}")
+    private String serviceToken;
+
+    /**
+     * 校验"本请求来自我们自己的服务"。
+     *
+     * <p>为什么用 {@code x-service-token} 而不是 {@code x-internal-token}：后者由网关在认证通过后
+     * 注入，**任何登录用户的请求都带着它**，拿它判"内部调用"等于把用户请求一起放进来。
+     * {@code x-service-token} 网关只剥离、不注入（见 AuthGlobalFilter 第 0 步），外部无法伪造。
+     *
+     * <p>为什么校验放在控制器入口：库存扣减/回滚的服务端调用方是 trade-service 的 Feign
+     * （走 HTTP，会带该头），而**MQ 监听器是直接调 service 的**（不经过 HTTP）。
+     * 把边界画在 HTTP 入口既能挡掉外部调用，又不影响任何内部链路；反过来下沉到 service
+     * 反而会把 MQ 回调一起挡掉。
+     */
+    private void assertInternalCall(String requestToken) {
+        if (!StringUtils.hasText(serviceToken)
+                || !StringUtils.hasText(requestToken)
+                || !serviceToken.equals(requestToken)) {
+            throw new ForbiddenException("内部接口，禁止外部调用");
+        }
+    }
 
     @Operation(summary = "分页查询商品（支持关键词/分类/门店/类型/价格区间筛选，默认只返回上架商品）")
     @GetMapping("/page")
@@ -39,6 +71,11 @@ public class ItemController {
     @Operation(summary = "根据id批量查询商品")
     @GetMapping
     public List<ItemDTO> queryItemByIds(@RequestParam("ids") List<Long> ids){
+        // 匿名可访问的批量查询必须设上限：不设的话一个请求就能拉全表（36 万行商品），
+        // 既是廉价的放大攻击面，也会把连接池和带宽打满。100 足够覆盖结算页/购物车单屏需求。
+        if (ids.size() > 100) {
+            throw new BadRequestException("一次最多查询 100 个商品");
+        }
         return itemService.queryItemByIds(ids);
     }
 
@@ -60,27 +97,38 @@ public class ItemController {
         return BeanUtils.copyBean(item, ItemDTO.class);
     }
 
-    @Operation(summary = "新增商品")
+    @Operation(summary = "新增商品（内部接口，需服务间凭证）")
     @PostMapping
-    public void saveItem(@Valid @RequestBody ItemDTO item) {
+    public void saveItem(@Valid @RequestBody ItemDTO item,
+                         @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken) {
+        assertInternalCall(requestToken);
         // 新增：@Valid 让 ItemDTO 上的 @NotBlank/@NotNull/@Size 真正生效。
         // 没有它时，缺 name、负库存、超长名称都要走到 SQL 才失败，用户看到的是
         // 500「服务器内部异常」，而真正的原因（哪个字段不合法）只留在服务端日志里。
         itemService.save(BeanUtils.copyBean(item, Item.class));
     }
 
-    @Operation(summary = "更新商品状态")
+    @Operation(summary = "更新商品状态（内部接口，需服务间凭证）")
     @PutMapping("/status/{id}/{status}")
-    public void updateItemStatus(@PathVariable("id") Long id, @PathVariable("status") Integer status){
+    public void updateItemStatus(@PathVariable("id") Long id, @PathVariable("status") Integer status,
+                                 @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken){
+        assertInternalCall(requestToken);
+        // 状态只允许 1（上架）/2（下架）/3（已删除）三个取值：不校验的话，
+        // 一次手滑传 0 或 99 就能让商品在"上架列表"里凭空消失，且没有任何报错。
+        if (status == null || (status != 1 && status != 2 && status != 3)) {
+            throw new BadRequestException("非法的商品状态: " + status + "（只允许 1 上架 / 2 下架 / 3 删除）");
+        }
         Item item = new Item();
         item.setId(id);
         item.setStatus(status);
         itemService.updateById(item);
     }
 
-    @Operation(summary = "更新商品")
+    @Operation(summary = "更新商品（内部接口，需服务间凭证）")
     @PutMapping
-    public void updateItem(@Valid @RequestBody ItemDTO item) {
+    public void updateItem(@Valid @RequestBody ItemDTO item,
+                           @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken) {
+        assertInternalCall(requestToken);
         // 不允许修改商品状态，所以强制设置为null，更新时，就会忽略该字段
         item.setStatus(null);
         // 更新（@Valid 同新增：name/price/stock 必须给出，长度与取值范围同样受约束 ——
@@ -89,10 +137,17 @@ public class ItemController {
         itemService.updateById(BeanUtils.copyBean(item, Item.class));
     }
 
-    @Operation(summary = "根据id删除商品")
+    @Operation(summary = "根据id删除商品（内部接口，需服务间凭证）")
     @DeleteMapping("{id}")
-    public void deleteItemById(@PathVariable("id") Long id) {
-        itemService.removeById(id);
+    public void deleteItemById(@PathVariable("id") Long id,
+                               @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken) {
+        assertInternalCall(requestToken);
+        // 逻辑删除（status=3）而不是物理删除：item.id 被订单明细、库存流水引用，
+        // 物理删掉之后历史订单会指向一个不存在的商品，对账与售后都查不下去。
+        Item item = new Item();
+        item.setId(id);
+        item.setStatus(3);
+        itemService.updateById(item);
     }
 
     /**
@@ -109,15 +164,21 @@ public class ItemController {
      *  它在 MVC 参数解析之前抛出 ConstraintViolationException（统一异常处理没有对应 handler），
      *  结果本该是 400 的参数错误会变成 500「服务器内部异常」（实测踩过）。
      */
-    @Operation(summary = "批量扣减库存")
+    @Operation(summary = "批量扣减库存（内部接口，需服务间凭证）")
     @PutMapping("/stock/deduct")
-    public void deductStock(@RequestBody @Valid List<@Valid OrderDetailDTO> items){
+    public void deductStock(@RequestBody @Valid List<@Valid OrderDetailDTO> items,
+                            @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken){
+        // 库存是全网共享的热点数据：这个接口若能匿名调用，任何人对任意商品发一条请求就能把库存清零。
+        assertInternalCall(requestToken);
         itemService.deductStock(items);
     }
 
-    @Operation(summary = "批量回滚库存（订单取消/超时未支付）")
+    @Operation(summary = "批量回滚库存（内部接口，需服务间凭证）")
     @PutMapping("/stock/restore")
-    public void restoreStock(@RequestBody @Valid List<@Valid OrderDetailDTO> items){
+    public void restoreStock(@RequestBody @Valid List<@Valid OrderDetailDTO> items,
+                             @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken){
+        // 回滚同样是"改库存"：匿名可调用等于给了任何人"凭空加库存"的能力。
+        assertInternalCall(requestToken);
         itemService.restoreStock(items);
     }
 

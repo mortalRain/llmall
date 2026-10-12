@@ -40,4 +40,24 @@ spring:
     port: 5672 # 端口
     virtual-host: /llmall # 虚拟主机
     username: llmall # 用户名
-    password: 123 # ---------------------------------------------------------------------------\r\n# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。\r\n# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+\r\n# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：\r\n#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs\r\n# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；\r\n# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。\r\n# ---------------------------------------------------------------------------\r\nknife4j:\r\n  enable: true\r\n  setting:\r\n    language: zh_cn\r\nspringdoc:\r\n  api-docs:\r\n    path: /v3/api-docs\r\n  # 每个服务是一个独立限界上下文，直接扫本应用全部 controller，不必按包名逐个列举\r\n  group-configs:\r\n    - group: default\r\n      paths-to-match: '/**'\r\n      packages-to-scan: com.llmall\r\n
+    password: 123 # ---------------------------------------------------------------------------
+# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。
+# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+
+# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：
+#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs
+# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；
+# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。
+# ---------------------------------------------------------------------------
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  # 每个服务是一个独立限界上下文，直接扫本应用全部 controller，不必按包名逐个列举
+  group-configs:
+    - group: default
+      paths-to-match: '/**'
+      packages-to-scan: com.llmall
+

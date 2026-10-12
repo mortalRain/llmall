@@ -75,6 +75,49 @@ llmall:
   # "网关进来的请求全部未登录"或"服务间调用被当成伪造头"。
   internal:
     token: llmall-internal-demo-token
+    # 【凭证二】llmall.internal.service-token：**只给服务间调用**用的凭证。
+    # 商品写接口（新增/改状态/更新/删除/库存扣减/库存回滚）在控制器入口校验它 ——
+    # 这些接口都能直接改库存与商品状态，若能匿名调用，任何人一个请求就能把某商品库存清零。
+    # 网关照旧只剥离、不注入该头，所以外部拿不到它；Feign 调用由 DefaultFeignConfig 自动带上。
+    # 必须显式配置：不配置则这些接口一律 403（fail-closed），宁可内部调用报错也不能对外开放。
+    service-token: llmall-service-demo-token
 # keytool -genkeypair -alias llmall -keyalg RSA -keypass llmall123 -keystore llmall.jks -storepass llmall123
 
-# ---------------------------------------------------------------------------\r\n# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。\r\n# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+\r\n# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：\r\n#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs\r\n# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；\r\n# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。\r\n# ---------------------------------------------------------------------------\r\nknife4j:\r\n  enable: true\r\n  setting:\r\n    language: zh_cn\r\nspringdoc:\r\n  api-docs:\r\n    path: /v3/api-docs\r\n  # 每个服务是一个独立限界上下文，直接扫本应用全部 controller，不必按包名逐个列举\r\n  group-configs:\r\n    - group: default\r\n      paths-to-match: '/**'\r\n      packages-to-scan: com.llmall\r\n
+# ---------------------------------------------------------------------------
+# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。
+# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+
+# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：
+#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs
+# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；
+# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。
+# ---------------------------------------------------------------------------
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  # 每个服务是一个独立限界上下文，直接扫本应用全部 controller，不必按包名逐个列举
+  group-configs:
+    - group: default
+      paths-to-match: '/**'
+      packages-to-scan: com.llmall
+
+
+# ---------------------------------------------------------------------------
+# 运行指标暴露（其余 6 个服务从 Nacos 的 shared-log.yaml 拿同一份配置；
+# 这 4 个服务没有独立 bootstrap，所以在本地补一份，保证 /actuator/prometheus 口径一致）。
+# prometheus 端点用于压测与容量规划（QPS/RT/连接池/JVM），/actuator/** 不进网关白名单，仅内网直连。
+# 注意：本文件是**权威来源**，不要为了"少写几行"把它挪走 —— 挪到 Nacos 需要先给这 4 个服务补 bootstrap。
+# ---------------------------------------------------------------------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
