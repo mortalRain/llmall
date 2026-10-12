@@ -35,3 +35,11 @@ CREATE TABLE IF NOT EXISTS `stock_flow` (
 --   ↔ llmall-item.stock_flow（库存扣减流水）
 --   ↔ llmall-promotion.points_flow（积分发放流水）
 -- 任意一侧缺失即判定为"消息丢失"，生成补偿消息重投。
+
+-- ------------------------------------------------------------
+-- 商品列表的索引：首页/分类页按 (type, status) 过滤、按 sold 排序；门店页按 shop_id 过滤
+-- 没有这两个索引时 8.8 万行商品的分页查询会走全表扫（实测：status 单列索引对 type+status 组合选择率不足）
+-- ------------------------------------------------------------
+ALTER TABLE `item`r
+  ADD KEY `idx_type_status` (`type`, `status`),
+  ADD KEY `idx_shop_sold` (`shop_id`, `sold`);

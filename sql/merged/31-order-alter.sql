@@ -16,7 +16,9 @@ ALTER TABLE `order`
 
 ALTER TABLE `order`
   ADD KEY `idx_shop_time` (`shop_id`, `create_time`),
-  ADD KEY `idx_user_type` (`user_id`, `order_type`);
+  ADD KEY `idx_user_type` (`user_id`, `order_type`),
+  -- 核销码查重(generateVerifyCode)与核销校验(verifyOrder)都按 verify_code 查，没索引就是全表扫
+  ADD KEY `idx_verify_code` (`verify_code`);
 
 -- ------------------------------------------------------------
 -- 订单状态机（扩展点评的核销态，统一到一张表）

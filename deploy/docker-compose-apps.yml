@@ -27,7 +27,7 @@ x-app: &app
     LLMALL_DB_PW: ${LLMALL_DB_PW:-123}
     LLMALL_REDIS_HOST: ${LLMALL_REDIS_HOST:-redis}
     LLMALL_REDIS_PW: ${LLMALL_REDIS_PW:-123}
-    LLMALL_MQ_HOST: ${LLMALL_MQ_HOST:-rabbitmq}
+    LLMALL_MQ_HOST: ${LLMALL_MQ_HOST:-mq}   # VM 上的 RabbitMQ 容器名是 mq（不是 rabbitmq）
     LLMALL_ES_HOST: ${LLMALL_ES_HOST:-elasticsearch}
     # ⚠️ 默认值对应"用 docker/docker-compose-infra-lite.yml 从零起的一整套"（redis/rabbitmq 都是容器）。
     #    VM 现役环境不一样：RabbitMQ 容器叫 **mq**、Redis 是**原生安装**（要填宿主 IP），

@@ -67,8 +67,11 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
         ServerHttpRequest request = sanitized.getRequest();
 
         // ② 白名单放行：命中免鉴权路径就直接进业务，不再校验令牌（白名单必须带方法一起判断，见 isExclude）。
+        //    但"不强制登录"不等于"不认身份"：像 GET /search 这种接口，匿名能浏览、登录后要记搜索历史，
+        //    如果在这里直接 return，登录用户的 userId 就丢了 —— 表现为"搜索历史永远不记录"（实测踩过）。
+        //    所以这里做**可选身份**：带了有效令牌就把身份透传给下游，没带/不合法则按匿名继续，绝不 401。
         if (isExclude(request.getPath().toString(), request.getMethod())) {
-            return chain.filter(sanitized);
+            return forwardOptionalIdentity(sanitized, chain);
         }
 
         // ③ 取令牌并验签：没有令牌 → 401；验签失败 → 401；access 过期 → 用 refresh 无感换发，
@@ -139,9 +142,34 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
                 });
     }
 
+    /**
+     * 白名单路径的**可选身份**透传：验签通过就注入身份，否则按匿名放行。
+     *
+     * <p>刻意不复用主流程的失败分支：这里任何异常（令牌过期/类型不对/Redis 抖动）都只能退化成"匿名"，
+     * <b>绝不能</b>变成 401 —— 否则白名单就形同虚设，未登录用户会被莫名拒绝，而登录用户又拿不到身份。
+     */
+    private Mono<Void> forwardOptionalIdentity(ServerWebExchange exchange, GatewayFilterChain chain) {
+        String token = firstHeader(exchange.getRequest(), AuthConstants.HEADER_AUTHORIZATION);
+        if (token == null || token.isEmpty()) {
+            return chain.filter(exchange);
+        }
+        TokenPayload payload;
+        try {
+            payload = jwtTool.parse(token);
+        } catch (Exception e) {
+            return chain.filter(exchange);
+        }
+        if (!AuthConstants.TOKEN_TYPE_ACCESS.equals(payload.getType())) {
+            return chain.filter(exchange);
+        }
+        return isBlacklisted(payload).flatMap(blacklisted ->
+                Boolean.TRUE.equals(blacklisted)
+                        ? chain.filter(exchange)
+                        : forward(exchange, chain, payload.getUserId()));
+    }
+
     /** 黑名单查询。Redis 异常时放行（可用性优先），并打错误日志告警 */
-    private Mono<Boolean> isBlacklisted(TokenPayload payload) {
-        if (payload.getJti() == null) {
+    private Mono<Boolean> isBlacklisted(TokenPayload payload) {        if (payload.getJti() == null) {
             return Mono.just(false);
         }
         return redisTemplate.hasKey(AuthConstants.REDIS_BLACKLIST + payload.getJti())

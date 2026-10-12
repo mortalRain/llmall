@@ -10,6 +10,7 @@ import com.llmall.common.domain.PageDTO;
 import com.llmall.common.domain.PageQuery;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.UnauthorizedException;
+import com.llmall.common.utils.UserContext;
 import com.llmall.content.domain.dto.BlogFormDTO;
 import com.llmall.content.domain.po.Blog;
 import com.llmall.content.domain.po.BlogComments;
@@ -121,6 +122,17 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         Blog blog = getById(id);
         if (blog == null) {
             throw new BizIllegalException("笔记不存在: " + id);
+        }
+        // 合规要求：对外只可见 status=1（已发布）。0 待审核、2 已屏蔽的内容如果匿名可读，
+        // 审核就等于形同虚设 —— 内容被下架后仍能通过直连 URL/收藏链接访问到。
+        // 作者本人例外（可预览自己待审核的内容）；对其他人统一按"不存在"处理，
+        // 不返回"这条内容存在但被屏蔽了"，避免泄露审核状态。
+        if (!Integer.valueOf(STATUS_PUBLISHED).equals(blog.getStatus())) {
+            Long current = UserContext.getUser();
+            boolean isAuthor = current != null && current.equals(blog.getUserId());
+            if (!isAuthor) {
+                throw new BizIllegalException("笔记不存在: " + id);
+            }
         }
         return blog;
     }
@@ -235,6 +247,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         Page<BlogComments> result = blogCommentsMapper.selectPage(new Page<>(current, pageSize),
                 new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<BlogComments>()
                         .eq(BlogComments::getBlogId, blogId)
+                        // 只出 status=0（正常）的评论：1 被举报、2 禁止查看 的评论如果照样返回，
+                        // "评论审核"就白做了 —— 违规内容会一直在详情页挂着。
+                        .eq(BlogComments::getStatus, 0)
                         .orderByDesc(BlogComments::getCreateTime));
         return PageDTO.of(result, BlogComments.class);
     }

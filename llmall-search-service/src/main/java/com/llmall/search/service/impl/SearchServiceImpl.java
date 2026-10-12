@@ -24,6 +24,7 @@ import com.llmall.search.mapper.ShopSearchDocMapper;
 import com.llmall.search.service.ISearchService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
@@ -152,17 +153,31 @@ public class SearchServiceImpl implements ISearchService {
             return;
         }
         redisTemplate.opsForZSet().incrementScore(HOT_WORD_KEY, keyword, 1D);
+        // 两个治理动作，缺一不可（该 ZSet 的写入口是**匿名可访问**的搜索接口）：
+        //  ① 给 key 设 TTL：不设的话这个 ZSet 会永久增长，且"热词"永远是历史累计值，
+        //     看不出近期趋势；过期即从零开始，天然形成滚动窗口。
+        //  ② 按排名截断：只保留 TopN。否则任何匿名用户都能靠脚本刷入海量随机关键词，
+        //     把 ZSet 撑成内存炸弹（每个成员都要占内存，且没有上限）。
+        redisTemplate.expire(HOT_WORD_KEY, HOT_WORD_TTL);
+        Long size = redisTemplate.opsForZSet().zCard(HOT_WORD_KEY);
+        if (size != null && size > HOT_WORD_MAX_SIZE) {
+            // 移除排名在 TopN 之外的部分（下标从 0 开始，-HOT_WORD_MAX_SIZE-1 即保留前 N 个）
+            redisTemplate.opsForZSet().removeRange(HOT_WORD_KEY, 0, -HOT_WORD_MAX_SIZE - 1);
+        }
     }
 
     private void saveHistory(Long userId, String keyword) {
-        // 同一用户同一关键词只保留最近一条：先查再插（数据量小，成本可接受）
-        SearchHistory exist = historyMapper.selectOne(new LambdaQueryWrapper<SearchHistory>()
-                .eq(SearchHistory::getUserId, userId)
-                .eq(SearchHistory::getKeyword, keyword));
-        if (exist != null) {
-            return;
+        // 依赖表上的唯一键 (user_id, keyword) 做去重：先查后插在并发下必然插入重复行
+        // （两个请求同时查到"不存在"），而重复历史会让"最近搜索"出现两条一样的词。
+        // 这里直接插入并吞掉唯一键冲突 —— 冲突本身就代表"已经有了"，无需任何处理。
+        try {
+            historyMapper.insert(new SearchHistory().setUserId(userId).setKeyword(keyword));
+        } catch (DuplicateKeyException e) {
+            // 已经搜过同一个词：忽略即可（日志降到 debug，避免正常路径刷 warn）
+            if (log.isDebugEnabled()) {
+                log.debug("搜索历史已存在，忽略: userId={}, kw={}", userId, keyword);
+            }
         }
-        historyMapper.insert(new SearchHistory().setUserId(userId).setKeyword(keyword));
     }
 
     @Override

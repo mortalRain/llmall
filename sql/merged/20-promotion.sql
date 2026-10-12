@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS `user_voucher` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_user_voucher` (`user_id`, `voucher_id`) COMMENT '一人一单的数据库兜底（Redis 是第一道闸）',
   KEY `idx_user_status` (`user_id`, `status`),
-  KEY `idx_order` (`order_id`)
+  KEY `idx_order` (`order_id`),
+  -- 按券维度统计已发放数量（voucher_id 单独查询用不上 uk_user_voucher 的前导列 user_id）
+  KEY `idx_voucher` (`voucher_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '用户券实例表';
 
 -- 积分流水已移到 llmall-user（见 21-user-alter.sql）：

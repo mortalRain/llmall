@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS `cart` (
   `create_time` timestamp NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `key_user_item_id` (`user_id`,`item_id`) USING BTREE
+  UNIQUE KEY `uk_user_item_id` (`user_id`,`item_id`) USING BTREE COMMENT '并发加购兜底：唯一键让"先查后插"的重复行不可能出现'
 ) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb3 ROW_FORMAT=COMPACT COMMENT='订单详情表';
 
 -- 正在导出表  llmall.cart 的数据：~1 rows (大约)

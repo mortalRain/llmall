@@ -80,7 +80,7 @@ services:
 
   rabbitmq:
     image: rabbitmq:3.11-management
-    container_name: rabbitmq
+    container_name: mq                         # 与 VM 现役容器名一致（历史原因叫 mq，别改成 rabbitmq）
     environment:
       RABBITMQ_DEFAULT_USER: llmall
       RABBITMQ_DEFAULT_PASS: "123"

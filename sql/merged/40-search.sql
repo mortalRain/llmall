@@ -48,5 +48,6 @@ CREATE TABLE IF NOT EXISTS `search_history` (
   `keyword`     VARCHAR(64)     NOT NULL,
   `create_time` TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `idx_user_time` (`user_id`, `create_time` DESC)
+  KEY `idx_user_time` (`user_id`, `create_time` DESC),
+  UNIQUE KEY `uk_user_word` (`user_id`, `keyword`) COMMENT '同一用户同一关键词只留一条：去重交给数据库，避免先查后插的并发重复'
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '用户搜索历史表';

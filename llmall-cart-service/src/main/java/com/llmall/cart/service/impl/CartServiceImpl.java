@@ -13,6 +13,7 @@ import com.llmall.cart.mapper.CartMapper;
 import com.llmall.cart.service.ICartService;
 import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.BizIllegalException;
+import com.llmall.common.exception.UnauthorizedException;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.utils.BeanUtils;
 import com.llmall.common.utils.CollUtils;
@@ -38,6 +39,9 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements ICartService {
 
+    /** 单个商品的加购数量上限：不封顶时 num 可以一路加到 int 溢出（变负数），下游无法解释 */
+    private static final int MAX_NUM_PER_ITEM = 99;
+
     //private final IItemService itemService;
     private final ItemClient itemClient;
     private final CartProperties cartProperties;
@@ -46,23 +50,29 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
     public void addItem2Cart(CartFormDTO cartFormDTO) {
         // 1.获取登录用户
         Long userId = UserContext.getUser();
-
-        // 2.判断是否已经存在
-        if(checkItemExists(cartFormDTO.getItemId(), userId)){
-            // 2.1.存在，则更新数量
-            baseMapper.updateNum(cartFormDTO.getItemId(), userId);
-            return;
+        if (userId == null) {
+            throw new UnauthorizedException("未登录");
         }
-        // 2.2.不存在，判断是否超过购物车数量
-        checkCartsFull(userId);
 
-        // 3.新增购物车条目
-        // 3.1.转换PO
-        Cart cart = BeanUtils.copyBean(cartFormDTO, Cart.class);
-        // 3.2.保存当前用户
-        cart.setUserId(userId);
-        // 3.3.保存到数据库
-        save(cart);
+        // 2.一次原子 upsert 完成"有则加数量、无则插入"：
+        //    老写法是"先 checkItemExists 再 update/save"，并发下（用户连点两次加购）
+        //    两个请求都会查到"不存在"，于是插入两行同样的商品 —— 这是实打实的线上问题，
+        //    不是理论风险。改为依赖唯一键 uk_user_item_id + ON DUPLICATE KEY UPDATE 之后
+        //    并发一定能收敛到一行，中间也没有窗口期。
+        Integer maxAmount = cartProperties.getMaxAmount();
+        int maxEntries = (maxAmount == null || maxAmount <= 0) ? 10 : maxAmount;
+        int affected = baseMapper.upsertItem(userId, cartFormDTO, MAX_NUM_PER_ITEM);
+
+        // 3.只有"新增条目"（affected=1）才需要校验条目数上限：
+        //    更新已有条目不会让种类数变多，不该因为购物车已满而拒绝加数量。
+        if (affected == 1) {
+            long count = lambdaQuery().eq(Cart::getUserId, userId).count();
+            if (count > maxEntries) {
+                // 超限就把刚插入的这条撤掉，保持"最多 maxEntries 种商品"的原有约束
+                lambdaUpdate().eq(Cart::getUserId, userId).eq(Cart::getItemId, cartFormDTO.getItemId()).remove();
+                throw new BizIllegalException(StrUtil.format("购物车最多放 {} 种商品", maxEntries));
+            }
+        }
     }
 
     @Override
@@ -171,22 +181,5 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
                 .in(Cart::getItemId, itemIds);
         // 2.删除
         remove(queryWrapper);
-    }
-
-    private void checkCartsFull(Long userId) {
-        // MyBatis-Plus 3.5.x 起链式 count() 返回 Long（3.4.x 是 int），类型必须跟着改
-        long count = lambdaQuery().eq(Cart::getUserId, userId).count();
-        if (count >= cartProperties.getMaxAmount()) {
-            throw new BizIllegalException(StrUtil.format("用户购物车课程不能超过{}", cartProperties.getMaxAmount()));
-        }
-    }
-
-    private boolean checkItemExists(Long itemId, Long userId) {
-        // MyBatis-Plus 3.5.x 起链式 count() 返回 Long（3.4.x 是 int），类型必须跟着改
-        long count = lambdaQuery()
-                .eq(Cart::getUserId, userId)
-                .eq(Cart::getItemId, itemId)
-                .count();
-        return count > 0;
     }
 }
