@@ -79,7 +79,7 @@ SELECT 940000 + (b.id - 910000) * 3 + n.n,
          ELSE '回复楼上：周末最好提前一天订，现场等位要 20 分钟左右。'
        END,
        (b.id + n.n) % 12,
-       1,   -- status=1 已发布（0 是待审核，接口只返回已发布的评论）
+       0,   -- status=0 正常（建表与写路径的口径：0 正常 / 1 被举报 / 2 禁止查看；接口只返回 0）
        DATE_ADD(b.create_time, INTERVAL (n.n * 3 + 1) HOUR),
        NOW()
 FROM `llmall-content`.`blog` b

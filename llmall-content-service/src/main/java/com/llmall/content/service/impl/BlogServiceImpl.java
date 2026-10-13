@@ -10,6 +10,7 @@ import com.llmall.common.domain.PageDTO;
 import com.llmall.common.domain.PageQuery;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.UnauthorizedException;
+import com.llmall.common.utils.CollUtils;
 import com.llmall.common.utils.UserContext;
 import com.llmall.content.domain.dto.BlogFormDTO;
 import com.llmall.content.domain.po.Blog;
@@ -21,20 +22,21 @@ import com.llmall.content.mapper.BlogMapper;
 import com.llmall.content.mq.ContentEventPublisher;
 import com.llmall.content.service.IBlogService;
 import com.llmall.content.service.IFollowService;
+import com.llmall.content.support.TxAfterCommit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
 import static com.llmall.content.constant.ContentRedisConstants.BLOG_LIKED_KEY;
+import static com.llmall.content.constant.ContentRedisConstants.BLOG_LIKED_TTL;
+import static com.llmall.content.constant.ContentRedisConstants.CACHE_SET_MAX;
 
 /**
  * 内容域服务实现。
@@ -85,7 +87,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         // 3. 推送到粉丝收件箱（写扩散，粉丝过多则跳过，改由读时拉取）
         followService.pushToFollowers(userId, blog.getId());
 
-        // 4. 事务提交后再投递事件
+        // 4. 事务提交后再投递事件（原因与"Redis 写为什么也要挪到提交后"见 TxAfterCommit 的类注释）
         ReviewCreatedEvent event = new ReviewCreatedEvent()
                 .setBizId(String.valueOf(blog.getId()))
                 .setBlogId(blog.getId())
@@ -93,40 +95,38 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .setUserId(userId)
                 .setScore(blog.getScore())
                 .setOccurredAt(System.currentTimeMillis());
-        publishAfterCommit(() -> eventPublisher.publishReviewCreated(event));
+        // afterCommit 只保证时序正确，不等于可靠投递 —— 提交后进程崩溃仍会丢消息，
+        // 真正可靠需要本地消息表 + 重试 + 对账。
+        TxAfterCommit.run("review.created blogId=" + blog.getId(),
+                () -> eventPublisher.publishReviewCreated(event));
 
         log.info("评价发布成功: blogId={}, shopId={}, score={}", blog.getId(), blog.getShopId(), blog.getScore());
         return blog.getId();
     }
 
-    /**
-     * 事务提交后再执行：事务未提交就发消息，消费者可能先于提交读到数据（甚至读不到）。
-     * 注意 afterCommit 只保证时序正确，不等于可靠投递 —— 提交后进程崩溃仍会丢消息，
-     * 真正可靠需要本地消息表 + 重试 + 对账。
-     */
-    private void publishAfterCommit(Runnable action) {
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    action.run();
-                }
-            });
-        } else {
-            action.run();
-        }
-    }
-
     @Override
     public Blog queryDetail(Long id) {
+        // 合规要求：对外只可见 status=1（已发布），见 requireVisibleBlog
+        return requireVisibleBlog(id);
+    }
+
+    /**
+     * 笔记可见性校验（合规，审计 B5 第 5 条）。
+     *
+     * <p>0 待审核、2 已屏蔽的内容如果匿名可读，审核就等于形同虚设 ——
+     * 内容被下架后仍能通过直连 URL/收藏链接访问到。
+     * 作者本人例外（可预览自己待审核的内容）；对其他人统一按"不存在"处理，
+     * 不返回"这条内容存在但被屏蔽了"，避免泄露审核状态。
+     *
+     * <p>注意：这里读的登录身份来自 {@code user-info} 请求头，而该头只有在携带内部凭证
+     * {@code x-internal-token} 时才被采信（见 UserInfoInterceptor），网关入口又会剥离客户端伪造的这两个头，
+     * 所以"作者例外"不会被外部调用者伪造成任意作者。
+     */
+    private Blog requireVisibleBlog(Long id) {
         Blog blog = getById(id);
         if (blog == null) {
             throw new BizIllegalException("笔记不存在: " + id);
         }
-        // 合规要求：对外只可见 status=1（已发布）。0 待审核、2 已屏蔽的内容如果匿名可读，
-        // 审核就等于形同虚设 —— 内容被下架后仍能通过直连 URL/收藏链接访问到。
-        // 作者本人例外（可预览自己待审核的内容）；对其他人统一按"不存在"处理，
-        // 不返回"这条内容存在但被屏蔽了"，避免泄露审核状态。
         if (!Integer.valueOf(STATUS_PUBLISHED).equals(blog.getStatus())) {
             Long current = UserContext.getUser();
             boolean isAuthor = current != null && current.equals(blog.getUserId());
@@ -169,8 +169,15 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         }
         // 计数用 SQL 自增，避免"读出来+1再写回"在并发下丢更新
         lambdaUpdate().eq(Blog::getId, blogId).setSql("liked = liked + 1").update();
-        // ZSet 记录点赞人与时间：既能判重、又能做"点赞排行榜"
-        redisTemplate.opsForZSet().add(BLOG_LIKED_KEY + blogId, String.valueOf(userId), System.currentTimeMillis());
+        // ZSet 记录点赞人与时间：既能判重、又能做"点赞排行榜"。
+        // 写 Redis 必须在事务提交之后：点赞事务一旦回滚，Redis 里不能留下这个"DB 没有的赞"。
+        // 幂等性不受影响：唯一索引 uk_blog_user(blog_id,user_id) 挡住重复点赞，ZADD 同 member 也是覆盖写。
+        TxAfterCommit.run("like blog=" + blogId + " user=" + userId, () -> {
+            String key = BLOG_LIKED_KEY + blogId;
+            redisTemplate.opsForZSet().add(key, String.valueOf(userId), System.currentTimeMillis());
+            // ZSet 也必须带 TTL，否则每篇被赞过的笔记都会永久留一个 key（见 ContentRedisConstants）
+            redisTemplate.expire(key, BLOG_LIKED_TTL);
+        });
         return nz(blog.getLiked()) + 1;
     }
 
@@ -188,7 +195,12 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             lambdaUpdate().eq(Blog::getId, blogId)
                     // GREATEST 兜底，避免出现负数点赞数
                     .setSql("liked = GREATEST(liked - 1, 0)").update();
-            redisTemplate.opsForZSet().remove(BLOG_LIKED_KEY + blogId, String.valueOf(userId));
+            // 同样等提交后再删：否则事务回滚会留下"DB 还点着赞、排行榜里人没了"的不一致
+            TxAfterCommit.run("unlike blog=" + blogId + " user=" + userId, () -> {
+                String key = BLOG_LIKED_KEY + blogId;
+                redisTemplate.opsForZSet().remove(key, String.valueOf(userId));
+                redisTemplate.expire(key, BLOG_LIKED_TTL);
+            });
         }
         Blog blog = getById(blogId);
         return blog == null ? 0 : nz(blog.getLiked());
@@ -209,12 +221,65 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     @Override
     public List<Long> queryLikedUsers(Long blogId, Integer limit) {
         int size = (limit == null || limit <= 0) ? 5 : Math.min(limit, 50);
-        Set<String> users = redisTemplate.opsForZSet().reverseRange(BLOG_LIKED_KEY + blogId, 0, size - 1);
-        List<Long> result = new ArrayList<>();
-        if (users != null) {
-            users.forEach(u -> result.add(Long.valueOf(u)));
+        // 这个接口在网关白名单里（GET /blogs/*/liked-users，匿名可读）：
+        // 已屏蔽/待审核的笔记连"点赞的人是谁"都不该再暴露出去
+        requireVisibleBlog(blogId);
+        String key = BLOG_LIKED_KEY + blogId;
+        Set<String> users = redisTemplate.opsForZSet().reverseRange(key, 0, size - 1);
+        if (CollUtils.isEmpty(users)) {
+            // 缓存未命中（Redis 重启/被清/TTL 到期）→ 回源 DB 的 blog_like。
+            // 排行榜是"最近点赞的人"，blog_like 有 create_time，直接按时间倒序就是同样的榜
+            List<BlogLike> rows = blogLikeMapper.selectList(
+                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<BlogLike>()
+                            .eq(BlogLike::getBlogId, blogId)
+                            .orderByDesc(BlogLike::getCreateTime)
+                            .last("LIMIT " + size));
+            if (CollUtils.isEmpty(rows)) {
+                return new ArrayList<>();
+            }
+            rebuildLikedZSet(blogId);
+            List<Long> fallback = new ArrayList<>(rows.size());
+            rows.forEach(r -> fallback.add(r.getUserId()));
+            return fallback;
         }
+        List<Long> result = new ArrayList<>();
+        users.forEach(u -> result.add(Long.valueOf(u)));
         return result;
+    }
+
+    /**
+     * 用 DB 回填点赞 ZSet（缓存自愈）。
+     *
+     * <p>只在"缓存整体缺失"时调用，且**必须整表重建**：如果只把前 N 个点赞人写进去，
+     * ZSet 就成了"部分视图"，下次有人请求 limit=50 时 reverseRange 只能拿到这 N 个，
+     * 返回一个偏少但不报错的榜 —— 部分填充比完全不填更危险（错得静默）。
+     * 超过 CACHE_SET_MAX 的笔记放弃回填：几万成员的 ZADD 会阻塞 Redis 单线程，
+     * 而这条读路径回源一次 DB 本来就不贵。
+     */
+    private void rebuildLikedZSet(Long blogId) {
+        Long total = blogLikeMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<BlogLike>()
+                        .eq(BlogLike::getBlogId, blogId));
+        if (total == null || total == 0L) {
+            return;
+        }
+        if (total > CACHE_SET_MAX) {
+            log.debug("笔记 {} 点赞数 {} 超过缓存重建上限 {}，跳过 ZSet 回填",
+                    blogId, total, CACHE_SET_MAX);
+            return;
+        }
+        List<BlogLike> all = blogLikeMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<BlogLike>()
+                        .eq(BlogLike::getBlogId, blogId));
+        String key = BLOG_LIKED_KEY + blogId;
+        all.forEach(like -> {
+            long score = like.getCreateTime() == null
+                    ? System.currentTimeMillis()
+                    : like.getCreateTime().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+            redisTemplate.opsForZSet().add(key, String.valueOf(like.getUserId()), score);
+        });
+        redisTemplate.expire(key, BLOG_LIKED_TTL);
+        log.info("点赞 ZSet 缓存重建: blogId={}, size={}", blogId, all.size());
     }
 
     @Override
@@ -244,11 +309,17 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         // 同 pageByShop：评论是"外部可写、数量无上限"的数据，更不能让调用方自己决定单页多大
         int current = PageQuery.normalizePageNo(page);
         int pageSize = PageQuery.normalizeSize(size, 10);
+        // 【补漏】光过滤评论自身的 status 不够：这个接口同样在白名单里（GET /blogs/*/comments），
+        // 一条被屏蔽（或还没过审）的笔记，只要 URL 猜得到，它的评论列表照样能整页读出来 ——
+        // 笔记详情已经挡住了，评论列表却还开着后门（审计 B5"只改了一半"指的就是这里）。
+        requireVisibleBlog(blogId);
         Page<BlogComments> result = blogCommentsMapper.selectPage(new Page<>(current, pageSize),
                 new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<BlogComments>()
                         .eq(BlogComments::getBlogId, blogId)
                         // 只出 status=0（正常）的评论：1 被举报、2 禁止查看 的评论如果照样返回，
                         // "评论审核"就白做了 —— 违规内容会一直在详情页挂着。
+                        // 口径以本模块的建表语句与 BlogComments 字段注释为准（0 正常 / 1 被举报 / 2 禁止查看），
+                        // 新增评论也写 0（见 comment 方法），读写两侧一致。
                         .eq(BlogComments::getStatus, 0)
                         .orderByDesc(BlogComments::getCreateTime));
         return PageDTO.of(result, BlogComments.class);
