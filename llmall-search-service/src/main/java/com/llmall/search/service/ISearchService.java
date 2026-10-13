@@ -1,11 +1,11 @@
 package com.llmall.search.service;
 
 import com.llmall.api.dto.ShopDTO;
-import com.llmall.api.event.ShopHotChangedEvent;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.search.domain.po.SearchHistory;
 import com.llmall.search.domain.vo.HotWordVO;
 import com.llmall.search.domain.vo.SearchEngineStatusVO;
+import com.llmall.search.event.ShopDocChangedEvent;
 
 import java.util.List;
 
@@ -45,8 +45,25 @@ public interface ISearchService {
     /** 清空我的搜索历史 */
     void clearHistory(Long userId);
 
-    /** 消费 shop.hot.changed：增量维护搜索视图（upsert 幂等 + 事件时间防乱序） */
-    void applyShopHotChanged(ShopHotChangedEvent event);
+    /**
+     * 消费 shop.hot.changed：增量维护搜索视图。
+     *
+     * 事件体是**整行门店快照**（含 sold/status），所以这里做的是**整行 upsert** +
+     * 事件时间防乱序（审计 B4：原来只更新 hotScore/comments/score 三列，
+     * 导致 shop_search_doc.sold 只在全量重建时才更新，销量被永久冻结）。
+     *
+     * 幂等闸门（consume_record）由调用方 ShopHotChangedListener 在同一个事务里先落，
+     * 保证"这条事件处理过没有"这个判据与视图更新同生共死。
+     */
+    void applyShopHotChanged(ShopDocChangedEvent event);
+
+    /**
+     * 对账判据：这条门店变更事件在本域是否已处理（供 llmall-shop-service 的对账任务查询）。
+     *
+     * 判据就是本域 consume_record 里有没有 (SHOP_HOT_CHANGED, bizId, llmall-search-service) 这一行 ——
+     * 它与视图更新同事务写入，所以"有行 ⇒ 一定处理成功"。
+     */
+    boolean isShopHotChangedConsumed(String bizId);
 
     /** 全量重建搜索视图（首次部署 / 视图损坏时使用），返回同步条数 */
     int rebuildSearchView();

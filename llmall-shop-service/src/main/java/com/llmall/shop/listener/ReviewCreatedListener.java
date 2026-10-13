@@ -3,9 +3,7 @@ package com.llmall.shop.listener;
 import com.llmall.api.event.ReviewCreatedEvent;
 import com.llmall.common.constant.MqConstants;
 import com.llmall.shop.domain.po.ConsumeRecord;
-import com.llmall.shop.domain.po.Shop;
 import com.llmall.shop.mapper.ConsumeRecordMapper;
-import com.llmall.shop.mq.ShopEventPublisher;
 import com.llmall.shop.service.IShopService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -43,7 +41,6 @@ public class ReviewCreatedListener {
 
     private final IShopService shopService;
     private final ConsumeRecordMapper consumeRecordMapper;
-    private final ShopEventPublisher eventPublisher;
 
     @RabbitListener(bindings = @QueueBinding(
             value = @Queue(name = MqConstants.REVIEW_CREATED_QUEUE, durable = "true"),
@@ -78,13 +75,14 @@ public class ReviewCreatedListener {
             log.warn("评价对应的门店不存在（不再重试，占位保留）: shopId={}, bizId={}", event.getShopId(), bizId);
             return;
         }
-        // 3. 重算热度（写入 DB + 榜单 ZSet），并通知搜索域
+        // 3. 重算热度（写入 DB + 榜单 ZSet）。
+        //    ⚠️ 审计 B4：这里原来紧接着在**事务内**调用 eventPublisher.publishHotChanged(...)，
+        //    而发布方投递失败只 log.error —— 事务回滚了事件可能已经发出去、事务提交了事件却可能永远发不出去，
+        //    MQ 抖一下就是"评价存在、热度不变"，且没有任何信号。
+        //    现在"通知搜索域"这件事内聚进 recomputeHotScore：它会把整行门店快照登记进本地消息表
+        //    （与本次事务同提交），提交后才投递，失败退避重试 + 定时对账补发。
+        //    好处是新增任何改热度的调用方都不会再漏发事件，本监听器也不必再持有发布器。
         double hotScore = shopService.recomputeHotScore(event.getShopId());
-        Shop shop = shopService.getById(event.getShopId());
-        if (shop != null) {
-            eventPublisher.publishHotChanged(shop.getId(), shop.getTypeId(), hotScore,
-                    shop.getComments(), shop.getScore());
-        }
         log.info("门店热度已更新: shopId={}, hotScore={}", event.getShopId(), hotScore);
         // 未捕获的系统异常 → 抛出 → 事务回滚（占位消失）→ 容器重投 → 闸门放行，
         // 由唯一键保证"重投不会把评价数累加两次"。

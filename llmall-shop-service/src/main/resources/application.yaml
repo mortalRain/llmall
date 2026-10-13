@@ -37,6 +37,51 @@ llmall:
   internal:
     token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
 
+  # ---------------------------------------------------------------------------
+  # 门店缓存策略（B6）。这些值在代码里都有同值默认值（见 ShopServiceImpl 的 @Value 与
+  # ShopRedisConstants），这里显式写出来是为了让"要调缓存策略"的人不用翻代码。
+  # 口径：
+  #  - ttl-minutes：正常数据的**逻辑过期**时长（只写在缓存 JSON 的 expireTime 里，不决定 Redis 上的 TTL）
+  #  - physical-extra-minutes：Redis 物理 TTL = 逻辑过期时长 + 本值。
+  #    必须 > 0：物理 TTL 若等于逻辑过期时间，key 会在逻辑过期的同一刻被物理删除，
+  #    "逻辑过期后先返回旧值、再由一个线程异步重建"这条路径就直接失效了。
+  #  - null-ttl-minutes：查不到的门店也要写空值哨兵（防缓存穿透）。
+  #    必须带 TTL，否则匿名刷 GET /shops/{随机id} 会让 Redis 内存单调增长。
+  #  - lock-ttl-seconds：缓存重建互斥锁的时长；lock-wait-*：未命中时抢不到锁的请求最多等多久。
+  # ---------------------------------------------------------------------------
+  shop:
+    cache:
+      ttl-minutes: 30
+      ttl-jitter-minutes: 5
+      physical-extra-minutes: 10
+      null-ttl-minutes: 2
+      null-ttl-jitter-minutes: 1
+      lock-ttl-seconds: 10
+      lock-wait-millis: 500
+      lock-wait-interval-millis: 20
+    # ── 可靠投递对账节拍（B4）─────────────────────────────────────────────
+    # 【为什么写在这里而不是另起一段 shop:】YAML 里同一个父键不能出现两次：
+    # Spring Boot 的 YamlProcessor 关闭了 allowDuplicateKeys，重复的 shop: 会直接
+    # 抛 "Duplicate key" 让服务起不来。所以 B4 的 reconcile 必须并进这个 shop: 块里。
+    # 口径：
+    #  - reconcile.interval-ms：对账轮询间隔。对账要请求下游（Feign），调太小会给
+    #    llmall-search-service 带来无谓压力；默认 5 分钟。
+    #  - reconcile.initial-delay-ms：首次对账延迟。留 1 分钟是为了错开启动期
+    #    （下游可能还没就绪，一启动就问只会得到一片"状态未知"）。
+    reconcile:
+      initial-delay-ms: 60000
+      interval-ms: 300000
+
+  # ---------------------------------------------------------------------------
+  # 本地消息重试节拍（B4）。MessageRetryTask 是"MQ 抖动不丢事件"的另一道防线，
+  # 节拍同样要能一行配置调，而不是埋在 @Scheduled 注解里的魔法数字
+  # （代码里已有同值默认值 ${llmall.message.retry-interval-ms:15000}）。
+  # 口径：本值只决定"多久扫一次待重试的表"，**不决定某条消息何时重发** ——
+  #      单条消息的间隔由 MessageLogServiceImpl 的指数退避写进 next_retry_time（5s→10s→…上限 10 分钟）。
+  # ---------------------------------------------------------------------------
+  message:
+    retry-interval-ms: 15000
+
 # ---------------------------------------------------------------------------
 # 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。
 # 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+

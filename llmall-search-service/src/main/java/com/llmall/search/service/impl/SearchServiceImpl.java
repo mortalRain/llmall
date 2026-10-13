@@ -6,10 +6,11 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.llmall.api.client.ShopClient;
 import com.llmall.api.dto.ShopDTO;
 import com.llmall.api.dto.ShopPageDTO;
-import com.llmall.api.event.ShopHotChangedEvent;
+import com.llmall.common.constant.MqConstants;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.common.domain.PageQuery;
 import com.llmall.common.utils.CollUtils;
+import com.llmall.search.domain.po.ConsumeRecord;
 import com.llmall.search.domain.po.SearchHistory;
 import com.llmall.search.domain.po.SearchHotWord;
 import com.llmall.search.domain.po.ShopSearchDoc;
@@ -18,6 +19,8 @@ import com.llmall.search.domain.vo.SearchEngineStatusVO;
 import com.llmall.search.es.EsShopSearchGateway;
 import com.llmall.search.es.EsShopSearchGatewayImpl;
 import com.llmall.search.es.ShopSearchEngineProperties;
+import com.llmall.search.event.ShopDocChangedEvent;
+import com.llmall.search.mapper.ConsumeRecordMapper;
 import com.llmall.search.mapper.SearchHistoryMapper;
 import com.llmall.search.mapper.SearchHotWordMapper;
 import com.llmall.search.mapper.ShopSearchDocMapper;
@@ -34,6 +37,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -57,8 +61,13 @@ import static com.llmall.search.constant.SearchRedisConstants.*;
  *  3. **热词两段式**：运行时 ZINCRBY 累加到 Redis ZSet，定时任务落库，避免高频写 MySQL。
  *
  * ES 同步的一条硬约束：ES 的写是**整文档替换**，没有局部更新语义。
- * 所以热点事件（只带 hotScore/comments/score）落库后必须**重新读一次完整行**再写 ES，
- * 否则会把名称、地址、坐标全刷成 null —— 这是接 ES 时最容易犯、也最难查的错误。
+ * 所以每次落库之后都**重新读一次完整行**再写 ES，拿局部 doc 去写会把名称、地址、坐标全刷成 null ——
+ * 这是接 ES 时最容易犯、也最难查的错误。（审计 B4 之后事件体本身就是整行快照，
+ * 这条约束依然照旧执行：读回来的才是"落库后的权威行"，内存里的 doc 可能被 not_null 策略跳过某些字段。）
+ *
+ * 对账（审计 B4）：本域消费事件时会写 consume_record，门店域的对账任务据此判断
+ * "这条 shop.hot.changed 到底处理了没有"（见 isShopHotChangedConsumed / GET /search/consume-status）。
+ * 没有这个判据，"消息发出去了但下游没处理成功"的缺口永远查不出来。
  */
 @Slf4j
 @Service
@@ -70,9 +79,14 @@ public class SearchServiceImpl implements ISearchService {
     /** 全量重建的页数上限保护，避免接口异常导致死循环 */
     private static final int REBUILD_MAX_PAGES = 100;
 
+    /** 本域在 consume_record 里的消费者标识（服务名），门店域对账时按它查"我处理了没有" */
+    private static final String CONSUMER = "llmall-search-service";
+
     private final ShopSearchDocMapper shopSearchDocMapper;
     private final SearchHotWordMapper hotWordMapper;
     private final SearchHistoryMapper historyMapper;
+    /** 消费幂等记录（审计 B4）：既是重投的闸门，也是门店域对账要问的"处理了没有"的判据 */
+    private final ConsumeRecordMapper consumeRecordMapper;
     private final StringRedisTemplate redisTemplate;
     private final ShopClient shopClient;
     /** ES 网关（检索加速 + 索引维护）；是否真正使用由 llmall.search.engine 决定 */
@@ -233,15 +247,44 @@ public class SearchServiceImpl implements ISearchService {
 
     // ==================== 视图维护（亮点 C 的最后一跳）====================
 
+    /**
+     * 消费门店文档变更事件 → 整行 upsert 本地读模型（+ 同步 ES）。
+     *
+     * <h3>审计 B4 改前的问题</h3>
+     * 原实现只把 hotScore/comments/score 三列写进 doc（其余列"由重建任务维护"），
+     * 于是 {@code shop_search_doc.sold} 永远停在上一次**全量重建**的值上：
+     * 销量在涨、搜索结果里的销量不动（实测库里 shop.sold=4215 而 shop_search_doc.sold=4219）。
+     *
+     * <h3>改后</h3>
+     * 事件体升级为整行快照，这里**整行 upsert**：名称/类型/商圈/地址/坐标/人均/评分/评价数/销量/状态
+     * 全部由事件驱动更新，不再依赖重建。
+     *
+     * <h3>兼容与防坑</h3>
+     *  - 老格式事件（改造前投递、仍在队列里的，只有热点字段）：新增文档时回源门店详情补全整行
+     *    （shop_search_doc 的 name/address/type_id 都是 NOT NULL，拿部分字段插入会直接失败）；
+     *    更新已有文档时依靠 MyBatis-Plus 的 update-strategy=not_null，null 字段被跳过，
+     *    不会把已有值刷成空。
+     *  - 防乱序仍按事件时间比较（MQ 不保证顺序，旧事件后到会把新数据覆盖回去）。
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void applyShopHotChanged(ShopHotChangedEvent event) {
+    public void applyShopHotChanged(ShopDocChangedEvent event) {
         if (event == null || event.getShopId() == null) {
             return;
         }
         LocalDateTime eventTime = event.getOccurredAt() == null
                 ? LocalDateTime.now()
                 : LocalDateTime.ofInstant(Instant.ofEpochMilli(event.getOccurredAt()), ZoneId.systemDefault());
+        // 【必须截断到秒，否则重投的事件会被下面的防乱序判断误判成"过期"而丢弃】
+        // shop_search_doc.event_time 是 DATETIME（无小数秒），写入 .906 秒时 MySQL 会**四舍五入到下一秒**，
+        // 读回来变成 .000 —— 于是同一条事件（同一个 occurredAt）第二次到达时，
+        // "事件时间 .906" < "库里已被四舍五入成下一秒的 event_time" 成立，事件被当成过期事件丢掉。
+        // 实测（场景 c）：对账补发同一条 bizId 后，search 日志出现
+        //   「收到过期的热度事件，忽略: shopId=1, eventTime=2026-10-13T18:22:03.906 < 已处理 2026-10-13T18:22:04」，
+        // 而 consume_record 已经写下 —— 对账因此会回答"已处理"，读模型却停在旧值上，
+        // 这正是审计 B4 要消除的"静默缺口"。截断到秒后，写入值与读回值一致（都是 .000），
+        // 重投不再被误伤；防乱序仍然有效（精度降到 1 秒，跨秒的乱序照旧拦截）。
+        eventTime = eventTime.truncatedTo(ChronoUnit.SECONDS);
 
         ShopSearchDoc exist = shopSearchDocMapper.selectById(event.getShopId());
         // 防乱序：MQ 不保证顺序，若旧事件后到会把新数据覆盖回去（典型"数据回退"故障）
@@ -251,32 +294,49 @@ public class SearchServiceImpl implements ISearchService {
             return;
         }
 
-        ShopSearchDoc doc = new ShopSearchDoc()
-                .setShopId(event.getShopId())
-                .setHotScore(event.getHotScore() == null ? 0D : event.getHotScore())
-                .setComments(event.getComments())
-                .setScore(event.getScore())
-                .setEventTime(eventTime);
+        ShopSearchDoc doc = new ShopSearchDoc().setShopId(event.getShopId()).setEventTime(eventTime);
+        fillFromEvent(doc, event);
 
         if (exist == null) {
-            // 视图里还没有该门店（事件早于全量重建）→ 主动拉一次门店详情补全，避免脏数据
-            ShopDTO shop = shopClient.queryShopById(event.getShopId());
-            if (shop == null) {
-                log.warn("视图补全失败：门店不存在, shopId={}", event.getShopId());
-                return;
+            if (!hasFullRow(event)) {
+                // 视图里还没有该门店，而且事件是"老格式"（只带热点字段）→ 回源门店详情补全整行，
+                // 否则 NOT NULL 的 name/address/type_id 会让 insert 直接失败。
+                ShopDTO shop = shopClient.queryShopById(event.getShopId());
+                if (shop == null) {
+                    log.warn("视图补全失败：门店不存在, shopId={}", event.getShopId());
+                    return;
+                }
+                fillFromShop(doc, shop);
             }
-            fillFromShop(doc, shop);
             shopSearchDocMapper.insert(doc);
-            log.info("搜索视图新增: shopId={}, hotScore={}", event.getShopId(), doc.getHotScore());
+            log.info("搜索视图新增: shopId={}, hotScore={}, sold={}",
+                    event.getShopId(), doc.getHotScore(), doc.getSold());
         } else {
-            // 只更新事件携带的字段（MyBatis-Plus update-strategy=not_null），名称/地址等由重建任务维护
+            // 整行 upsert：事件带的是完整行，所以这里不再"只更新热点列"；
+            // null 字段由 update-strategy=not_null 跳过（老格式事件不会把已有值刷空）
             shopSearchDocMapper.updateById(doc);
-            log.info("搜索视图更新: shopId={}, hotScore={}", event.getShopId(), doc.getHotScore());
+            log.info("搜索视图更新: shopId={}, hotScore={}, sold={}, comments={}",
+                    event.getShopId(), doc.getHotScore(), doc.getSold(), doc.getComments());
         }
 
-        // 同步 ES：上面的 doc 只有热点字段，必须重新读完整行再写
-        // （ES 的写是整文档替换，拿局部 doc 去写会把名称/地址/坐标刷成 null）
+        // 同步 ES：doc 现在就是完整行，但**仍然重新读一次**再写 ——
+        // ES 的写是整文档替换，读回来的是"落库后的权威行"，比内存里的 doc 更可靠
+        // （尤其 doc 里可能有被 not_null 策略跳过的 null 字段）。
         syncToEs(event.getShopId());
+    }
+
+    @Override
+    public boolean isShopHotChangedConsumed(String bizId) {
+        if (StrUtil.isBlank(bizId)) {
+            return false;
+        }
+        // 判据 = 本域消费记录里有没有这一行。它与视图更新同事务写入（见 ShopHotChangedListener），
+        // 所以"有行"必然意味着"视图真的更新成功了"，不会出现"记了账但没干活"。
+        Long count = consumeRecordMapper.selectCount(new LambdaQueryWrapper<ConsumeRecord>()
+                .eq(ConsumeRecord::getBizType, MqConstants.BIZ_SHOP_HOT_CHANGED)
+                .eq(ConsumeRecord::getBizId, bizId)
+                .eq(ConsumeRecord::getConsumer, CONSUMER));
+        return count != null && count > 0;
     }
 
     @Override
@@ -408,6 +468,40 @@ public class SearchServiceImpl implements ISearchService {
     }
 
     // ==================== 私有工具 ====================
+
+    /**
+     * 事件 → 读模型：整行快照逐字段搬运。
+     *
+     * 注意 update 路径上 null 字段会被 MyBatis-Plus 的 update-strategy=not_null 跳过，
+     * 所以这里即使原样搬 null 也不会把已有值刷空 —— 这正是"老格式事件（只有热点字段）
+     * 落到已有文档上"仍然安全的原因。
+     */
+    private void fillFromEvent(ShopSearchDoc doc, ShopDocChangedEvent event) {
+        doc.setName(event.getName())
+                .setTypeId(event.getTypeId())
+                .setTypeName(event.getTypeName())
+                .setArea(event.getArea())
+                .setAddress(event.getAddress())
+                .setX(event.getX())
+                .setY(event.getY())
+                // 事件里已经是「分」，与读模型/前端契约同口径，这里**不要**再 ×100
+                .setAvgPrice(event.getAvgPrice())
+                .setScore(event.getScore())
+                .setComments(event.getComments())
+                .setSold(event.getSold())
+                .setHotScore(event.getHotScore())
+                .setStatus(event.getStatus());
+    }
+
+    /**
+     * 事件是否带齐了"新建一条搜索文档"所必需的整行字段。
+     *
+     * 判据用 name/typeId/address：这三列在 shop_search_doc 里都是 NOT NULL，
+     * 缺任何一个都无法插入；老格式事件（改造前只带 hotScore/comments/score）会走到回源补全分支。
+     */
+    private boolean hasFullRow(ShopDocChangedEvent event) {
+        return event.getName() != null && event.getTypeId() != null && event.getAddress() != null;
+    }
 
     private void upsertFromShop(ShopDTO shop) {
         if (shop == null || shop.getId() == null) {

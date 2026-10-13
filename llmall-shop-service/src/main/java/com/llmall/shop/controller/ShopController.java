@@ -4,7 +4,9 @@ import com.llmall.api.dto.ShopDTO;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.utils.UserContext;
+import com.llmall.shop.domain.vo.HotReconcileResultVO;
 import com.llmall.shop.service.IShopService;
+import com.llmall.shop.task.ShopSearchReconcileTask;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import io.swagger.v3.oas.annotations.Operation;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +31,9 @@ import java.util.List;
 public class ShopController {
 
     private final IShopService shopService;
+
+    /** 对账任务：手动触发入口（定时触发见 ShopSearchReconcileTask#scheduledReconcile） */
+    private final ShopSearchReconcileTask shopSearchReconcileTask;
 
     /**
      * 运维接口总开关（llmall.maintenance.enabled，默认 true）。
@@ -103,6 +108,17 @@ public class ShopController {
     public double recomputeHotScore(@PathVariable("id") Long id) {
         checkMaintenanceEnabled();
         return shopService.recomputeHotScore(id);
+    }
+
+    @Operation(summary = "对账：检查已投递的门店热度事件搜索域处理了没有，明确未处理则补发（审计 B4，运维/排障用）")
+    @PostMapping("/hot/reconcile")
+    public HotReconcileResultVO reconcileHotChanged() {
+        // 与其它运维接口共用同一个开关：手动触发对账会请求下游、可能触发补发，
+        // 属于"一人执行、全站受影响"的动作，必须能被一键关掉。
+        // 为什么要有手动入口：定时对账默认 5 分钟一轮，排障时不该让人干等；
+        // 而且"补发是否真的发生"需要一个可重复触发的入口来验证。
+        checkMaintenanceEnabled();
+        return shopSearchReconcileTask.reconcile();
     }
 
     @Operation(summary = "重建 GEO 索引（首次部署/坐标批量变更后调用）")

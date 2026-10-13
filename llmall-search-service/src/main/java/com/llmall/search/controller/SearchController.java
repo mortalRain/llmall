@@ -5,6 +5,7 @@ import com.llmall.common.domain.PageDTO;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.utils.UserContext;
 import com.llmall.search.domain.po.SearchHistory;
+import com.llmall.search.domain.vo.ConsumeStatusVO;
 import com.llmall.search.domain.vo.HotWordVO;
 import com.llmall.search.domain.vo.SearchEngineStatusVO;
 import com.llmall.search.service.ISearchService;
@@ -105,5 +106,24 @@ public class SearchController {
     @GetMapping("/engine")
     public SearchEngineStatusVO engineStatus() {
         return searchService.engineStatus();
+    }
+
+    /**
+     * 对账应答接口（审计 B4）：门店域拿本地消息表里"已投递但未确认"的事件来问
+     * "这条 shop.hot.changed 你处理了吗"，本接口按 consume_record 回答。
+     *
+     * 为什么不放在运维开关（llmall.maintenance.enabled）后面：它是**只读**查询，
+     * 不写任何数据、也不触发重建；而它一旦被关掉，门店域的对账就全部退化成"未知"，
+     * 一致性缺口会重新变成看不见的状态 —— 恰恰是这个审计项要消除的东西。
+     * 真正会改数据的对账动作（补发）发生在门店域那一侧，由那边的开关控制。
+     */
+    @Operation(summary = "对账应答：某条门店变更事件本域是否已消费（供 llmall-shop-service 对账任务调用）")
+    @GetMapping("/consume-status")
+    public ConsumeStatusVO consumeStatus(@RequestParam("bizType") String bizType,
+                                         @RequestParam("bizId") String bizId) {
+        return new ConsumeStatusVO()
+                .setBizType(bizType)
+                .setBizId(bizId)
+                .setConsumed(searchService.isShopHotChangedConsumed(bizId));
     }
 }
