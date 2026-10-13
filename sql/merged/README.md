@@ -1,10 +1,14 @@
 # sql/merged · 库表脚本执行说明
 
+> **本文件是执行顺序的唯一权威（single source of truth）。**
+> 目录里共 **19 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
+> 有一处必须破数字序，见 2.1 的 `23` / `30`）。
+
 ## 一、库 ↔ 服务对照（一个服务一个库）
 
 | 库 | 服务 | 端口 | 脚本来源 |
 |---|---|---|---|
-| `llmall-user` | llmall-user-service | 8084 | 原商城 `llmall-user.sql` + **本目录 `21-user-alter.sql`** |
+| `llmall-user` | llmall-user-service | 8084 | 原商城 `llmall-user.sql` + **本目录 `21-user-alter.sql`、`22-user-time-default.sql`** |
 | `llmall-shop` | llmall-shop-service | 8087 | **本目录 `10-shop.sql`**（由点评 tb_shop 改造） |
 | `llmall-item` | llmall-item-service | 8081 | 原商城 `llmall-item.sql` + **本目录 `11-item-alter.sql`** |
 | `llmall-cart` | llmall-cart-service | 8082 | 原商城 `llmall-cart.sql` |
@@ -12,64 +16,172 @@
 | `llmall-pay` | llmall-pay-service | 8086 | 原商城 `llmall-pay.sql` |
 | `llmall-promotion` | llmall-promotion-service | 8088 | **本目录 `20-promotion.sql`**（由点评 tb_voucher 系改造） |
 | `llmall-content` | llmall-content-service | 8089 | **本目录 `30-content.sql`**（由点评 tb_blog 系改造） |
-| `llmall-search` | llmall-search-service | 8093 | **本目录 `40-search.sql`** |
-| `seata` | Seata Server | — | Seata 发行包 `script/server/db/mysql.sql` |
+| `llmall-search` | llmall-search-service | 8093 | **本目录 `40-search.sql`** + **`41-search-geo.sql`** |
+| `seata` | Seata Server | — | **本目录 `03-seata-server.sql`**（1.5.2）；从 1.4.2 升级用 **`03b-seata-server-1.5.2-upgrade.sql`** |
 
-## 二、执行顺序（**按文件名数字顺序执行，不要跳号**）
+---
+
+## 二、执行顺序（完整清单，按依赖排序）
+
+> 全部脚本都可**重复执行**（2026-10 幂等化改造，见第四节）。
+> 也就是说：这个顺序跑第二遍不会报错、不会改表结构；只有演示数据会被重算成同一份。
 
 ```bash
-# 0) 备份（重要）
-mysqldump -uroot -p --databases llmall-user llmall-item llmall-cart llmall-trade llmall-pay > backup-$(date +%F).sql
+# 0) 备份（重要，顺序不能省）
+mysqldump -uroot -p --databases llmall-user llmall-item llmall-cart llmall-trade llmall-pay \
+                            llmall-shop llmall-promotion llmall-content llmall-search seata > backup-$(date +%F).sql
 
-# 1) 建库（9 个业务库 + 口径统一）
+# ── 1) 建库（新增库 + seata 库；llmall-user/item/cart/trade/pay 由第 2 步的原商城脚本建） ──
 mysql -uroot -p < 00-create-databases.sql
 
-# 2) 导入原有商城数据（首次部署才需要；文件在上一级 sql/ 目录）
+# ── 2) 原商城数据（首次部署才需要；文件在上一级 sql/ 目录） ──
 mysql -uroot -p < ../llmall-user.sql
 mysql -uroot -p < ../llmall-item.sql     # 约 35MB，耐心等
 mysql -uroot -p < ../llmall-cart.sql
 mysql -uroot -p < ../llmall-trade.sql
 mysql -uroot -p < ../llmall-pay.sql
 
-# 3) 分布式事务基础设施（undo_log 每个库一张 + 幂等/消息表）
+# ── 3) 分布式事务基础设施（undo_log 每个库一张 + 幂等/消息表） ──
 mysql -uroot -p < 01-undo-log-all.sql
 mysql -uroot -p < 02-shared-infra.sql
 
-# 4) Seata Server 自己的库（seata）：1.4.2 建表 + 1.5.2 增量升级，两步都要跑
+# ── 4) Seata Server 自己的库（seata）：1.5.2 全量建表 + 1.4.2→1.5.2 增量升级，两步都要跑 ──
 mysql -uroot -p < 03-seata-server.sql
 mysql -uroot -p < 03b-seata-server-1.5.2-upgrade.sql
 
-# 5) 各域建表 / 改造（数字即执行顺序）
-mysql -uroot -p < 10-shop.sql
-mysql -uroot -p < 11-item-alter.sql
-mysql -uroot -p < 20-promotion.sql
-mysql -uroot -p < 21-user-alter.sql
-mysql -uroot -p < 22-user-time-default.sql
-mysql -uroot -p < 23-content-image-default.sql
-mysql -uroot -p < 30-content.sql
-mysql -uroot -p < 31-order-alter.sql
-mysql -uroot -p < 40-search.sql
-mysql -uroot -p < 41-search-geo.sql
+# ── 5) 各域建表 / 改造 ──
+mysql -uroot -p < 10-shop.sql                   # 5.1  门店域建表（shop / shop_type / shop_stat）
+mysql -uroot -p < 11-item-alter.sql             # 5.2  商品域改造（item 加 shop_id/type + 索引，建 stock_flow）
+mysql -uroot -p < 20-promotion.sql              # 5.3  营销域建表（voucher / seckill_voucher / user_voucher）
+mysql -uroot -p < 21-user-alter.sql             # 5.4  用户域改造（user 加 nick_name/icon + uk_phone，建 user_info/user_sign/points_flow）
+mysql -uroot -p < 22-user-time-default.sql      # 5.5  llmall-user.user 时间字段补默认值
+mysql -uroot -p < 30-content.sql                # 5.6  内容域建表（blog / blog_comments / blog_like / follow / feed_inbox）
+mysql -uroot -p < 23-content-image-default.sql  # 5.7  ⚠️ 依赖 5.6：blog 表由 30 号建立，23 号必须排在它后面
+mysql -uroot -p < 31-order-alter.sql            # 5.8  交易域改造（order 加 order_type/shop_id/voucher_id/verify_code/verify_time + 索引）
+mysql -uroot -p < 40-search.sql                 # 5.9  搜索域建表（shop_search_doc / search_hot_word / search_history）
+mysql -uroot -p < 41-search-geo.sql             # 5.10 ⚠️ 依赖 5.9：给 shop_search_doc 补 x/y
 
-# 6) 演示数据（**仅演示环境**：脚本内含按 id 区间的 DELETE，不要在生产库执行）
-mysql -uroot -p < 50-seed-local-life-data.sql
-mysql -uroot -p < 51-seed-more-data.sql
-mysql -uroot -p < 52-fix-orphan-pay-orders.sql
+# ── 6) 演示数据（**仅演示库，勿在生产执行**：50/51 内含按 id 区间的 DELETE） ──
+mysql -uroot -p < 50-seed-local-life-data.sql   # 6.1  门店套餐 + 精选实物 + 评价 + 演示订单
+mysql -uroot -p < 51-seed-more-data.sql         # 6.2  补齐 8 个缺失类型的门店 + 各域空表铺数据
+mysql -uroot -p < 50-seed-local-life-data.sql   # 6.3  ★再跑一遍 50：为 51 新增的门店生成套餐与评价
+mysql -uroot -p < 51-seed-more-data.sql         # 6.4  ★再跑一遍 51：补齐依赖"评价"的聚合数据（评论/点赞/Feed）
+mysql -uroot -p < 52-fix-orphan-pay-orders.sql  # 6.5  清理前端 Number() 精度丢失产生的孤儿支付单并退款
+# 跑完调一次接口：POST /search/view/rebuild 与 POST /shops/cache/geo/rebuild
 
-# 7) 可选：从原点评库迁移门店/笔记数据（需要外部库 dianping_src 已存在）
+# ── 7) 可选：从原点评库迁移门店数据（需要外部库 dianping_src 已存在） ──
 mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS dianping_src DEFAULT CHARSET utf8mb4;"
 # dianping_src 的建表数据在 D:\dsh\legacy\dianping-src 项目里（不在本仓库内）
 mysql -uroot -p < 99-migrate-dianping-data.sql
 ```
 
-> 上面没写 `dianping_src` 的 SQL 文件名是有意的：那份 dump 属于**另一个项目**（原点评工程），
-> 不在本仓库内；不跑第 7 步不影响系统运行，前 6 步是完整可用的最小集合。
+### 2.1 关于顺序的三点说明
 
-## 三、注意事项
+1. **`50 → 51 → 50 → 51` 是有意重复的**：`51` 会新增 8 类、16 家门店（id 101~116），
+   而门店套餐与探店评价由 `50` 按 `shop` 表全量生成 —— 所以 `51` 加完门店后必须再跑一次 `50`，
+   再跑一次 `51` 去补那些依赖"评价"的聚合数据（评论 / 点赞 / Feed 收件箱）。
+   这正是 `docs/最终验收与交付清单.md` **7.7 节**写明的四步顺序。
+2. **`23` 排在 `30` 后面（破数字序）**：`23-content-image-default.sql` 改的是 `llmall-content.blog`，
+   而这张表由 `30-content.sql` 的 `CREATE TABLE IF NOT EXISTS` 建立 —— 按数字序把 `23` 放在 `30` 前面，
+   在全新库上会直接报 `Table 'llmall-content.blog' doesn't exist`。这是本次审计发现的一处**顺序缺陷**。
+3. **`99` 放最后**：它把 `dianping_src` 的门店 upsert 进 `llmall-shop.shop`/`shop_type`，
+   必须等 `10-shop.sql` 建好表、`50/51` 的演示门店就位之后再跑（`ON DUPLICATE KEY UPDATE`，可重复执行）。
 
-1. **库名口径**：订单库就叫 `llmall-trade`（与 `llmall-trade-service/.../application.yaml` 的 `llmall.db.database` 一致），不存在 `llmall-order`。
-2. **数据迁移语句默认是注释状态**（每个脚本末尾的 `INSERT INTO ... SELECT`）。先看一遍再取消注释——尤其是 `21-user-alter.sql` 里的用户迁移，密码策略要先定：**统一 BCrypt，历史数据重置密码**，不要留两套校验分支。
-3. **`ALTER TABLE user ADD UNIQUE KEY uk_phone`** 可能因历史数据里 phone 重复/NULL 而失败：先 `SELECT phone, COUNT(*) FROM user GROUP BY phone HAVING COUNT(*) > 1;` 清洗后再加。
-4. **MySQL 8 兼容性**：本目录脚本已去掉原点评脚本里的 `ZEROFILL` 和 `'0000-00-00'` 默认值（严格模式下会直接报错）。
-5. 所有"改造型"脚本（`11/21/22/23/31/41`）都是 `ALTER TABLE`，**可重复执行的只有 `CREATE TABLE IF NOT EXISTS` 部分**；`ALTER` 重复执行会报 "Duplicate column/duplicate key"，属正常现象，忽略即可。
-6. **改表结构前先在工作副本验证**：`sql/merged/` 是"从零重建"的脚本；对已经在跑的库做变更，请单独写增量脚本并先备份。
+### 2.2 与 `docs/最终验收与交付清单.md` 的核对（reconciliation）
+
+- 7.7 节写的是**演示数据四步**：`50 → 51 → 50 → 51`。**本 README 已采纳该顺序**（第 6 步 6.1~6.4）。
+- 7.7 节之外，文档只笼统写了"按 `sql/merged/README.md` 顺序导入"（见该文档第 52、128 行），
+  没有给出完整清单；本 README 的第二节即为该完整清单，**以本文件为准**。
+- 本 README 的旧版本把演示数据写成 `50 → 51 → 52`（漏了"再跑一遍 50/51"），与 7.7 不一致；
+  现已按 7.7 修正，另修正了 `23` / `30` 的数字序颠倒。**如有冲突，一律以本文件为准。**
+
+---
+
+## 二·补、2026-10 幂等性审计：改了哪些东西
+
+| # | 缺陷 | 现象 | 修复 |
+|---|---|---|---|
+| 1 | `11-item-alter.sql` 语法错 | 语句写成 `ALTER TABLE item` + 表名后多一个字母 `r`，**永远执行不了**，`idx_type_status` / `idx_shop_sold` 两个索引从未被脚本建出来 | 按上下文与线上库实际索引形态还原原意并修正 |
+| 2 | `23` / `30` 执行顺序颠倒 | 按数字序 `23` 跑在 `30` 前面，全新库上 `llmall-content.blog` 还不存在 → `ERROR 1146` | README 把 `23` 排到 `30` 之后（脚本内也加了守卫：表不存在时**照旧报错**、不静默跳过） |
+| 3 | `51-seed-more-data.sql` DELETE 区间少算 1 | `DELETE ... user_sign WHERE id BETWEEN 990001 AND 999999`，而 INSERT 会生成 `id = 990000` → **第二遍执行**必然 `ERROR 1062 Duplicate entry '990000'` | 区间改为 `990000 AND 999999` |
+| 4 | `03` / `03b` 缺 `USE` | 脚本本身没有 `USE seata;`，而 README 给的命令是 `mysql -uroot -p < 03-....sql`（不带库名）→ `ERROR 1046 No database selected` | 两个脚本各补一句 `USE` + 反引号 `seata` |
+| 5 | 8 条裸 `ALTER TABLE`（`11/21/22/23/31/41`） | 第二遍执行报 `Duplicate column name` / `Duplicate key name` | 全部改成第三节的 `information_schema` 守卫写法 |
+
+验收方式：把上面第二节的清单**连续跑两遍**，第二遍 `ERROR` 行数必须为 0，
+且 `information_schema` 的列数 / 索引行数 / 每表结构哈希与执行前**逐字节一致**。
+（2026-10-13 已在 192.168.189.128 的 MySQL 8 上实测：PASS2 / PASS3 / PASS4 连续三遍 `ERROR` 均为 0，
+`llmall-%` 共 40 张表的结构哈希全部不变。）
+
+---
+
+## 三、脚本清单与幂等性（file-by-file）
+
+每个语句要么本身就是幂等的，要么已改成"先查 `information_schema` 再决定执行/跳过"的守卫写法。
+
+| # | 脚本 | 幂等手段 |
+|---|---|---|
+| 00 | `00-create-databases.sql` | `CREATE DATABASE IF NOT EXISTS` |
+| 01 | `01-undo-log-all.sql` | `CREATE TABLE IF NOT EXISTS`（8 个库各一张 undo_log） |
+| 02 | `02-shared-infra.sql` | `CREATE TABLE IF NOT EXISTS`（message_log + 5 份 consume_record） |
+| 03 | `03-seata-server.sql` | `CREATE TABLE IF NOT EXISTS` + 种子用 `INSERT IGNORE` |
+| 03b | `03b-seata-server-1.5.2-upgrade.sql` | **house style 出处**：`@c` + `IF()` + `PREPARE/EXECUTE/DEALLOCATE`；种子用 `INSERT IGNORE`；`CONVERT TO CHARACTER SET` 本身可重复执行 |
+| 10 | `10-shop.sql` | `CREATE TABLE IF NOT EXISTS` ×3 |
+| 11 | `11-item-alter.sql` | **新增守卫**：`COLUMNS`×1 + `STATISTICS`×2（并修掉 "ALTER TABLE item 表名后多一个 r" 的语法错） |
+| 20 | `20-promotion.sql` | `CREATE TABLE IF NOT EXISTS` ×3 |
+| 21 | `21-user-alter.sql` | **新增守卫**：`COLUMNS`×1（nick_name/icon）+ `STATISTICS`×1（uk_phone） |
+| 22 | `22-user-time-default.sql` | **新增守卫**：`COLUMNS` 判断两列是否已是目标形态（`datetime/NOT NULL/DEFAULT CURRENT_TIMESTAMP[ ON UPDATE ...]`） |
+| 23 | `23-content-image-default.sql` | **新增守卫**：`TABLES`（表不存在要报错，不静默跳过）+ `COLUMNS` 判断 `images` 是否已是 `varchar(2048) NULL DEFAULT ''` |
+| 30 | `30-content.sql` | `CREATE TABLE IF NOT EXISTS` ×5 |
+| 31 | `31-order-alter.sql` | **新增守卫**：`COLUMNS`×1（5 列）+ `STATISTICS`×1（3 索引） |
+| 40 | `40-search.sql` | `CREATE TABLE IF NOT EXISTS` ×3 |
+| 41 | `41-search-geo.sql` | **新增守卫**：`COLUMNS`×1（x/y） |
+| 50 | `50-seed-local-life-data.sql` | 演示数据：`DELETE`（id 区间）+ 重插；`UPDATE` 幂等收敛；`INSERT` 多带 `NOT EXISTS` 守卫。**⚠️ 会删数据，仅演示库** |
+| 51 | `51-seed-more-data.sql` | 演示数据：7 处 `DELETE`（id 区间）+ 重插；`INSERT IGNORE` / `NOT EXISTS`。**⚠️ 会删数据，仅演示库** |
+| 52 | `52-fix-orphan-pay-orders.sql` | 纯 `UPDATE`（孤儿单退一次款后即无孤儿，重复执行为空操作） |
+| 99 | `99-migrate-dianping-data.sql` | `INSERT ... ON DUPLICATE KEY UPDATE` + `UPDATE ... WHERE hot_score = 0` |
+
+### 3.1 守卫模板（统一写法）
+
+```sql
+-- 列：查 COLUMNS；索引：查 STATISTICS
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'item'
+             AND COLUMN_NAME IN ('shop_id', 'type'));
+SET @s := IF(@c = 0,
+    'ALTER TABLE `item` ADD COLUMN ...',           -- 不存在 → 执行原语句
+    'SELECT ''...已存在，跳过''');                  -- 已存在   → 只打印一句
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+```
+
+- 用的是 `DATABASE()`（依赖脚本里的 `USE 库名;`）；`22` / `23` 因为原语句就是全限定表名，仍写死库名。
+- **粒度和原文件一致**：原来一条 `ALTER TABLE` 加几列/几个索引，就还是那一条语句，
+  只是外面套了守卫 —— 所以全新库上的效果与改造前逐字一致。
+- 一条 `ALTER` 里的多个对象用"**全都不存在才执行**"判断（`@c = 0`）：
+  正常路径（全新库 or 已全部就位）行为完全正确；只有"跑了一半被打断"的中间态才会报
+  `Duplicate column name` —— 与改造前的行为一致，不会更糟，且不会静默漏改。
+
+---
+
+## 四、注意事项
+
+1. **库名口径**：订单库就叫 `llmall-trade`（与 `llmall-trade-service/.../application.yaml` 的
+   `llmall.db.database` 一致），不存在 `llmall-order`。文档里出现的 `llmall-order` 只是命名建议，
+   相关示例 SQL 请自行替换库名。
+2. **数据迁移语句默认是注释状态**（每个脚本末尾的 `INSERT INTO ... SELECT`）。先看一遍再取消注释 ——
+   尤其是 `21-user-alter.sql` 里的用户迁移，密码策略要先定：**统一 BCrypt，历史数据重置密码**，
+   不要留两套校验分支。
+3. **`ALTER TABLE user ADD UNIQUE KEY uk_phone`** 可能因历史数据里 phone 重复/NULL 而失败：
+   先 `SELECT phone, COUNT(*) FROM user GROUP BY phone HAVING COUNT(*) > 1;` 清洗后再加。
+   这是**数据**问题，不是幂等问题（索引已存在时守卫会跳过，不会重复报错）。
+4. **MySQL 8 兼容性**：本目录脚本已去掉原点评脚本里的 `ZEROFILL` 和 `'0000-00-00'` 默认值
+   （严格模式下会直接报错）。
+5. **幂等性（2026-10 改造后）**：本目录**所有脚本都可以重复执行**。
+   原来那句"`ALTER` 重复执行会报 Duplicate column/duplicate key，属正常现象，忽略即可"**已作废** ——
+   现在 `11/21/22/23/31/41` 的 `ALTER` 都带 `information_schema` 守卫，
+   第二遍执行只会打印 `... 已存在，跳过`，不会有任何 `ERROR`，也不会改表结构。
+6. **`50` / `51` 会删数据**：两个种子脚本用"按 id 区间 DELETE 再重插"保证可重复执行，
+   文件头都有 `⚠️ 仅演示库，勿在生产执行` 的警示块。生产库只跑 `00~41`，跳过 `50/51/52/99`。
+7. **改表结构前先在工作副本验证**：`sql/merged/` 是"从零重建"的脚本；对已经在跑的库做变更，
+   请单独写增量脚本并先备份。
+8. **跑完演示数据记得调接口**：`POST /search/view/rebuild`（重建搜索读模型）与
+   `POST /shops/cache/geo/rebuild`（重建门店地理缓存）。

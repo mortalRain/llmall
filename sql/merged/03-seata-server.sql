@@ -11,7 +11,12 @@
 --   ③ global_table 索引名改为 idx_status_gmt_modified；④ 字符集统一 utf8mb4。
 --
 -- 执行：mysql -uroot -p123 seata < 03-seata-server.sql
+--      （脚本里已带 USE `seata`;，所以 `mysql -uroot -p < 03-seata-server.sql` 也能跑——
+--        2026-10 审计前这里没有 USE，README 里那条不带库名的命令其实会报
+--        "ERROR 1046 (3D000): No database selected"）
 -- ============================================================
+USE `seata`;
+
 -- -------------------------------- The script used when storeMode is 'db' --------------------------------
 -- the table to store GlobalSession data
 CREATE TABLE IF NOT EXISTS `global_table`

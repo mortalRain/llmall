@@ -10,11 +10,19 @@
 -- 执行：mysql -uroot -p123 llmall-search < 41-search-geo.sql
 --      然后调 POST /search/view/rebuild 重建读模型，再 POST /search/index/rebuild 灌进 ES。
 --
--- 注意：MySQL 不支持 ADD COLUMN IF NOT EXISTS，重复执行报 "Duplicate column name" 属正常。
+-- 注意：MySQL 不支持 ADD COLUMN IF NOT EXISTS，所以这里用 information_schema 守卫
+--      （与 03b-seata-server-1.5.2-upgrade.sql 同一套房规），重复执行不再报
+--      "Duplicate column name"，而是打印一句"已存在，跳过"。
 -- ============================================================
 
 USE `llmall-search`;
 
-ALTER TABLE `shop_search_doc`
-  ADD COLUMN `x` DOUBLE DEFAULT NULL COMMENT '经度（ES geo_point 用，MySQL 检索不参与排序）' AFTER `address`,
-  ADD COLUMN `y` DOUBLE DEFAULT NULL COMMENT '纬度（ES geo_point 用）' AFTER `x`;
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'shop_search_doc'
+             AND COLUMN_NAME IN ('x', 'y'));
+SET @s := IF(@c = 0,
+    'ALTER TABLE `shop_search_doc`
+       ADD COLUMN `x` DOUBLE DEFAULT NULL COMMENT ''经度（ES geo_point 用，MySQL 检索不参与排序）'' AFTER `address`,
+       ADD COLUMN `y` DOUBLE DEFAULT NULL COMMENT ''纬度（ES geo_point 用）'' AFTER `x`',
+    'SELECT ''shop_search_doc.x / y 已存在，跳过''');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;

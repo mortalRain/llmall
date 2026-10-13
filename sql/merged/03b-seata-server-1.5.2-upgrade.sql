@@ -14,8 +14,11 @@
 --
 -- 幂等性：本脚本按"先判断再执行"写成，可重复执行（已在本机 seata 库实测跑过一遍）。
 -- 执行：mysql -uroot -p123 seata < 03b-seata-server-1.5.2-upgrade.sql
+--      （脚本里已带 USE `seata`;，所以 `mysql -uroot -p < 03b-....sql` 也能跑。
+--        下面的守卫用 DATABASE() 取当前库，**必须**能取到 seata，所以这句 USE 不能省）
 -- （全新安装可直接用更新过的 03-seata-server.sql，它已含 1.5.2 的全部 4 张表）
 -- ============================================================
+USE `seata`;
 
 -- ① lock_table：补 status 列
 SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS

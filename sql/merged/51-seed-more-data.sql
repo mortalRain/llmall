@@ -2,6 +2,19 @@
 -- 51-seed-more-data.sql
 -- 把"所有可能被查询到的表"都铺上演示数据（第二轮补数据）
 --
+-- #####################################################################
+-- # ⚠️ 仅演示库，勿在生产执行                                          #
+-- # 本脚本"先按 id 区间 DELETE、再重插"来保证可重复执行，会删掉业务行：#
+-- #   DELETE  llmall-shop.shop         id BETWEEN 101 AND 199           #
+-- #   DELETE  llmall-content.blog_comments  id BETWEEN 940001 AND 949999 #
+-- #   DELETE  llmall-search.search_history  id BETWEEN 980001 AND 989999 #
+-- #   DELETE  llmall-promotion.voucher      id BETWEEN 8001 AND 8099     #
+-- #   DELETE  llmall-promotion.user_voucher id BETWEEN 8101 AND 8199     #
+-- #   DELETE  llmall-promotion.seckill_voucher voucher_id 8001~8099      #
+-- #   DELETE  llmall-user.user_sign    id BETWEEN 990001 AND 999999      #
+-- # 生产库只跑 00~41 的建库/建表/改造脚本；50/51/52/99 属演示数据。     #
+-- #####################################################################
+--
 -- 背景：
 --   只给门店/套餐/订单打了数据是不够的 —— 评价评论、点赞、关注、Feed 收件箱、
 --   搜索历史、热词、门店经营数据、事件消费记录、优惠券、签到、物流……全是空表，
@@ -205,7 +218,12 @@ INSERT IGNORE INTO `llmall-user`.`user_info` (user_id, city, introduce, fans, fo
   (3,  '杭州', '健身+按摩，养生派',        54,  41, 1, '1993-11-25', 740,  3, NOW(), NOW()),
   (4,  '杭州', '带娃探店专业户',            72,  63, 2, '1990-08-09', 1520, 5, NOW(), NOW());
 
-DELETE FROM `llmall-user`.`user_sign` WHERE id BETWEEN 990001 AND 999999;
+-- 【修复记录 · 2026-10 审计】下面的 DELETE 区间原来写成 990001 AND 999999，
+--   而 INSERT 生成的 id 是 990000 + n（n = 0..5，最小 990000）—— 区间左端少算了 1，
+--   于是 990000 这一行永远删不掉，第二次执行报
+--       ERROR 1062 (23000): Duplicate entry '990000' for key 'user_sign.PRIMARY'
+--   这个 bug 只在"第二遍执行"时才暴露，本次"连续跑两遍"的验收把它抓了出来。
+DELETE FROM `llmall-user`.`user_sign` WHERE id BETWEEN 990000 AND 999999;
 INSERT INTO `llmall-user`.`user_sign` (id, user_id, year, month, date, is_backup, create_time)
 SELECT 990000 + n.n, 19, YEAR(DATE_SUB(CURDATE(), INTERVAL n.n DAY)), MONTH(DATE_SUB(CURDATE(), INTERVAL n.n DAY)),
        DATE_SUB(CURDATE(), INTERVAL n.n DAY), CASE WHEN n.n = 3 THEN 1 ELSE 0 END, NOW()

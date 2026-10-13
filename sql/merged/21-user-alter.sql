@@ -4,19 +4,34 @@
 -- 合并原则：以商城 user 表为骨架（username + BCrypt），补点评字段；
 --          点评的用户画像字段落到 user_info（1:1）；签到独立成 user_sign。
 -- ⚠️ 执行前先备份 llmall-user 库。
+--
+-- 幂等性：本脚本可**重复执行**。两处 ALTER 用"先查 information_schema 再决定执行还是跳过"的
+--   守卫写法（与 03b-seata-server-1.5.2-upgrade.sql 同一套房规）：
+--     列查 COLUMNS → @c；索引查 STATISTICS → @c；命中则改跑一句 SELECT '…跳过'。
 -- ============================================================
 
 USE `llmall-user`;
 
 -- 1) user 表补齐点评体系需要的字段
-ALTER TABLE `user`
-  ADD COLUMN `nick_name` VARCHAR(32)  DEFAULT NULL COMMENT '昵称（来自点评 tb_user）' AFTER `username`,
-  ADD COLUMN `icon`      VARCHAR(255) DEFAULT NULL COMMENT '头像（来自点评 tb_user）' AFTER `nick_name`;
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user'
+             AND COLUMN_NAME IN ('nick_name', 'icon'));
+SET @s := IF(@c = 0,
+    'ALTER TABLE `user`
+       ADD COLUMN `nick_name` VARCHAR(32)  DEFAULT NULL COMMENT ''昵称（来自点评 tb_user）'' AFTER `username`,
+       ADD COLUMN `icon`      VARCHAR(255) DEFAULT NULL COMMENT ''头像（来自点评 tb_user）'' AFTER `nick_name`',
+    'SELECT ''user.nick_name / user.icon 已存在，跳过''');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
 -- phone 加唯一索引（点评体系靠手机号验证码登录）
 -- 注意：若历史数据存在重复 phone 或 NULL 较多，先清洗再加索引
-ALTER TABLE `user`
-  ADD UNIQUE KEY `uk_phone` (`phone`);
+--       （这是**数据**问题不是幂等问题：唯一索引本身已存在时会跳过，不会重复报错）
+SET @c := (SELECT COUNT(*) FROM information_schema.STATISTICS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND INDEX_NAME = 'uk_phone');
+SET @s := IF(@c = 0,
+    'ALTER TABLE `user` ADD UNIQUE KEY `uk_phone` (`phone`)',
+    'SELECT ''uk_phone 已存在，跳过''');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
 -- 2) 用户详细资料（点评 tb_user_info 平移）
 CREATE TABLE IF NOT EXISTS `user_info` (
