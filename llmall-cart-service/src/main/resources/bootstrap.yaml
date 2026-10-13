@@ -16,6 +16,11 @@ spring:
         shared-configs:
           - dataId: shared-jdbc.yaml
             refresh: true
+          # MQ 连接与消费口径（prefetch / 重试次数 / default-requeue-rejected / 死信）
+          # —— cart 是 order.create 的消费方，消费失败口径必须与其它服务一致，
+          # 原来它只在本地 application.yaml 里手写了一小段 rabbitmq 配置，容易与 shared-mq 漂移。
+          - dataId: shared-mq.yaml
+            refresh: true
           - dataId: shared-log.yaml
             refresh: true
           - dataId: shared-swagger.yaml

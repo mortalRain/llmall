@@ -52,7 +52,17 @@ public class MqConfig {
             public Object postProcessAfterInitialization(Object bean, String beanName) {
                 if (bean instanceof RabbitTemplate) {
                     ((RabbitTemplate) bean).setBeforePublishPostProcessors(message -> {
-                        message.getMessageProperties().setHeader(TraceContext.HEADER, TraceContext.currentOrGenerate());
+                        // 只在没有 traceId 时补一个，绝不覆盖已有的：
+                        // 死信重投（DeadLetterPublisher）会把"最初那条消息的 traceId"原样带过来，
+                        // 覆盖掉它等于把死信与最初那次请求的联系切断 —— 死信反而最难查。
+                        if (message.getMessageProperties().getHeaders().get(TraceContext.HEADER) == null) {
+                            // 这里用 generate() 而不是 currentOrGenerate()：MQ 消费线程是复用的，
+                            // currentOrGenerate() 会把新生成的 id 写进 MDC 且没人清理，
+                            // 于是**同一线程上后续无关的消息**都会顶着上一个 traceId 打日志（比没有还难查）。
+                            String traceId = TraceContext.current();
+                            message.getMessageProperties().setHeader(TraceContext.HEADER,
+                                    traceId == null ? TraceContext.generate() : traceId);
+                        }
                         return message;
                     });
                 }

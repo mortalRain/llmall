@@ -35,12 +35,11 @@ spring:
       transport:
         dashboard: ${llmall.sentinel.dashboard:localhost:8090}
       http-method-specify: true #是否设置请求方式作为资源名称
-  rabbitmq:
-    host: ${LLMALL_MQ_HOST:192.168.189.128} # 容器化时由 LLMALL_MQ_HOST 覆盖（VM 上容器名是 mq）
-    port: 5672 # 端口
-    virtual-host: /llmall # 虚拟主机
-    username: llmall # 用户名
-    password: 123 # ---------------------------------------------------------------------------
+  # MQ 连接（host/port/vhost/账号）与消费口径（prefetch / 重试 / default-requeue-rejected / 死信）
+  # 统一来自 Nacos 的 shared-mq.yaml；地址由 application-local.yaml 的 llmall.mq.host 提供。
+  # 这里原来只有一段手写的"精简版"配置：cart 是 order.create 的消费方，消费失败口径与其它服务
+  # 不一致时，同一个故障在不同服务上的行为会分叉（一边热循环、一边静默丢弃）。
+  # ---------------------------------------------------------------------------
 # 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。
 # 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+
 # 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：
