@@ -21,9 +21,12 @@ logging:
     com.alibaba.nacos: warn
     org.springframework.amqp: warn
   pattern:
-    # 带服务名，便于多服务日志混在一起时区分来源
-    console: "%d{HH:mm:ss.SSS} %-5level [${spring.application.name}] %logger{36} - %msg%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [${spring.application.name}] [%thread] %logger{36} - %msg%n"
+    # 带服务名 + traceId，便于多服务日志混在一起时区分来源，也便于按 traceId 捞整条链路：
+    #   findstr "<traceId>" logs\*\spring.log
+    # traceId 由网关生成（TraceGlobalFilter）、经请求头/Feign/MQ 逐跳透传（common 的 TraceContext/TraceIdFilter）。
+    # %X{traceId:-} 里的 "-" 是默认值：没有 traceId 的线程（定时任务、启动日志）打印 "-" 而不是报错。
+    console: "%d{HH:mm:ss.SSS} %-5level [${spring.application.name}] [%X{traceId:-}] %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [${spring.application.name}] [%X{traceId:-}] [%thread] %logger{36} - %msg%n"
 
 # 运行时口径：所有经 Nacos 取配置的服务统一生效
 server:

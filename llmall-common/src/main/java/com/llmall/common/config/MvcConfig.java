@@ -1,8 +1,12 @@
 package com.llmall.common.config;
 import com.llmall.common.interceptor.UserInfoInterceptor;
+import com.llmall.common.trace.TraceIdFilter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
 import org.springframework.web.servlet.DispatcherServlet;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -24,5 +28,19 @@ public class MvcConfig implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(new UserInfoInterceptor(internalToken));
+    }
+
+    /**
+     * 全链路 traceId：最先执行的 Filter（最高优先级），保证本服务本次请求的所有日志
+     * （含鉴权、参数解析、异常处理）都带同一个 traceId。
+     * 上游是网关时它已生成好，跨服务 Feign 调用由 DefaultFeignConfig 继续透传。
+     */
+    @Bean
+    public FilterRegistrationBean<TraceIdFilter> traceIdFilter() {
+        FilterRegistrationBean<TraceIdFilter> registration = new FilterRegistrationBean<>(new TraceIdFilter());
+        registration.addUrlPatterns("/*");
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
+        registration.setName("traceIdFilter");
+        return registration;
     }
 }

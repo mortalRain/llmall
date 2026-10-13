@@ -4,7 +4,7 @@ spring:
     port: 5672
     virtual-host: /llmall
     username: llmall
-    password: 123
+    password: ${LLMALL_MQ_PW:123}
     listener:
       simple:
         prefetch: 1

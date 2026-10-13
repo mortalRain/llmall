@@ -51,6 +51,17 @@
             <groupId>com.alibaba.cloud</groupId>
             <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
         </dependency>
+        <!--nacos 配置中心：数据源/MyBatis/日志/接口文档口径统一由 Nacos 的 shared-*.yaml 下发，
+             不再由 4 个服务各复制一份（复制的那份会随时间漂移）。
+             bootstrap 阶段就要拉配置，所以必须同时引 spring-cloud-starter-bootstrap。-->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-bootstrap</artifactId>
+        </dependency>
         <!--Seata AT：跨服务强一致（RM 角色，扣库存的参与方；undo_log 已在 llmall-item 建好）。
             由 application.yaml 的 seata.enabled 控制是否生效。-->
         <dependency>

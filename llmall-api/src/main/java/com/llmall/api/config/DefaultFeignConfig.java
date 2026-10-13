@@ -2,6 +2,7 @@ package com.llmall.api.config;
 
 import com.llmall.api.fallback.ItemClientFallback;
 import com.llmall.common.constant.AuthConstants;
+import com.llmall.common.trace.TraceContext;
 import com.llmall.common.utils.UserContext;
 import feign.Logger;
 import feign.RequestInterceptor;
@@ -58,6 +59,10 @@ public class DefaultFeignConfig {
         return new RequestInterceptor() {
             @Override
             public void apply(RequestTemplate template) {
+                // 全链路 traceId：把当前线程的 traceId 继续带给下游服务。
+                // 取不到就现生成一个（例如定时任务/后台线程发起的调用）—— 宁可"从这一跳开始有 ID"，
+                // 也不要让下游 4 个服务的日志重新变成无主日志。
+                template.header(TraceContext.HEADER, TraceContext.currentOrGenerate());
                 // 内部凭证：与 user-info 同生共死 —— 只有"我们自己的调用"才配带上它。
                 // 空值不写，避免给下游一个"看似有值实则空串"的凭证（下游是严格相等比对，空串必然不通过）。
                 if (internalToken != null && !internalToken.isEmpty()) {

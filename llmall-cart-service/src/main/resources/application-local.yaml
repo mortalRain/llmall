@@ -1,12 +1,12 @@
 llmall:
   db:
     host: 192.168.189.128
-    pw: 123
+    pw: ${LLMALL_DB_PW:123}
   # 补齐中间件地址：llmall-cart-service 引用了 ${llmall.redis.host} / ${llmall.mq.host}（含 Nacos 共享配置里的占位符），
   # 本文件缺这两个键时会因占位符无法解析而**启动即退出**（Unable to resolve placeholder）。
   # 其它服务的 application-local.yaml 都有这一段，cart 之前漏了 —— "复制配置漏一块"的典型坑。
   redis:
     host: 192.168.189.128
-    pw: 123456   # 实测：虚拟机 Redis 的密码是 123456（不是 123）
+    pw: ${LLMALL_REDIS_PW:123456}   # 实测：虚拟机 Redis 的密码是 123456（不是 123）
   mq:
     host: 192.168.189.128

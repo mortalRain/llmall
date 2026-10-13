@@ -58,10 +58,10 @@ llmall:
   # 网关会剥离外部自带的同名头。llmall-internal-demo-token 仅用于本地演示：
   # 生产应由网关注入/配置中心下发且不对外暴露，并配合内网隔离；全项目必须配成同一个值。
   internal:
-    token: llmall-internal-demo-token
+    token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
     # 服务间调用凭证：本服务会调用 llmall-user-service 的扣款/退款内部接口（券的先收款后发券与失败退款），
     # 那些接口要求携带它；值必须与 llmall-user-service / llmall-pay-service / llmall-trade-service 一致。
-    service-token: llmall-service-demo-token
+    service-token: ${LLMALL_SERVICE_TOKEN:llmall-service-demo-token}
 
 # ---------------------------------------------------------------------------
 # 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。

@@ -2,9 +2,9 @@ server:
   port: 8080
 llmall:
   jwt:
-    location: classpath:llmall.jks
+    location: ${LLMALL_JKS_LOCATION:classpath:llmall.jks}
     alias: llmall
-    password: llmall123
+    password: ${LLMALL_JKS_PASSWORD:llmall123}
     tokenTTL: 30m      # 无感刷新时网关签发的新 access token 有效期
     refreshTTL: 7d     # 与 llmall-user-service 保持一致（真正校验以 Redis 白名单为准）
   redis:
@@ -16,7 +16,7 @@ llmall:
   # 网关在入口处已剥离客户端自带的同名头，所以这个值不会流到外部。
   # 所有服务（含网关自己）的 llmall.internal.token 必须一致；生产应由配置中心/密钥管理下发。
   internal:
-    token: llmall-internal-demo-token
+    token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
   auth:
     # ★【唯一权威来源】鉴权白名单只在这里生效 —— AuthProperties(@ConfigurationProperties("llmall.auth"))
     # 只存在于网关模块，各业务服务的 yaml 里曾经也抄了一份 llmall.auth.excludePaths，但**没有任何读取方**，

@@ -22,21 +22,8 @@ spring:
     # 必须用 local：dev 里的 llmall.db.host 是容器名 mysql，只有在 docker 网络里才解析得到，
     # 在 IDEA / 本机 java -jar 下会报 java.net.UnknownHostException: mysql（实测踩过）
     active: local
-  datasource:
-    url: jdbc:mysql://${llmall.db.host}:3306/llmall-pay?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    username: root
-    password: ${llmall.db.pw}
-    hikari:
-      # 连接池上限压到 5（默认是 10）：11 个服务 × 10 条 = 110 条，已接近 MySQL 默认 max_connections=151。
-      # 更隐蔽的是"服务被杀后连接不会立刻释放"——要等 MySQL wait_timeout（默认 8 小时）才回收，
-      # 反复重启几次就能把连接数打满（实测踩过：Too many connections，连 root 都被拒之门外）。
-      # 本地/演示负载下 5 条足够，且把最坏情况从 110 降到 55。
-      maximum-pool-size: 5
-      minimum-idle: 1
-      connection-timeout: 5000
-      idle-timeout: 60000
-      max-lifetime: 600000
+  # 数据源（url / driver / 账号 / hikari 池参数）统一来自 Nacos 的 shared-jdbc.yaml，本文件不再复制一份；
+  # 库名由下方 llmall.db.database 提供，host/pw 在 application-local.yaml。
   cloud:
     sentinel:
       transport:
@@ -49,40 +36,28 @@ spring:
     nacos:
       discovery:
         server-addr: ${NACOS_ADDR:192.168.189.128:8848}
-  rabbitmq:
-    host: ${LLMALL_MQ_HOST:192.168.189.128} # 容器化时由 LLMALL_MQ_HOST 覆盖（VM 上容器名是 mq）
-    port: 5672 # 端口
-    virtual-host: /llmall # 虚拟主机
-    username: llmall # 用户名
-    password: 123 # 密码
-  redis:
-    # 支付并发闸门用：同一支付单同一时刻只允许一个支付流程（key = pay:lock:{payOrderId}）。
-    # 为什么用 Redis 而不是数据库行锁：扣款是对 llmall-user-service 的远程调用，
-    # 事务持有时间不确定，用 SET NX PX 的短锁能让"重复提交"立刻失败并给出明确提示。
-    host: ${llmall.redis.host}
-    port: 6379
-    password: ${llmall.redis.pw}
-mybatis-plus:
-  configuration:
-    default-enum-type-handler: com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler
-  global-config:
-    db-config:
-      update-strategy: not_null
-      id-type: auto
+  # MQ 连接（shared-mq.yaml）与 Redis 连接（shared-redis.yaml）统一由 Nacos 下发，本文件不再复制一份：
+  #   - shared-mq.yaml   ：支付成功事件 pay.success 的交换机/队列与消费口径（prefetch、重试次数）
+  #   - shared-redis.yaml：支付并发闸门 pay:lock:{payOrderId} 用的 Redis（host/pw/lettuce 池）
+  # 地址由 application-local.yaml 的 llmall.mq.host / llmall.redis.host|pw 提供。
+  #
+  # 为什么闸门用 Redis 而不是数据库行锁：扣款是对 llmall-user-service 的远程调用，
+  # 事务持有时间不确定，用 SET NX PX 的短锁能让"重复提交"立刻失败并给出明确提示。
+# MyBatis-Plus 公共配置来自 Nacos 的 shared-mybatis.yaml。
 logging:
-  level:
-    # info 而非 debug：Feign 日志级别已降为 BASIC，com.llmall 若仍是 debug，
-    # 会把每条 MyBatis SQL 与参数都打出来（噪音大、拖慢压测，且可能把参数里的敏感值写进日志）。
-    com.llmall: info
+  # 日志级别与输出格式来自 Nacos 的 shared-log.yaml；这里只留"按服务名分目录"这一项服务私有配置。
   pattern:
     dateformat: HH:mm:ss:SSS
   file:
     path: "logs/${spring.application.name}"
 llmall:
+  db:
+    # 库名：shared-jdbc.yaml 用 ${llmall.db.database} 拼 url；host/pw 在 application-local.yaml。
+    database: llmall-pay
   jwt:
-    location: classpath:llmall.jks
+    location: ${LLMALL_JKS_LOCATION:classpath:llmall.jks}
     alias: llmall
-    password: llmall123
+    password: ${LLMALL_JKS_PASSWORD:llmall123}
     tokenTTL: 30m
   # 服务间内部调用凭证：调用交易域的"标记订单已支付"内部接口（TradeClient）时必须携带，
   # 值必须与 llmall-trade-service 的 llmall.internal.token 一致。不配置则调用会被 403 拒绝（fail-closed）。
@@ -94,12 +69,12 @@ llmall:
     # 【凭证一】"本请求经过网关"的内部凭证，也被 UserInfoInterceptor 用来判断 user-info 是否可信；
     # 由网关（认证后）与 Feign 注入，网关会剥离外部自带的同名头。
     # llmall-internal-demo-token 仅用于本地演示，生产应由配置中心下发且不对外暴露。
-    token: llmall-internal-demo-token
+    token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
     # 【凭证二】服务间调用凭证：调用交易域的"标记订单已支付"内部接口（TradeClient）时必须携带，
     # 值必须与 llmall-trade-service 的 llmall.internal.service-token 一致；不配置则调用被 403 拒绝（fail-closed）。
     # 与上面那条的区别：网关注入 x-internal-token（登录用户的请求也有），
     # 但对 x-service-token 只剥离、不注入，因此只有服务调用方拿得到。
-    service-token: llmall-service-demo-token
+    service-token: ${LLMALL_SERVICE_TOKEN:llmall-service-demo-token}
 # keytool -genkeypair -alias llmall -keyalg RSA -keypass llmall123 -keystore llmall.jks -storepass llmall123
 
 # ---------------------------------------------------------------------------
@@ -125,18 +100,7 @@ springdoc:
 
 
 # ---------------------------------------------------------------------------
-# 运行指标暴露（其余 6 个服务从 Nacos 的 shared-log.yaml 拿同一份配置；
-# 这 4 个服务没有独立 bootstrap，所以在本地补一份，保证 /actuator/prometheus 口径一致）。
+# 运行指标暴露（health/info/metrics/prometheus、liveness/readiness 探针、Sentinel 健康指标关闭）
+# 统一来自 Nacos 的 shared-log.yaml —— 本服务已补 bootstrap.yaml，与其余 6 个服务同源，不再各写一份。
 # prometheus 端点用于压测与容量规划（QPS/RT/连接池/JVM），/actuator/** 不进网关白名单，仅内网直连。
-# 注意：本文件是**权威来源**，不要为了"少写几行"把它挪走 —— 挪到 Nacos 需要先给这 4 个服务补 bootstrap。
 # ---------------------------------------------------------------------------
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,metrics,prometheus
-  endpoint:
-    health:
-      probes:
-        enabled: true
-      show-details: never

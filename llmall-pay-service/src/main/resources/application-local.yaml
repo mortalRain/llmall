@@ -1,8 +1,8 @@
 llmall:
   db:
     host: 192.168.189.128
-    pw: 123
+    pw: ${LLMALL_DB_PW:123}
   redis:
     # 支付并发闸门（pay:lock:{payOrderId}）用的 Redis，与网关同一实例
     host: 192.168.189.128
-    pw: 123456
+    pw: ${LLMALL_REDIS_PW:123456}

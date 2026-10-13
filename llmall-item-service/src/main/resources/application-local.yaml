@@ -1,4 +1,4 @@
 llmall:
   db:
     host: 192.168.189.128
-    pw: 123
+    pw: ${LLMALL_DB_PW:123}

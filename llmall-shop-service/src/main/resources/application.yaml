@@ -35,7 +35,7 @@ llmall:
   # llmall-internal-demo-token 仅用于本地演示：生产应由网关注入/配置中心下发且不对外暴露，
   # 并配合内网隔离；全项目所有服务必须配置成同一个值，否则会出现"请求全部未登录"。
   internal:
-    token: llmall-internal-demo-token
+    token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
 
 # ---------------------------------------------------------------------------
 # 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。

@@ -23,37 +23,10 @@ spring:
     # 注意：原配置是 dev，而 application-dev.yaml 里的 host 是容器名 mysql，
     # 只有当服务本身也跑在 docker 网络里才通；在 IDEA 里跑必须用 local。
     active: local
-  datasource:
-    url: jdbc:mysql://${llmall.db.host}:3306/llmall-user?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    username: root
-    password: ${llmall.db.pw}
-    hikari:
-      # 连接池上限压到 5（默认是 10）：11 个服务 × 10 条 = 110 条，已接近 MySQL 默认 max_connections=151。
-      # 更隐蔽的是"服务被杀后连接不会立刻释放"——要等 MySQL wait_timeout（默认 8 小时）才回收，
-      # 反复重启几次就能把连接数打满（实测踩过：Too many connections，连 root 都被拒之门外）。
-      # 本地/演示负载下 5 条足够，且把最坏情况从 110 降到 55。
-      maximum-pool-size: 5
-      minimum-idle: 1
-      connection-timeout: 5000
-      idle-timeout: 60000
-      max-lifetime: 600000
-  redis:
-    host: ${llmall.redis.host}
-    port: 6379
-    password: ${llmall.redis.pw}
-    lettuce:
-      pool:
-        max-active: 10
-        max-idle: 10
-        min-idle: 1
-  rabbitmq:
-    # 消费 order.paid 事件发放积分（亮点 B 的消费端）
-    host: ${llmall.mq.host}
-    port: 5672
-    virtual-host: /llmall
-    username: llmall
-    password: 123
+  # 数据源（url / driver / 账号 / hikari 池参数）、Redis 连接、MQ 连接统一来自 Nacos 的 shared-*.yaml
+  # （shared-jdbc / shared-redis / shared-mq），本文件不再复制一份：复制出来的那份会与 Nacos 漂移，
+  # 而"看起来配了、其实被 Nacos 覆盖"是最难查的一类问题。
+  # 库名由下方 llmall.db.database 提供，host/pw 在 application-local.yaml。
   cloud:
     sentinel:
       transport:
@@ -67,27 +40,21 @@ spring:
       # 占位符 + 默认值：本地开发落到 VM 地址；容器化时由 compose 注入 NACOS_ADDR=nacos:8848 覆盖。
       # 写成字面量会让"容器里按容器名解析"这条路径静默失效（表现为注册到不可达 IP）。
       server-addr: ${NACOS_ADDR:192.168.189.128:8848}
-mybatis-plus:
-  configuration:
-    default-enum-type-handler: com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler
-  global-config:
-    db-config:
-      update-strategy: not_null
-      id-type: auto
+# MyBatis-Plus 公共配置来自 Nacos 的 shared-mybatis.yaml。
 logging:
-  level:
-    # info 而非 debug：Feign 日志级别已降为 BASIC，com.llmall 若仍是 debug，
-    # 会把每条 MyBatis SQL 与参数都打出来（噪音大、拖慢压测，且可能把参数里的敏感值写进日志）。
-    com.llmall: info
+  # 日志级别与输出格式来自 Nacos 的 shared-log.yaml；这里只留"按服务名分目录"这一项服务私有配置。
   pattern:
     dateformat: HH:mm:ss:SSS
   file:
     path: "logs/${spring.application.name}"
 llmall:
+  db:
+    # 库名：shared-jdbc.yaml 用 ${llmall.db.database} 拼 url；host/pw 在 application-local.yaml。
+    database: llmall-user
   jwt:
-    location: classpath:llmall.jks
+    location: ${LLMALL_JKS_LOCATION:classpath:llmall.jks}
     alias: llmall
-    password: llmall123
+    password: ${LLMALL_JKS_PASSWORD:llmall123}
     tokenTTL: 30m      # access token：短
     refreshTTL: 7d     # refresh token：长，用于无感刷新
   debug:
@@ -102,11 +69,11 @@ llmall:
   # 网关会剥离外部请求自带的同名头。llmall-internal-demo-token 仅用于本地演示：
   # 生产应由网关注入/配置中心下发且不对外暴露，并配合内网隔离；全项目必须配成同一个值。
   internal:
-    token: llmall-internal-demo-token
+    token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
     # 服务间调用凭证：网关只剥离、不注入，外部（含已登录用户）拿不到。
     # 资金类内部接口（/users/money/deduct、/users/money/refund）用它做入口守卫，
     # 全项目必须配成同一个值；不配置则这些接口一律 403（fail-closed）。
-    service-token: llmall-service-demo-token
+    service-token: ${LLMALL_SERVICE_TOKEN:llmall-service-demo-token}
 # keytool -genkeypair -alias llmall -keyalg RSA -keypass llmall123 -keystore llmall.jks -storepass llmall123
 
 # ---------------------------------------------------------------------------
@@ -132,18 +99,7 @@ springdoc:
 
 
 # ---------------------------------------------------------------------------
-# 运行指标暴露（其余 6 个服务从 Nacos 的 shared-log.yaml 拿同一份配置；
-# 这 4 个服务没有独立 bootstrap，所以在本地补一份，保证 /actuator/prometheus 口径一致）。
+# 运行指标暴露（health/info/metrics/prometheus、liveness/readiness 探针、Sentinel 健康指标关闭）
+# 统一来自 Nacos 的 shared-log.yaml —— 本服务已补 bootstrap.yaml，与其余 6 个服务同源，不再各写一份。
 # prometheus 端点用于压测与容量规划（QPS/RT/连接池/JVM），/actuator/** 不进网关白名单，仅内网直连。
-# 注意：本文件是**权威来源**，不要为了"少写几行"把它挪走 —— 挪到 Nacos 需要先给这 4 个服务补 bootstrap。
 # ---------------------------------------------------------------------------
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,metrics,prometheus
-  endpoint:
-    health:
-      probes:
-        enabled: true
-      show-details: never

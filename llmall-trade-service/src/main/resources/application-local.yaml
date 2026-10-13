@@ -1,4 +1,9 @@
 llmall:
   db:
     host: 192.168.189.128
-    pw: 123
+    pw: ${LLMALL_DB_PW:123}
+  # MQ 地址：Nacos 的 shared-mq.yaml 用 ${llmall.mq.host} 拼连接。
+  # 本文件缺这个键会因占位符无法解析而**启动即退出**（Unable to resolve placeholder）。
+  # 容器化时由 LLMALL_MQ_HOST/该键覆盖为容器名 mq。
+  mq:
+    host: 192.168.189.128
