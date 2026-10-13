@@ -41,8 +41,9 @@ import static com.llmall.content.constant.ContentRedisConstants.CACHE_SET_MAX;
 /**
  * 内容域服务实现。
  *
- * 亮点 C 的起点就在这里：发布评价 → 落库 → **提交后**投递 review.created 事件 →
- * 门店域消费并重算热度 → 榜单与列表排序随之变化。
+ * 亮点 C 的起点就在这里：发布评价 → 落库 → **同事务登记到本地消息表** → 提交后投递
+ * review.created 事件 → 门店域消费并重算热度 → 榜单与列表排序随之变化。
+ * 登记与投递的可靠性细节见 {@link ContentEventPublisher}（审计 B4 生产端）。
  */
 @Slf4j
 @Service
@@ -87,7 +88,16 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         // 3. 推送到粉丝收件箱（写扩散，粉丝过多则跳过，改由读时拉取）
         followService.pushToFollowers(userId, blog.getId());
 
-        // 4. 事务提交后再投递事件（原因与"Redis 写为什么也要挪到提交后"见 TxAfterCommit 的类注释）
+        // 4. 登记事件并**提交后**投递（审计 B4 生产端改造点）
+        //
+        //    这里的调用**故意不再套 TxAfterCommit**：publishReviewCreated 内部做两件事 ——
+        //    ① record()：在当前事务里把 review.created 写进 llmall-content.message_log；
+        //    ② dispatchAfterCommit()：注册 afterCommit 回调，提交之后才真正 convertAndSend。
+        //    如果套回 TxAfterCommit.run(...)，record() 就会被推到提交之后执行、脱离业务事务，
+        //    于是又变成"业务已提交、消息可能没落库"（提交后崩溃即丢），而且进了 afterCommit
+        //    再注册 afterCommit 是嵌套注册，那个回调不会被执行。
+        //    时序上仍然是"提交后才发"（语义不变），只是多了一层"消息已随业务同事务落库"的保证：
+        //    MQ 抖动/提交后崩溃不再等于丢事件（失败会记 FAILED + 退避，由 MessageRetryTask 重发）。
         ReviewCreatedEvent event = new ReviewCreatedEvent()
                 .setBizId(String.valueOf(blog.getId()))
                 .setBlogId(blog.getId())
@@ -95,10 +105,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .setUserId(userId)
                 .setScore(blog.getScore())
                 .setOccurredAt(System.currentTimeMillis());
-        // afterCommit 只保证时序正确，不等于可靠投递 —— 提交后进程崩溃仍会丢消息，
-        // 真正可靠需要本地消息表 + 重试 + 对账。
-        TxAfterCommit.run("review.created blogId=" + blog.getId(),
-                () -> eventPublisher.publishReviewCreated(event));
+        eventPublisher.publishReviewCreated(event);
 
         log.info("评价发布成功: blogId={}, shopId={}, score={}", blog.getId(), blog.getShopId(), blog.getScore());
         return blog.getId();

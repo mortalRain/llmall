@@ -56,6 +56,7 @@ mysql -uroot -p < 20-promotion.sql              # 5.3  营销域建表（voucher
 mysql -uroot -p < 21-user-alter.sql             # 5.4  用户域改造（user 加 nick_name/icon + uk_phone，建 user_info/user_sign/points_flow）
 mysql -uroot -p < 04-balance-flow.sql           # 5.5  用户域建表（balance_flow 资金流水，B2 幂等键）
 mysql -uroot -p < 05-shop-message-log.sql       # 5.6  门店域建表（message_log 本地消息表，B4 可靠投递）
+mysql -uroot -p < 06-content-message-log.sql    # 5.7  内容域建表（message_log 本地消息表，B4 生产端）
 mysql -uroot -p < 22-user-time-default.sql      # 5.7  llmall-user.user 时间字段补默认值
 mysql -uroot -p < 30-content.sql                # 5.8  内容域建表（blog / blog_comments / blog_like / follow / feed_inbox）
 mysql -uroot -p < 23-content-image-default.sql  # 5.9  ⚠️ 依赖 5.8：blog 表由 30 号建立，23 号必须排在它后面
@@ -133,6 +134,7 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 | 21 | `21-user-alter.sql` | **新增守卫**：`COLUMNS`×1（nick_name/icon）+ `STATISTICS`×1（uk_phone） |
 | 04 | `04-balance-flow.sql` | `CREATE TABLE IF NOT EXISTS`（余额变动流水 + `uk_biz(biz_type,biz_no)` 幂等键；B2 资金一致性，脚本号小于 10 但依赖 21 建好的 user 表，故排在其后） |
 | 05 | `05-shop-message-log.sql` | `CREATE TABLE IF NOT EXISTS`（门店域本地消息表 `llmall-shop.message_log`，与 `llmall-trade.message_log` 同构；B4 评价→热度→搜索的可靠投递） |
+| 06 | `06-content-message-log.sql` | `CREATE TABLE IF NOT EXISTS`（内容域本地消息表 `llmall-content.message_log`，与 05 逐列一致；B4 `review.created` 生产端可靠投递） |
 | 22 | `22-user-time-default.sql` | **新增守卫**：`COLUMNS` 判断两列是否已是目标形态（`datetime/NOT NULL/DEFAULT CURRENT_TIMESTAMP[ ON UPDATE ...]`） |
 | 23 | `23-content-image-default.sql` | **新增守卫**：`TABLES`（表不存在要报错，不静默跳过）+ `COLUMNS` 判断 `images` 是否已是 `varchar(2048) NULL DEFAULT ''` |
 | 30 | `30-content.sql` | `CREATE TABLE IF NOT EXISTS` ×5 |
