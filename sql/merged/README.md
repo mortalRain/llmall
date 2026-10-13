@@ -54,12 +54,13 @@ mysql -uroot -p < 10-shop.sql                   # 5.1  门店域建表（shop / 
 mysql -uroot -p < 11-item-alter.sql             # 5.2  商品域改造（item 加 shop_id/type + 索引，建 stock_flow）
 mysql -uroot -p < 20-promotion.sql              # 5.3  营销域建表（voucher / seckill_voucher / user_voucher）
 mysql -uroot -p < 21-user-alter.sql             # 5.4  用户域改造（user 加 nick_name/icon + uk_phone，建 user_info/user_sign/points_flow）
-mysql -uroot -p < 22-user-time-default.sql      # 5.5  llmall-user.user 时间字段补默认值
-mysql -uroot -p < 30-content.sql                # 5.6  内容域建表（blog / blog_comments / blog_like / follow / feed_inbox）
-mysql -uroot -p < 23-content-image-default.sql  # 5.7  ⚠️ 依赖 5.6：blog 表由 30 号建立，23 号必须排在它后面
-mysql -uroot -p < 31-order-alter.sql            # 5.8  交易域改造（order 加 order_type/shop_id/voucher_id/verify_code/verify_time + 索引）
-mysql -uroot -p < 40-search.sql                 # 5.9  搜索域建表（shop_search_doc / search_hot_word / search_history）
-mysql -uroot -p < 41-search-geo.sql             # 5.10 ⚠️ 依赖 5.9：给 shop_search_doc 补 x/y
+mysql -uroot -p < 04-balance-flow.sql           # 5.5  用户域建表（balance_flow 资金流水，B2 幂等键）
+mysql -uroot -p < 22-user-time-default.sql      # 5.6  llmall-user.user 时间字段补默认值
+mysql -uroot -p < 30-content.sql                # 5.7  内容域建表（blog / blog_comments / blog_like / follow / feed_inbox）
+mysql -uroot -p < 23-content-image-default.sql  # 5.8  ⚠️ 依赖 5.7：blog 表由 30 号建立，23 号必须排在它后面
+mysql -uroot -p < 31-order-alter.sql            # 5.9  交易域改造（order 加 order_type/shop_id/voucher_id/verify_code/verify_time + 索引）
+mysql -uroot -p < 40-search.sql                 # 5.10 搜索域建表（shop_search_doc / search_hot_word / search_history）
+mysql -uroot -p < 41-search-geo.sql             # 5.11 ⚠️ 依赖 5.10：给 shop_search_doc 补 x/y
 
 # ── 6) 演示数据（**仅演示库，勿在生产执行**：50/51 内含按 id 区间的 DELETE） ──
 mysql -uroot -p < 50-seed-local-life-data.sql   # 6.1  门店套餐 + 精选实物 + 评价 + 演示订单
@@ -129,6 +130,7 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 | 11 | `11-item-alter.sql` | **新增守卫**：`COLUMNS`×1 + `STATISTICS`×2（并修掉 "ALTER TABLE item 表名后多一个 r" 的语法错） |
 | 20 | `20-promotion.sql` | `CREATE TABLE IF NOT EXISTS` ×3 |
 | 21 | `21-user-alter.sql` | **新增守卫**：`COLUMNS`×1（nick_name/icon）+ `STATISTICS`×1（uk_phone） |
+| 04 | `04-balance-flow.sql` | `CREATE TABLE IF NOT EXISTS`（余额变动流水 + `uk_biz(biz_type,biz_no)` 幂等键；B2 资金一致性，脚本号小于 10 但依赖 21 建好的 user 表，故排在其后） |
 | 22 | `22-user-time-default.sql` | **新增守卫**：`COLUMNS` 判断两列是否已是目标形态（`datetime/NOT NULL/DEFAULT CURRENT_TIMESTAMP[ ON UPDATE ...]`） |
 | 23 | `23-content-image-default.sql` | **新增守卫**：`TABLES`（表不存在要报错，不静默跳过）+ `COLUMNS` 判断 `images` 是否已是 `varchar(2048) NULL DEFAULT ''` |
 | 30 | `30-content.sql` | `CREATE TABLE IF NOT EXISTS` ×5 |

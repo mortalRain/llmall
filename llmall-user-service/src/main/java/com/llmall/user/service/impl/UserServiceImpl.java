@@ -11,17 +11,20 @@ import com.llmall.common.exception.UnauthorizedException;
 import com.llmall.common.utils.UserContext;
 import com.llmall.user.domain.dto.LoginFormDTO;
 import com.llmall.user.domain.dto.SmsLoginDTO;
+import com.llmall.user.domain.po.BalanceFlow;
 import com.llmall.user.domain.po.User;
 import com.llmall.user.domain.po.UserInfo;
 import com.llmall.user.domain.vo.TokenPair;
 import com.llmall.user.domain.vo.UserLoginVO;
 import com.llmall.user.enums.UserStatus;
+import com.llmall.user.mapper.BalanceFlowMapper;
 import com.llmall.user.mapper.UserInfoMapper;
 import com.llmall.user.mapper.UserMapper;
 import com.llmall.user.service.ITokenService;
 import com.llmall.user.service.IUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -59,6 +62,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     private final ITokenService tokenService;
     private final StringRedisTemplate redisTemplate;
     private final UserInfoMapper userInfoMapper;
+    /** 资金账本（余额流水）：每次余额变动都与余额更新写在同一事务里，见 deductMoney/refundMoney */
+    private final BalanceFlowMapper balanceFlowMapper;
 
     @Override
     public UserLoginVO login(LoginFormDTO loginDTO) {
@@ -145,13 +150,29 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         return toVO(user);
     }
 
+    /**
+     * 扣款：幂等键（bizNo）占位 → 条件更新余额 → 用真实余额修正流水，三步同一事务。
+     *
+     * <h3>为什么"先插流水再扣款"，而不是反过来</h3>
+     * 并发下两个请求会同时通过"查一下这笔业务号扣过没有"这道检查 —— 只有唯一键能真正挡住第二个。
+     * 先占位的好处是第二个请求**一分钱都不动**就退出；反过来写（先扣款再插流水）必须靠"唯一键冲突 →
+     * 抛异常 → 整个事务回滚"才能避免重复扣款，多走一次回滚、日志也难读。
+     * 余额不足时 ① 的占位会随事务一起回滚，不会留下"有扣款流水但钱没扣"的假账。
+     */
     @Override
-    public void deductMoney(String pw, Integer totalFee) {
-        log.info("开始扣款: userId={}, amount={}", UserContext.getUser(), totalFee);
+    @Transactional(rollbackFor = Exception.class)
+    public void deductMoney(String pw, Integer totalFee, String bizNo) {
+        Long userId = UserContext.getUser();
+        log.info("开始扣款: userId={}, amount={}, bizNo={}", userId, totalFee, bizNo);
         if (totalFee == null || totalFee <= 0) {
             throw new BizIllegalException("支付金额非法");
         }
-        User user = getById(UserContext.getUser());
+        // 幂等键是强制的（fail-closed）：没有它，上游重试/并发双击就会重复扣款，
+        // 事后连"哪一笔对应哪次支付"都分不清。宁可报错，也不退化成非幂等的扣款。
+        if (StrUtil.isBlank(bizNo)) {
+            throw new BadRequestException("扣款必须携带业务号（幂等键）");
+        }
+        User user = getById(userId);
         if (user == null) {
             throw new BizIllegalException("用户不存在");
         }
@@ -159,18 +180,47 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             // 【提示语修复】原来的"用户密码错误"没告诉用户错在哪（余额支付用的是"支付密码"，
             // 短信验证码登录自动注册的账号密码是随机串，用户根本不可能知道）。
             // 这里明确说明是支付密码，并给出演示环境的默认值。
-            throw new BizIllegalException("支付密码错误（演示环境各账号的支付密码默认 123456）");
+            throw new BizIllegalException("支付密码错误（演示环境各账号的支付密码默认 " + DEFAULT_PAY_PASSWORD + "）");
         }
-        // 【修复】条件更新 + 按受影响行数判断：余额不足时不再把余额扣成负数
-        int rows = baseMapper.updateMoney(UserContext.getUser(), totalFee);
+
+        int balanceBefore = user.getBalance() == null ? 0 : user.getBalance();
+        Long flowId;
+        try {
+            // ① 占位：balance_after 此刻只能按"扣款前余额 - 金额"估算，③ 会用真实余额修正
+            BalanceFlow flow = new BalanceFlow()
+                    .setUserId(userId)
+                    .setChangeAmount(-totalFee)
+                    .setBalanceAfter(balanceBefore - totalFee)
+                    .setBizType(BalanceFlow.TYPE_DEDUCT)
+                    .setBizNo(bizNo)
+                    .setRemark("余额支付");
+            balanceFlowMapper.insert(flow);
+            flowId = flow.getId();
+        } catch (DuplicateKeyException e) {
+            // 幂等命中：同一业务号已经扣过款（上游重试、Feign 重发、消息重投都会走到这里）——不是错误
+            log.info("该业务号已完成扣款，本次幂等跳过（未扣款）: userId={}, bizNo={}, amount={}",
+                    userId, bizNo, totalFee);
+            return;
+        }
+
+        // ② 条件更新（`balance >= amount` 写在 SQL 里），按受影响行数判断：余额不足时不会扣成负数
+        int rows = baseMapper.updateMoney(userId, totalFee);
         if (rows == 0) {
-            throw new BizIllegalException("余额不足，当前余额 " + (user.getBalance() / 100.0) + " 元，本单应付 " + (totalFee / 100.0) + " 元");
+            throw new BizIllegalException("余额不足，当前余额 " + (balanceBefore / 100.0) + " 元，本单应付 " + (totalFee / 100.0) + " 元");
         }
-        log.info("扣款成功: userId={}, amount={}", user.getId(), totalFee);
+
+        // ③ 修正账本：并发场景下"扣款前余额 - 金额"未必等于最终值，账本里的 balance_after 必须是真实值，
+        //    否则对账时 SUM(change_amount) 与余额对不上，账本就成了误导
+        User after = getById(userId);
+        if (after != null && flowId != null) {
+            balanceFlowMapper.updateById(new BalanceFlow().setId(flowId).setBalanceAfter(after.getBalance()));
+        }
+        log.info("扣款成功: userId={}, amount={}, bizNo={}, 扣款后余额={}",
+                userId, totalFee, bizNo, after == null ? null : after.getBalance());
     }
 
     /**
-     * 退款入账：把订单实付金额加回用户余额。
+     * 退款入账：把订单实付金额加回用户余额，同样以 bizNo 幂等。
      *
      * <h3>为什么"谁的钱"要用参数传、又在方法内再校验一次</h3>
      * 退款有两种触发方：用户自己在交易域发起（有登录态，Feign 会透传 user-info），
@@ -180,9 +230,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
      * 网关会剥离客户端伪造的 user-info 头，所以外部请求必然带着请求者自己的 id，
      * 拿别人的 id 调就会被 403 挡住；而内部调用（无 user-info 头）不受影响。
      * 换句话说，把"越权判定"放在用户域而不是只靠"接口是内部的"这种口头约定上。
+     *
+     * <h3>退款幂等为什么是"扣款后失败自动退款"能安全重试的前提</h3>
+     * 支付流程失败时的补偿退款可能被触发两次（方法内补偿 + 事务回滚后的补偿），
+     * 同一个 bizNo 的第二次会在唯一键上被挡下 —— 否则用户会收到两倍退款。
      */
     @Override
-    public void refundMoney(Long userId, Integer amount) {
+    @Transactional(rollbackFor = Exception.class)
+    public void refundMoney(Long userId, Integer amount, String bizNo) {
         if (userId == null) {
             throw new BadRequestException("退款用户不能为空");
         }
@@ -190,19 +245,42 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         if (amount == null || amount <= 0) {
             throw new BizIllegalException("退款金额必须大于 0");
         }
+        if (StrUtil.isBlank(bizNo)) {
+            throw new BadRequestException("退款必须携带业务号（幂等键）");
+        }
         Long currentUser = UserContext.getUser();
         if (currentUser != null && !currentUser.equals(userId)) {
             throw new ForbiddenException("无权操作他人账户余额");
         }
+
+        Long flowId;
+        try {
+            BalanceFlow flow = new BalanceFlow()
+                    .setUserId(userId)
+                    .setChangeAmount(amount)
+                    .setBalanceAfter(0)
+                    .setBizType(BalanceFlow.TYPE_REFUND)
+                    .setBizNo(bizNo)
+                    .setRemark("退款入账");
+            balanceFlowMapper.insert(flow);
+            flowId = flow.getId();
+        } catch (DuplicateKeyException e) {
+            log.info("该业务号已完成退款入账，本次幂等跳过（未重复加钱）: userId={}, bizNo={}, amount={}",
+                    userId, bizNo, amount);
+            return;
+        }
+
         // 条件更新 + 按受影响行数判断：用户不存在时不报"成功"，避免上游以为钱已经到账
         int rows = baseMapper.refundMoney(userId, amount);
         if (rows == 0) {
             throw new BizIllegalException("退款失败：用户不存在");
         }
-        // 不加新表/新列的前提下，INFO 日志是这次资金动作的唯一留痕（对账时可与交易域订单号关联）
         User after = getById(userId);
-        log.info("退款入账成功: userId={}, amount={}分, 退款后余额={}", userId, amount,
-                after == null ? null : after.getBalance());
+        if (after != null && flowId != null) {
+            balanceFlowMapper.updateById(new BalanceFlow().setId(flowId).setBalanceAfter(after.getBalance()));
+        }
+        log.info("退款入账成功: userId={}, amount={}分, bizNo={}, 退款后余额={}",
+                userId, amount, bizNo, after == null ? null : after.getBalance());
     }
 
     private void assertNotFrozen(User user) {

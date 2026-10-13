@@ -250,7 +250,10 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         }
 
         // ③ 先收款：付费券在此扣款（免费券 pay_value=0 直接跳过，保持免费领取语义）
-        boolean paid = chargeVoucherPurchase(voucher, userId, pw);
+        //    幂等键按"一人一张券"取：uk_user_voucher 已经保证一个用户对一张券只能买一次，
+        //    于是同一个业务号的重复到达（用户重复点、网络重试）不会重复扣款
+        String purchaseBizNo = "VOUCHER-" + voucherId + "-" + userId;
+        boolean paid = chargeVoucherPurchase(voucher, userId, pw, purchaseBizNo);
 
         try {
             // ④ 扣 DB 库存：只有配了秒杀库存行的券才有"库存"概念，rows=0 即已领完；这里不扣 Redis，DB 才是两条路径共同的最终闸门
@@ -282,7 +285,8 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             return userVoucher.getId();
         } catch (RuntimeException e) {
             // ⑥ 失败补偿：券已被事务回滚，已收的券款必须原路退回
-            refundPurchaseQuietly(paid, voucher, userId, "领券失败补偿");
+            //    退款幂等键与扣款一一对应（VOUCHER_REFUND-...），重复补偿只退一次
+            refundPurchaseQuietly(paid, voucher, userId, "领券失败补偿", "VOUCHER_REFUND-" + voucherId + "-" + userId);
             throw e;
         }
     }
@@ -325,9 +329,14 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         warmUpSeckillCache(voucherId, config);
 
         // ④ 先收款：钱不到位就不去占稀缺名额 —— 扣款是最易失败的跨服务动作，放到 Lua 之后要靠补偿还名额
-        boolean paid = chargeVoucherPurchase(voucher, userId, pw);
-
+        //    token 必须在收款之前生成：它既是抢购凭证，也是这一次收款的幂等键
+        //    （同一个 token 重复到达不会重复扣款；下一次抢购是新 token，天然是一笔新业务）
         String token = IdUtil.fastSimpleUUID();
+        String purchaseBizNo = "VOUCHER-SECKILL-" + token;
+        //    退款幂等键也用 token：与 MQ 消费端落库失败后的退款（refundSeckillPurchase）**同一个键**，
+        //    避免"投递已成功但响应丢失"时两边各退一次造成双倍退款
+        String refundBizNo = "SECKILL_REFUND:" + token;
+        boolean paid = chargeVoucherPurchase(voucher, userId, pw, purchaseBizNo);
 
         // ⑤ 先写 PENDING 结果标记、再投递消息：顺序反了，消费者的 SUCCESS 会被随后的 PENDING 盖掉
         writeSeckillResult(SeckillResultVO.pending(token, voucherId, "抢购请求已受理，正在生成券"));
@@ -336,22 +345,22 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         Long code = executeSeckillScript(voucherId, config, userId);
         if (code == null) {
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "系统繁忙，抢购失败"));
-            refundPurchaseQuietly(paid, voucher, userId, "秒杀预扣失败补偿");
+            refundPurchaseQuietly(paid, voucher, userId, "秒杀预扣失败补偿", refundBizNo);
             throw new BizIllegalException("系统繁忙，请稍后重试");
         }
         if (code == LUA_DUPLICATE) {
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "您已抢购过该券"));
-            refundPurchaseQuietly(paid, voucher, userId, "秒杀重复抢购补偿");
+            refundPurchaseQuietly(paid, voucher, userId, "秒杀重复抢购补偿", refundBizNo);
             throw new BizIllegalException("您已抢购过该券，请勿重复抢购");
         }
         if (code == LUA_SOLD_OUT) {
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "该券已抢完"));
-            refundPurchaseQuietly(paid, voucher, userId, "秒杀已抢完补偿");
+            refundPurchaseQuietly(paid, voucher, userId, "秒杀已抢完补偿", refundBizNo);
             throw new BizIllegalException("手慢了，该券已被抢完");
         }
         if (code != LUA_SUCCESS) {
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "抢购失败"));
-            refundPurchaseQuietly(paid, voucher, userId, "秒杀预扣失败补偿");
+            refundPurchaseQuietly(paid, voucher, userId, "秒杀预扣失败补偿", refundBizNo);
             throw new BizIllegalException("抢购失败，请稍后重试");
         }
 
@@ -363,7 +372,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             // 发不出去等于预扣白扣：回补 Redis 名额 + 退回券款 + 标记失败，否则名额占死且无记录可查
             log.error("秒杀消息投递失败，回补 Redis 预扣: voucherId={}, userId={}", voucherId, userId, e);
             compensateSeckillDeduction(voucherId, userId);
-            refundPurchaseQuietly(paid, voucher, userId, "秒杀消息投递失败补偿");
+            refundPurchaseQuietly(paid, voucher, userId, "秒杀消息投递失败补偿", refundBizNo);
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "系统繁忙，抢购失败，请稍后重试"));
             throw new BizIllegalException("系统繁忙，抢购失败，请稍后重试");
         }
@@ -396,7 +405,9 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             log.info("该秒杀购买款已退款过，幂等跳过: token={}", token);
             return false;
         }
-        userClient.refundMoney(userId, (int) payValue);
+        // 幂等键必须与秒杀收款路径用的退款键一致（SECKILL_REFUND:<token>），
+        // 否则"MQ 投递成功但响应丢失"这类场景会让两条路径各退一次 → 用户拿到双倍退款
+        userClient.refundMoney(userId, (int) payValue, "SECKILL_REFUND:" + token);
         log.warn("{}：秒杀购券款已退回: token={}, userId={}, voucherId={}, amount={}分",
                 scene, token, userId, voucherId, payValue);
         return true;
@@ -667,8 +678,11 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
 
     /**
      * 付费券收款：pay_value = 0 的免费券直接返回 false；付费券复用 llmall-user-service 带支付密码校验 + 余额条件更新的扣款接口，不新增内部免密通道。
+     *
+     * @param bizNo 幂等键（由调用方给出，必须能唯一标识"这一次购买"）：普通领券用 {@code VOUCHER-<券id>-<用户id>}，
+     *              秒杀用 {@code VOUCHER-SECKILL-<token>}。下游按它落资金流水并去重 —— 重复到达不会重复扣款。
      */
-    private boolean chargeVoucherPurchase(Voucher voucher, Long userId, String pw) {
+    private boolean chargeVoucherPurchase(Voucher voucher, Long userId, String pw, String bizNo) {
         long payValue = payValueOf(voucher);
         if (payValue <= 0) {
             return false;
@@ -677,11 +691,11 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             throw new BadRequestException("该券为付费券（" + (payValue / 100.0) + " 元），请提交支付密码");
         }
         try {
-            // 支付密码走请求体而非 URL（query 会被 access log 与代理原样记录）；bizNo 用 VOUCHER- 前缀，便于对账区分买券与付订单
+            // 支付密码走请求体而非 URL（query 会被 access log 与代理原样记录）；bizNo 用 VOUCHER 前缀，便于对账区分买券与付订单
             userClient.deductMoney(new MoneyDeductDTO()
                     .setPw(pw)
                     .setAmount((int) payValue)
-                    .setBizNo("VOUCHER-" + voucher.getId()));
+                    .setBizNo(bizNo));
         } catch (Exception e) {
             // 扣款失败必须在发券之前结束：把上游 msg 原样带出（密码错/余额不足对用户有用），不回显内部堆栈
             String reason = extractUpstreamMsg(e);
@@ -711,18 +725,23 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         return "请检查支付密码与账户余额";
     }
 
-    /** 券款退回补偿：失败只记 ERROR —— 钱没退成功留有可检索日志可人工对账，但不能因退款接口抖动吞掉主流程异常 */
-    private void refundPurchaseQuietly(boolean paid, Voucher voucher, Long userId, String scene) {
+    /**
+     * 券款退回补偿：失败只记 ERROR —— 钱没退成功留有可检索日志可人工对账，但不能因退款接口抖动吞掉主流程异常。
+     *
+     * @param refundBizNo 退款幂等键：必须与"这一笔收款"一一对应（秒杀路径与 MQ 消费端的落库失败退款共用
+     *                    {@code SECKILL_REFUND:<token>}），这样"投递已成功但响应丢失"时两边各退一次也只会退一次钱。
+     */
+    private void refundPurchaseQuietly(boolean paid, Voucher voucher, Long userId, String scene, String refundBizNo) {
         if (!paid) {
             return;
         }
         long payValue = payValueOf(voucher);
         try {
-            userClient.refundMoney(userId, (int) payValue);
-            log.warn("{}：券款已退回: userId={}, voucherId={}, amount={}分", scene, userId, voucher.getId(), payValue);
+            userClient.refundMoney(userId, (int) payValue, refundBizNo);
+            log.warn("{}：券款已退回: userId={}, voucherId={}, amount={}分, bizNo={}", scene, userId, voucher.getId(), payValue, refundBizNo);
         } catch (Exception e) {
-            log.error("{}：券款退回失败，需人工补偿: userId={}, voucherId={}, amount={}分",
-                    scene, userId, voucher.getId(), payValue, e);
+            log.error("{}：券款退回失败，需人工补偿: userId={}, voucherId={}, amount={}分, bizNo={}",
+                    scene, userId, voucher.getId(), payValue, refundBizNo, e);
         }
     }
 

@@ -12,6 +12,7 @@ import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.utils.BeanUtils;
 import com.llmall.common.utils.UserContext;
+import com.llmall.common.trace.TraceContext;
 import com.llmall.pay.domain.dto.PayApplyDTO;
 import com.llmall.pay.domain.dto.PayOrderFormDTO;
 import com.llmall.pay.domain.po.PayOrder;
@@ -22,6 +23,7 @@ import feign.FeignException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -58,6 +60,15 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
     private final RabbitTemplate rabbitTemplate;
 
     private final StringRedisTemplate redisTemplate;
+
+    /**
+     * 故障注入开关（默认关闭）：扣款成功后人为抛异常，用来验证"钱已扣 → 流程失败 → 自动退款补偿 + 支付单归位"
+     * 这条链路。为什么需要它：这条路径的下游校验全部发生在扣款之前，正常操作几乎无法稳定复现，
+     * 而它恰恰是最不能出错的一段（出错就是用户钱没了）。生产环境必须保持 false（默认值即 false）。
+     * 用法（只在本机验证时）：{@code --llmall.pay.fault-injection.after-deduct=true}
+     */
+    @Value("${llmall.pay.fault-injection.after-deduct:false}")
+    private boolean faultInjectAfterDeduct;
 
     @Override
     public String applyPayOrder(PayApplyDTO applyDTO) {
@@ -120,10 +131,23 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
         if (!Boolean.TRUE.equals(locked)) {
             throw new BizIllegalException("支付处理中，请勿重复提交");
         }
-        // 已扣款的金额与付款人：补偿时要用（扣款成功后才有意义）
-        boolean moneyDeducted = false;
-        Integer deductedAmount = null;
-        Long payerId = null;
+
+        // ---- 本次支付尝试的幂等键 ----
+        // 口径：PAY:<支付单id>:<本次请求的 traceId>
+        //  · 为什么不能只用订单号：这次尝试失败会把钱退回去，用户随后**重新支付**是一次新的资金动作；
+        //    沿用同一个业务号会被下游当成"已扣过款"而跳过扣款 → 用户不花钱就拿到订单（比重复扣款更严重）；
+        //  · 为什么带 traceId 而不是随机数：Feign 内部重试、上游重试复用同一条请求的 traceId，
+        //    于是"同一次尝试"天然幂等，"另一次尝试"天然是一笔新业务。
+        String attemptId = TraceContext.current() == null
+                ? UUID.randomUUID().toString().replace("-", "") : TraceContext.current();
+        String deductBizNo = "PAY:" + payOrderId + ":" + attemptId;
+        String refundBizNo = "PAYFAIL:" + deductBizNo;
+
+        // 扣款的"资金责任"：在扣款之前就把事务收尾钩子注册好 —— 这样"扣款成功后任何失败"
+        // （方法内异常回滚、以及**提交阶段**失败）都在退款补偿的保护范围内（见 registerTransactionCompletion）
+        PaymentLiability liability = new PaymentLiability(payOrderId, refundBizNo);
+        registerTransactionCompletion(lockKey, lockValue, liability);
+
         try {
             // 1.查询支付单
             PayOrder po = getById(payOrderFormDTO.getId());
@@ -152,14 +176,22 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
                 throw new BizIllegalException("支付金额与订单金额不一致，无法支付");
             }
             // 4.尝试扣减余额（这一步之后钱就已经离开用户账户，必须为它负责到底）
-            deductedAmount = po.getAmount();
-            payerId = po.getBizUserId() != null ? po.getBizUserId() : currentUserId;
-            // 支付密码改走请求体，避免出现在请求行里被 Feign 日志与 access log 记录；顺带带上交易订单号便于对账
+            Long payerId = po.getBizUserId() != null ? po.getBizUserId() : currentUserId;
+            Integer deductedAmount = po.getAmount();
+            liability.arm(payerId, deductedAmount);
+            // 支付密码改走请求体，避免出现在请求行里被 Feign 日志与 access log 记录；
+            // bizNo 是本次尝试的幂等键：下游按它落资金流水并去重，重复到达不会二次扣款
             userClient.deductMoney(new MoneyDeductDTO()
                     .setPw(payOrderFormDTO.getPw())
                     .setAmount(deductedAmount)
-                    .setBizNo(po.getBizOrderNo() == null ? null : String.valueOf(po.getBizOrderNo())));
-            moneyDeducted = true;
+                    .setBizNo(deductBizNo));
+            liability.markDeducted();
+            // 故障注入（默认关闭）：扣款成功后人为失败，用来验证"钱已扣 → 失败 → 自动退款"这条链路。
+            // 没有它这条路径在演示环境几乎无法稳定复现（下游校验都在扣款之前），而它恰恰是最不能出错的一段。
+            if (faultInjectAfterDeduct) {
+                throw new IllegalStateException("【故障注入】扣款后人为失败（llmall.pay.fault-injection.after-deduct=true），"
+                        + "用于验证资金补偿与事务回滚后的归位");
+            }
             // 5.修改支付单状态（条件更新 1→3；失败说明状态已被改走，钱必须退）
             boolean success = markPayOrderSuccess(payOrderFormDTO.getId(), LocalDateTime.now());
             if (!success) {
@@ -174,60 +206,151 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
         } catch (RuntimeException e) {
             // 4.x 补偿：扣款之后失败必须把钱退回去，否则就是钱扣了、支付单还是待支付，用户会重复支付且账对不上；
             //     退款失败只记日志（需人工介入），但绝不能吞掉原始异常。
-            if (moneyDeducted) {
-                compensateDeduct(payOrderId, payerId, deductedAmount, e);
+            //     这里立即退一次是"快路径"（用户马上看到钱回来了）；事务收尾钩子里还会兜一次（覆盖提交阶段失败），
+            //     两次用的是同一个退款幂等键 refundBizNo，重复执行不会重复退钱。
+            if (liability.isDeducted()) {
+                compensateDeduct(liability.getPayOrderId(), liability.getPayerId(), liability.getAmount(),
+                        liability.getRefundBizNo(), e);
+                liability.markCompensated();
             } else {
                 log.warn("支付失败且尚未扣款，无需退款补偿: payOrderId={}, 原因={}", payOrderId, e.getMessage());
             }
-            // 5.x 状态归位：本地事务马上要回滚，回滚后支付单不会停在中间态；为了让归位对任何非终态都成立，
-            //     在事务真正回滚之后再执行一次幂等的条件更新（只动 0/1 这类非终态）。
-            scheduleWaitPayRestoreAfterRollback(payOrderId);
+            // 5.x 状态归位与释放锁都交给事务收尾钩子（registerTransactionCompletion）：它们都必须在
+            //     事务真正结束之后执行 —— 在方法体里做，写入会被随后的回滚一起带走、锁也会提前放开。
             throw e;
-        } finally {
-            releaseLock(lockKey, lockValue);
         }
+        // 注意：这里**没有** finally 释放锁 —— 见 registerTransactionCompletion 的说明
     }
 
-    /** 扣款补偿：把已经扣掉的余额退回付款人，并留下需要核对的痕迹 */
-    private void compensateDeduct(Long payOrderId, Long payerId, Integer amount, RuntimeException cause) {
-        if (payerId == null || amount == null) {
-            log.error("支付失败且扣款信息不完整，无法自动退款，需人工核对: payOrderId={}", payOrderId, cause);
-            return;
-        }
-        try {
-            // 复用用户域已有的退款接口：它与订单退款入账是同一条资金路径，不新造只有支付域会走的加钱通道，避免对账口径分叉
-            userClient.refundMoney(payerId, amount);
-            log.error("支付流程失败且已扣款，已自动退款补偿: payOrderId={}, payerId={}, amount={}，原因={}",
-                    payOrderId, payerId, amount, cause.getMessage(), cause);
-        } catch (Exception refundError) {
-            log.error("【需人工介入】支付流程失败且自动退款补偿也失败，用户余额可能已被扣走: payOrderId={}, payerId={}, amount={}",
-                    payOrderId, payerId, amount, refundError);
-        }
-    }
-
-    /** 事务回滚后把支付单归位为待支付：必须在回滚之后执行（事务内写入会被一起回滚），且只收敛 0/1 这类非终态 —— 已是 3 或 2 的账本不能被改回来 */
-    private void scheduleWaitPayRestoreAfterRollback(Long payOrderId) {
+    /**
+     * 事务收尾（提交或回滚之后执行）：状态归位 → 退款补偿 → 释放锁。
+     *
+     * <h3>为什么这三件事都必须在这里做，而不是在方法体的 finally / catch 里</h3>
+     * <ol>
+     *   <li><b>释放锁</b>：方法体的 finally 在 @Transactional 提交**之前**执行，锁一放开，
+     *       另一个请求立刻拿到锁、读到还没提交的支付单（仍是"待支付"）→ 通过检查 → 重复扣款。
+     *       锁必须活到事务真正结束。</li>
+     *   <li><b>状态归位</b>：回滚会把事务内的写入一起带走，所以"把支付单从中间态改回待支付"
+     *       只能在回滚之后做。</li>
+     *   <li><b>退款补偿</b>：方法体内的 catch 只能覆盖"方法体抛异常"，覆盖不了
+     *       <b>提交阶段失败</b>（此时方法已正常返回、catch 根本不会执行，而钱已经扣了）；
+     *       而提交失败时 Spring 传进来的 status 是 {@code STATUS_UNKNOWN}，所以判据必须是
+     *       "不等于 COMMITTED"，不能只判 ROLLED_BACK。</li>
+     * </ol>
+     * 退款按 refundBizNo 幂等，因此与快路径的补偿重复执行也只会退一次钱。
+     */
+    private void registerTransactionCompletion(String lockKey, String lockValue, PaymentLiability liability) {
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            // 理论上不会发生（本方法由 @Transactional 调用）；真发生了也必须放锁，否则要等 TTL
+            log.warn("事务同步未激活，支付收尾钩子未注册（锁将在 TTL 后自动过期）: payOrderId={}", liability.getPayOrderId());
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCompletion(int status) {
-                if (status != TransactionSynchronization.STATUS_ROLLED_BACK) {
-                    return;
-                }
                 try {
-                    boolean reset = lambdaUpdate()
-                            .eq(PayOrder::getId, payOrderId)
-                            .in(PayOrder::getStatus, PayStatus.NOT_COMMIT.getValue(), PayStatus.WAIT_BUYER_PAY.getValue())
-                            .set(PayOrder::getStatus, PayStatus.WAIT_BUYER_PAY.getValue())
-                            .update();
-                    log.warn("支付流程回滚，支付单已归位为待支付: payOrderId={}, 是否发生变更={}", payOrderId, reset);
-                } catch (Exception e) {
-                    log.error("支付单归位为待支付失败（状态仍为原值，可重试）: payOrderId={}", payOrderId, e);
+                    if (status != TransactionSynchronization.STATUS_COMMITTED) {
+                        restoreWaitPayIfNotTerminal(liability.getPayOrderId());
+                        if (liability.isDeducted() && !liability.isCompensated()) {
+                            compensateDeduct(liability.getPayOrderId(), liability.getPayerId(), liability.getAmount(),
+                                    liability.getRefundBizNo(),
+                                    new IllegalStateException("支付事务未提交（status=" + status + "），已扣款项必须退回"));
+                            liability.markCompensated();
+                        }
+                    }
+                } finally {
+                    releaseLock(lockKey, lockValue);
                 }
             }
         });
+    }
+
+    /** 事务未提交时把支付单归位为待支付：只收敛 0/1 这类非终态 —— 已是 3 或 2 的账本不能被改回来 */
+    private void restoreWaitPayIfNotTerminal(Long payOrderId) {
+        try {
+            boolean reset = lambdaUpdate()
+                    .eq(PayOrder::getId, payOrderId)
+                    .in(PayOrder::getStatus, PayStatus.NOT_COMMIT.getValue(), PayStatus.WAIT_BUYER_PAY.getValue())
+                    .set(PayOrder::getStatus, PayStatus.WAIT_BUYER_PAY.getValue())
+                    .update();
+            log.warn("支付流程未提交，支付单已归位为待支付: payOrderId={}, 是否发生变更={}", payOrderId, reset);
+        } catch (Exception e) {
+            log.error("支付单归位为待支付失败（状态仍为原值，可重试）: payOrderId={}", payOrderId, e);
+        }
+    }
+
+    /**
+     * 一次支付尝试里的"资金责任"：扣款成功后就一直挂着，直到事务提交（责任解除）或未提交（必须退款）。
+     * 用可变对象而不是方法局部变量，是因为要跨 catch 块与事务收尾钩子共享状态。
+     */
+    private static final class PaymentLiability {
+        private final Long payOrderId;
+        private final String refundBizNo;
+        private volatile Long payerId;
+        private volatile Integer amount;
+        private volatile boolean deducted;
+        private volatile boolean compensated;
+
+        private PaymentLiability(Long payOrderId, String refundBizNo) {
+            this.payOrderId = payOrderId;
+            this.refundBizNo = refundBizNo;
+        }
+
+        /** 记录付款人与金额（补偿时要用），在真正扣款之前调用 */
+        private void arm(Long payerId, Integer amount) {
+            this.payerId = payerId;
+            this.amount = amount;
+        }
+
+        private void markDeducted() {
+            this.deducted = true;
+        }
+
+        private void markCompensated() {
+            this.compensated = true;
+        }
+
+        private boolean isDeducted() {
+            return deducted;
+        }
+
+        private boolean isCompensated() {
+            return compensated;
+        }
+
+        private Long getPayOrderId() {
+            return payOrderId;
+        }
+
+        private String getRefundBizNo() {
+            return refundBizNo;
+        }
+
+        private Long getPayerId() {
+            return payerId;
+        }
+
+        private Integer getAmount() {
+            return amount;
+        }
+    }
+
+    /** 扣款补偿：把已经扣掉的余额退回付款人，并留下需要核对的痕迹（退款按 refundBizNo 幂等，重复补偿只退一次） */
+    private void compensateDeduct(Long payOrderId, Long payerId, Integer amount, String refundBizNo, Throwable cause) {
+        if (payerId == null || amount == null) {
+            log.error("支付失败且扣款信息不完整，无法自动退款，需人工核对: payOrderId={}", payOrderId, cause);
+            return;
+        }
+        try {
+            // 复用用户域已有的退款接口：它与订单退款入账是同一条资金路径，不新造只有支付域会走的加钱通道，避免对账口径分叉。
+            // bizNo 用 "PAYFAIL:<扣款业务号>"：与扣款一一对应，快路径与事务收尾各补偿一次也只退一次钱
+            userClient.refundMoney(payerId, amount, refundBizNo);
+            log.error("支付流程失败且已扣款，已自动退款补偿: payOrderId={}, payerId={}, amount={}, bizNo={}，原因={}",
+                    payOrderId, payerId, amount, refundBizNo, cause == null ? "未知" : cause.getMessage(), cause);
+        } catch (Exception refundError) {
+            log.error("【需人工介入】支付流程失败且自动退款补偿也失败，用户余额可能已被扣走: payOrderId={}, payerId={}, amount={}, bizNo={}",
+                    payOrderId, payerId, amount, refundBizNo, refundError);
+        }
     }
 
     /** 释放锁：必须"先比对值再删"，否则会把锁过期后别人拿到的那把锁误删 */

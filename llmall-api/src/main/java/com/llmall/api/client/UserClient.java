@@ -24,16 +24,22 @@ public interface UserClient {
     void deductMoney(@RequestBody MoneyDeductDTO deductDTO);
 
     /**
-     * 退款：把余额加回指定用户（内部接口，供交易域的退款闭环调用）。
+     * 退款：把余额加回指定用户（内部接口，供交易域/营销域/支付域的退款闭环调用）。
      *
      * 为什么把 userId 显式作为参数传，而不是像 deductMoney 那样从 UserContext 取：
      * 退款可能由**非用户本人**的路径触发（超时关单/人工退款/后台任务），
      * 那些线程里没有登录上下文；而这里的 userId 取自交易域自己库里的订单归属人，
      * 不是前端传参，因此不存在"指定退款给谁"的越权面 —— 权限边界在交易域
      * （只允许订单归属人发起），不在这个内部接口上。
+     *
+     * <p>bizNo 是**必填的幂等键**（下游 fail-closed）：同一笔退款被重复调用时只入账一次。
+     * 这是"扣款后失败要自动退款"能安全重试的前提 —— 补偿退款可能被方法内补偿与
+     * 事务回滚后补偿各触发一次，没有幂等键用户就会收到两倍退款。
+     * 口径：{@code ORDER_REFUND:<订单id>}、{@code PAYFAIL:<扣款业务号>}、{@code SECKILL_REFUND:<token>}。
      */
     @PostMapping("/users/money/refund")
-    void refundMoney(@RequestParam("userId") Long userId, @RequestParam("amount") Integer amount);
+    void refundMoney(@RequestParam("userId") Long userId, @RequestParam("amount") Integer amount,
+                     @RequestParam("bizNo") String bizNo);
 
     /**
      * 对账用：查询某订单的积分是否已发放。

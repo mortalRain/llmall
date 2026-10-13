@@ -122,7 +122,7 @@ public class UserController {
     public void deductMoney(@RequestBody @Validated MoneyDeductDTO deductDTO,
                             @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken) {
         assertInternalCall(requestToken);
-        userService.deductMoney(deductDTO.getPw(), deductDTO.getAmount());
+        userService.deductMoney(deductDTO.getPw(), deductDTO.getAmount(), deductDTO.getBizNo());
     }
 
     /**
@@ -138,12 +138,15 @@ public class UserController {
     @Operation(summary = "退款入账（内部接口：仅服务间可调，把余额加回指定用户）")
     @Parameters({
             @Parameter(name = "userId", description = "收款用户id（由交易域按订单归属人传入）", required = true),
-            @Parameter(name = "amount", description = "退款金额（分），必须大于 0", required = true)
+            @Parameter(name = "amount", description = "退款金额（分），必须大于 0", required = true),
+            @Parameter(name = "bizNo", description = "幂等键（必填）：ORDER_REFUND:<订单id> / PAYFAIL:<扣款业务号> / "
+                    + "SECKILL_REFUND:<token>；同一业务号重复调用只入账一次", required = true)
     })
     @PostMapping("/money/refund")
     public void refundMoney(@RequestParam("userId") Long userId, @RequestParam("amount") Integer amount,
+                            @RequestParam("bizNo") String bizNo,
                             @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken) {
         assertInternalCall(requestToken);
-        userService.refundMoney(userId, amount);
+        userService.refundMoney(userId, amount, bizNo);
     }
 }
