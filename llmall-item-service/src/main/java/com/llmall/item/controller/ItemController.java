@@ -199,6 +199,17 @@ public class ItemController {
         itemService.restoreStock(items);
     }
 
+    @Operation(summary = "查询某业务号的库存是否已扣减（内部接口，需服务间凭证）")
+    @GetMapping("/stock/deducted")
+    public boolean isStockDeducted(@RequestParam("bizId") String bizId,
+                                   @RequestParam(value = "bizType", required = false) String bizType,
+                                   @RequestHeader(value = AuthConstants.HEADER_SERVICE_TOKEN, required = false) String requestToken) {
+        // 虽然只是读，但它回答的是"钱/货 到底动没动"，是补偿链路的判据：被外部误用/探测都不合适，
+        // 与扣减、回滚一样按内部接口收口（fail-closed：没带凭证直接 403）
+        assertInternalCall(requestToken);
+        return itemService.isStockDeducted(bizId, bizType);
+    }
+
     @Operation(summary = "查询门店下的套餐/商品")
     @GetMapping("/shop/{shopId}")
     public List<ItemDTO> queryByShopId(@PathVariable("shopId") Long shopId){

@@ -50,6 +50,19 @@ public class ItemClientFallback implements FallbackFactory<ItemClient> {
                 log.error("远程调用ItemClient的restoreStock方法出现异常，参数：{}", items, cause);
                 throw new BizIllegalException(cause);
             }
+
+            /**
+             * 调用isStockDeducted出异常或限流会调用这个方法。
+             *
+             * 必须抛异常，**不能返回 false**：false 的语义是"没扣过、不用补偿"，
+             * 而查询失败的真实语义是"不知道"。把未知当成已知，会让"少卖"被静默吞掉 ——
+             * 这恰恰是这个查询要解决的问题本身。
+             */
+            @Override
+            public boolean isStockDeducted(String bizId, String bizType) {
+                log.error("远程调用ItemClient的isStockDeducted方法出现异常，bizId：{}，bizType：{}", bizId, bizType, cause);
+                throw new BizIllegalException(cause);
+            }
         };
     }
 }

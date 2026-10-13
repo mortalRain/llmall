@@ -79,6 +79,23 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private long orderTimeoutSeconds;
 
     /**
+     * Seata AT 是否开启（默认 false）。
+     * 用来决定"下单事务回滚后要不要自己回补库存"：开启时跨服务扣库存是全局事务的一个分支，
+     * 回滚由 TC 用 undo_log 完成，这里再调一次 restoreStock 会变成回滚两次 → 库存凭空变多。
+     */
+    @org.springframework.beans.factory.annotation.Value("${seata.enabled:false}")
+    private boolean seataEnabled;
+
+    /**
+     * 故障注入开关（默认关闭）：扣库存成功后人为失败，用来验证"库存已扣 → 本地事务回滚 → 自动回补库存"。
+     * 为什么需要它：这条路径要求"扣库存成功、之后的步骤失败"，而正常业务里扣库存之后的步骤都不会失败
+     * （清购物车已改成走本地消息表、延迟消息有 try/catch + 扫描兜底），不注入就永远测不到 ——
+     * 而它恰恰是"少卖"这种不可自愈问题的唯一防线。生产必须保持 false（默认值即 false）。
+     */
+    @org.springframework.beans.factory.annotation.Value("${llmall.trade.fault-injection.after-deduct:false}")
+    private boolean faultInjectAfterDeduct;
+
+    /**
      * 下单主链路：入参校验 → 查商品算价 → 落订单 → 扣库存 → 锁券 → 清购物车 → 发延迟消息；前四步失败由本地事务回滚兜住，不留订单。
      * 锁券发生在事务提交之后、无法回滚，失败只能显式补偿（关单 + 回滚库存）。
      * 金额单位一律为分；库存按 (biz_type, bizId, itemId)、券按 userVoucherId + orderId 幂等，重复调用不会重复扣减/锁定。
@@ -149,6 +166,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         detailService.saveBatch(details);
 
         // 3.扣减库存：带上业务号，库存服务据此记录流水并做幂等（重复扣减会被唯一键挡住）；失败抛异常回滚本地事务，不生成"无库存的订单"
+        //   3.0 在真正扣库存**之前**登记"事务没提交就把库存补回来"的钩子：扣库存是跨服务调用，
+        //       一旦响应丢失（去了、扣了、回包没收到），本地事务回滚后订单不存在、库存却少了，
+        //       这就是审计里说的"永久少卖且无法自动补偿"。详见 compensateDeductedStockAfterRollback。
+        registerStockCompensationOnRollback(order.getId(), detailDTOS);
         detailDTOS.forEach(dto -> dto.setBizType(MqConstants.BIZ_ORDER_CREATED)
                 .setBizId(String.valueOf(order.getId()))
                 .setShopId(order.getShopId()));
@@ -157,6 +178,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         } catch (Exception e) {
             throw new BizIllegalException("库存不足，下单失败", e);
         }
+        if (faultInjectAfterDeduct) {
+            throw new IllegalStateException("【故障注入】扣库存后人为失败（llmall.trade.fault-injection.after-deduct=true），"
+                    + "用于验证事务回滚后的库存回补");
+        }
 
         // 3.1 锁定优惠券（券 1 → 2 并绑定订单号）：登记为"本地事务提交之后"执行，见 lockVoucherAfterCommit；
         //     顺序仍是 [先扣库存 → 提交订单 → 再锁券]：券是用户资产，只有订单真正落地后才允许锁；锁券失败则关单 + 回滚库存补偿
@@ -164,13 +189,13 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             lockVoucherAfterCommit(userVoucherId, order.getId());
         }
 
-        // 4.清理购物车：MQ 消费线程没有 UserContext，userId 必须随消息传递；消息体用 ArrayList 保证可序列化
-        try {
-            CartClearEvent event = new CartClearEvent(UserContext.getUser(), new ArrayList<>(itemIds));
-            rabbitTemplate.convertAndSend(MqConstants.TRADE_EXCHANGE, MqConstants.ORDER_CREATE_KEY, event);
-        } catch (Exception e) {
-            log.error("下单成功消息发送失败，商品ids：{}， 用户id：{}", itemIds, UserContext.getUser(), e);
-        }
+        // 4.清理购物车：走本地消息表（同事务登记 → 提交后投递 → 失败按退避重试），
+        //   不再"发不出去就只打一行 error 算了" —— 那样用户会看到"下单成功了但购物车还留着"，
+        //   且没有任何重试与对账能把它补回来。清理购物车本身幂等（按 itemIds 删），重投安全。
+        CartClearEvent event = new CartClearEvent(UserContext.getUser(), new ArrayList<>(itemIds));
+        messageLogService.record(MqConstants.BIZ_CART_CLEAR, String.valueOf(order.getId()),
+                MqConstants.TRADE_EXCHANGE, MqConstants.ORDER_CREATE_KEY, event);
+        messageLogService.dispatchAfterCommit(MqConstants.BIZ_CART_CLEAR, String.valueOf(order.getId()));
 
         // 5.发送延迟消息，检测订单支付状态（超时未支付则关单并回滚库存）；延迟时长取 llmall.trade.order-timeout-seconds（默认 900 秒）
         //   必须 try/catch：此刻库存已经扣掉、订单也已提交，这里再抛异常会把本地事务回滚成"订单不存在但库存少了"，
@@ -189,6 +214,66 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             log.error("订单延迟消息发送失败（订单已生成，将由超时扫描任务兜底关单）：orderId={}", order.getId(), e);
         }
         return order.getId();
+    }
+
+    /**
+     * 登记"下单事务没提交就把库存补回来"的钩子（必须在真正扣库存之前调用）。
+     *
+     * <h3>它兜的是什么</h3>
+     * 扣库存是跨服务调用：如果请求**已经到了 llmall-item-service 并且扣减成功**，
+     * 但回包丢失/超时（Feign 抛异常），本地下单事务会回滚 —— 结果是"订单不存在、库存少了"。
+     * 原实现对此无能为力：本地没有订单号可查、库存服务那边也没有人来问，只能人工发现（审计 B1 的"永久少卖"）。
+     *
+     * <h3>为什么用 afterCompletion 而不是 catch</h3>
+     * catch 只能覆盖"方法体抛异常"；提交阶段失败（status=UNKNOWN）时方法已经正常返回，
+     * catch 根本不会执行。判据必须是"不等于 COMMITTED"。
+     *
+     * <h3>为什么 Seata 开启时要跳过</h3>
+     * AT 模式下扣库存是全局事务的分支，回滚由 TC 依据 undo_log 完成；这里再补一次就是回滚两次，
+     * 库存会凭空变多 —— 比少卖更难查。
+     */
+    private void registerStockCompensationOnRollback(Long orderId, List<OrderDetailDTO> details) {
+        if (seataEnabled) {
+            log.debug("Seata AT 已开启，库存回滚交给全局事务（TC 用 undo_log 反向补偿），本地不再重复补: orderId={}", orderId);
+            return;
+        }
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            log.warn("事务同步未激活，库存补偿钩子未注册（下单若失败需人工核对库存）: orderId={}", orderId);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status == TransactionSynchronization.STATUS_COMMITTED) {
+                    return;
+                }
+                compensateDeductedStockAfterRollback(orderId, details, status);
+            }
+        });
+    }
+
+    /**
+     * 事务未提交时的库存核对与补偿：先问库存服务"这笔业务号到底扣没扣"，扣了才补。
+     *
+     * <p>为什么必须先问：补偿的唯一危险方向是"没扣却补" —— 那会凭空多出库存（超卖）。
+     * 而"扣了没补"只是少卖，且这里还会打 ERROR 让人介入。两个方向的代价不对称，所以偏保守：
+     * 查询失败（拿不到结论）时**不补**，只报警。
+     */
+    private void compensateDeductedStockAfterRollback(Long orderId, List<OrderDetailDTO> details, int status) {
+        String bizId = String.valueOf(orderId);
+        try {
+            if (!itemClient.isStockDeducted(bizId, MqConstants.BIZ_ORDER_CREATED)) {
+                log.info("下单事务未提交（status={}），库存未扣减，无需补偿: orderId={}", status, orderId);
+                return;
+            }
+            // 回滚用独立的业务类型 ORDER_CANCELED：与扣减的 ORDER_CREATED 分开记流水，
+            // 这样"扣了又补"在流水里是一对可对账的记录，而不是被幂等键互相顶掉
+            details.forEach(dto -> dto.setBizType(MqConstants.BIZ_ORDER_CANCELED).setBizId(bizId));
+            itemClient.restoreStock(details);
+            log.warn("下单事务未提交（status={}）但库存已扣减，已自动回补库存（避免少卖）: orderId={}", status, orderId);
+        } catch (Exception e) {
+            log.error("【需人工介入】下单事务未提交且库存补偿失败，可能少卖: orderId={}, 明细={}", orderId, details, e);
+        }
     }
 
     /** 标记订单支付成功：条件更新 1 → 2 并在同一本地事务内写本地消息表，提交后立刻投递；重复回调 affected rows = 0 即幂等，投递失败由重试/对账兜底 */
@@ -466,8 +551,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
 
         // 2.退余额。失败必须补偿回 status=2 —— "订单关了钱没退"是绝不能接受的中间态
+        //   幂等键按订单维度取：同一订单被重复退款（并发、人工重试）时下游只入账一次
         try {
-            userClient.refundMoney(order.getUserId(), order.getTotalFee());
+            userClient.refundMoney(order.getUserId(), order.getTotalFee(), "ORDER_REFUND:" + orderId);
         } catch (Exception e) {
             log.error("退款失败：余额退回失败，回滚订单状态: orderId={}, userId={}, amount={}",
                     orderId, order.getUserId(), order.getTotalFee(), e);

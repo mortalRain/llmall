@@ -112,6 +112,16 @@ public interface MqConstants {
     /** 下单扣减库存流水 */
     String BIZ_ORDER_CREATED = "ORDER_CREATED";
 
+    /**
+     * 下单成功后清理购物车（下单链路里的第 4 步）。
+     *
+     * 为什么单独给一个业务类型而不是复用 ORDER_CREATED：本地消息表的唯一键是
+     * (biz_type, biz_id)，同一次下单要发两条不同的消息（清购物车、订单支付超时检查），
+     * 复用同一个类型会被唯一键当成"同一条消息已登记"而把第二条顶掉 —— 症状是"购物车清了，
+     * 但超时关单的兜底被静默吞掉"，且不会有任何报错。
+     */
+    String BIZ_CART_CLEAR = "CART_CLEAR";
+
     /** 取消订单回滚库存流水 */
     String BIZ_ORDER_CANCELED = "ORDER_CANCELED";
 

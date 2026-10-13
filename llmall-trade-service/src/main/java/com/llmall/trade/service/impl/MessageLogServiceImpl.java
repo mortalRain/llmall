@@ -3,6 +3,7 @@ package com.llmall.trade.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.llmall.api.event.CartClearEvent;
 import com.llmall.api.event.OrderPaidEvent;
 import com.llmall.common.constant.MqConstants;
 import com.llmall.trade.domain.po.MessageLog;
@@ -43,11 +44,17 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
      * bizType → 消息体目标类型。
      * 为什么要这个映射：本地消息表存的是 JSON 字符串，投递时需要还原成原本的事件对象，
      * 才能让下游的消息转换器按类型正确反序列化。
+     *
+     * 【新增消息类型时必须在这里登记】漏登记的后果是**静默失败**：record 写库成功、业务也成功，
+     * 但投递时抛"未注册的消息类型"，消息在表里反复重试到失败上限 —— 实测踩过：
+     * 清购物车事件（CART_CLEAR）就是漏了这一步，日志里只有一行 `未注册的消息类型: CART_CLEAR`，
+     * 业务侧表现只是"下单成功但购物车没清掉"。
      */
     private static final Map<String, Class<?>> PAYLOAD_TYPES = new HashMap<>();
 
     static {
         PAYLOAD_TYPES.put(MqConstants.BIZ_ORDER_PAID, OrderPaidEvent.class);
+        PAYLOAD_TYPES.put(MqConstants.BIZ_CART_CLEAR, CartClearEvent.class);
     }
 
     private final RabbitTemplate rabbitTemplate;

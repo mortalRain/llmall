@@ -106,6 +106,20 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
     }
 
     @Override
+    public boolean isStockDeducted(String bizId, String bizType) {
+        if (StrUtil.isBlank(bizId)) {
+            return false;
+        }
+        // 与扣减时写入流水的键完全同源（biz_type + biz_id），所以"查得到流水"就等于"确实扣过"；
+        // 这里刻意不查 item 表库存数：库存是个可以被别的链路改变的值，而流水是不可变的证据
+        String type = StrUtil.blankToDefault(bizType, BIZ_TYPE_DEDUCT);
+        Long count = stockFlowMapper.selectCount(new LambdaQueryWrapper<StockFlow>()
+                .eq(StockFlow::getBizType, type)
+                .eq(StockFlow::getBizId, bizId));
+        return count != null && count > 0;
+    }
+
+    @Override
     public List<ItemDTO> listByShopId(Long shopId) {
         List<Item> items = lambdaQuery()
                 .eq(Item::getShopId, shopId)
