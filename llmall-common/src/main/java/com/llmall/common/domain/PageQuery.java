@@ -158,7 +158,4 @@ public class PageQuery {
             this.isAsc = true;
         }
     }
-    public <T> Page<T> toMpPageDefaultSortByCreateTimeDesc() {
-        return toMpPage("create_time", false);
-    }
 }

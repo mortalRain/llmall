@@ -6,21 +6,37 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.api.dto.ShopDTO;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.constant.MqConstants;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.domain.PageDTO;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.domain.PageQuery;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.BadRequestException;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.BeanUtils;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.CollUtils;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.domain.bo.RedisData;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.domain.po.ConsumeRecord;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.domain.po.Shop;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.event.ShopDocChangedEvent;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.mapper.ConsumeRecordMapper;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.mapper.ShopMapper;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.mapper.ShopTypeMapper;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.mq.ShopEventPublisher;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.service.IShopService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -38,7 +54,6 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -675,7 +690,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         Long count = consumeRecordMapper.selectCount(new LambdaQueryWrapper<ConsumeRecord>()
                 .eq(ConsumeRecord::getBizType, MqConstants.BIZ_ORDER_PAID)
                 .eq(ConsumeRecord::getBizId, String.valueOf(orderId))
-                .eq(ConsumeRecord::getConsumer, "llmall-shop-service"));
+                .eq(ConsumeRecord::getConsumer, MqConstants.CONSUMER_SHOP));
         return count != null && count > 0;
     }
 
@@ -940,17 +955,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
      */
     private void evictCacheAfterCommit(Long shopId) {
         String cacheKey = SHOP_CACHE_KEY + shopId;
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    deleteCacheKey(cacheKey);
-                }
-            });
-            return;
-        }
-        // 没有事务上下文（直接调用或事务已结束）：立即删
-        deleteCacheKey(cacheKey);
+        TxAfterCommit.run("evict shop cache id=" + shopId, () -> deleteCacheKey(cacheKey));
     }
 
     /**

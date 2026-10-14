@@ -4,13 +4,12 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.llmall.common.tx.TxAfterCommit;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -114,20 +113,9 @@ public abstract class AbstractMessageLogService<M extends MessageLogSupport, MP 
                 dispatch(messageLog);
             }
         };
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    // 【注意】afterCommit 里抛异常会传播给"提交事务的调用方"，让一个已经提交成功的事务
-                    // 在调用方看来是失败的（MQ 消费方可能因此重投整条事件）。
-                    // dispatch 内部已把所有异常吞成日志 + 失败状态，这里不会再抛。
-                    action.run();
-                }
-            });
-        } else {
-            // 没有事务上下文（例如运维接口直接调用）：立即投递
-            action.run();
-        }
+        // 回调里抛异常会让已提交成功的事务在调用方看来是失败的（MQ 消费方可能因此重投整条事件）；
+        // dispatch 内部已把所有异常吞成日志 + 失败状态，TxAfterCommit 亦保证不抛出。
+        TxAfterCommit.run("dispatch " + bizType + ":" + bizId, action);
     }
 
     @Override

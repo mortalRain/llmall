@@ -97,4 +97,14 @@ public interface MqConstants {
      * 且“取消后又退款”不会互相顶掉幂等记录。
      */
     String BIZ_ORDER_REFUNDED = "ORDER_REFUNDED";
+    /**
+     * 消费方标识：写入各自库 consume_record.consumer，也是对账查询的过滤条件。
+     *
+     * 【注意】必须与“对该事件负责的服务”严格对应：改名会让对账查询静默查不到已有消费记录，
+     * 表现是同一批消息被反复补发，而日志里没有任何报错。
+     */
+    String CONSUMER_USER = "llmall-user-service";
+    String CONSUMER_SHOP = "llmall-shop-service";
+    String CONSUMER_SEARCH = "llmall-search-service";
+    String CONSUMER_PROMOTION = "llmall-promotion-service";
 }

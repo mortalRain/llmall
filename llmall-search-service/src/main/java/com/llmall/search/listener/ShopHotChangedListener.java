@@ -31,8 +31,6 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class ShopHotChangedListener {
 
-    private static final String CONSUMER = "llmall-search-service";
-
     private final ISearchService searchService;
     private final ConsumeRecordMapper consumeRecordMapper;
 
@@ -55,7 +53,7 @@ public class ShopHotChangedListener {
         ConsumeRecord record = new ConsumeRecord()
                 .setBizType(MqConstants.BIZ_SHOP_HOT_CHANGED)
                 .setBizId(bizId)
-                .setConsumer(CONSUMER);
+                .setConsumer(MqConstants.CONSUMER_SEARCH);
         try {
             consumeRecordMapper.insert(record);
         } catch (DuplicateKeyException e) {

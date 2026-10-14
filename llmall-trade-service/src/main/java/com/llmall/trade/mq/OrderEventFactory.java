@@ -27,15 +27,14 @@ public class OrderEventFactory {
     public OrderPaidEvent buildPaidEvent(Order order) {
         List<OrderDetail> details = detailService.listByOrderId(order.getId());
         List<OrderDetailDTO> items = new ArrayList<>();
-        if (details != null) {
-            for (OrderDetail detail : details) {
-                items.add(new OrderDetailDTO()
-                        .setItemId(detail.getItemId())
-                        .setNum(detail.getNum())
-                        .setShopId(order.getShopId())
-                        .setBizType(MqConstants.BIZ_ORDER_PAID)
-                        .setBizId(String.valueOf(order.getId())));
-            }
+        // listByOrderId 内部是 MyBatis-Plus 的 list()，返回空集合而非 null，无需判空
+        for (OrderDetail detail : details) {
+            items.add(new OrderDetailDTO()
+                    .setItemId(detail.getItemId())
+                    .setNum(detail.getNum())
+                    .setShopId(order.getShopId())
+                    .setBizType(MqConstants.BIZ_ORDER_PAID)
+                    .setBizId(String.valueOf(order.getId())));
         }
         return new OrderPaidEvent()
                 .setBizId(String.valueOf(order.getId()))

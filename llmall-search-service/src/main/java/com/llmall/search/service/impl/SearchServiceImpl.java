@@ -66,7 +66,6 @@ public class SearchServiceImpl implements ISearchService {
     private static final int REBUILD_MAX_PAGES = 100;
 
     /** 本域在 consume_record 中的消费者标识（服务名），门店域对账时按它查"我处理了没有" */
-    private static final String CONSUMER = "llmall-search-service";
 
     private final ShopSearchDocMapper shopSearchDocMapper;
     private final SearchHotWordMapper hotWordMapper;
@@ -294,7 +293,7 @@ public class SearchServiceImpl implements ISearchService {
         Long count = consumeRecordMapper.selectCount(new LambdaQueryWrapper<ConsumeRecord>()
                 .eq(ConsumeRecord::getBizType, MqConstants.BIZ_SHOP_HOT_CHANGED)
                 .eq(ConsumeRecord::getBizId, bizId)
-                .eq(ConsumeRecord::getConsumer, CONSUMER));
+                .eq(ConsumeRecord::getConsumer, MqConstants.CONSUMER_SEARCH));
         return count != null && count > 0;
     }
 

@@ -34,7 +34,6 @@ public class PointsServiceImpl implements IPointsService {
     private static final int TYPE_ORDER = 1;
     /** 积分折算：100 分（1 元）= 1 积分 */
     private static final int FEE_PER_POINT = 100;
-    private static final String CONSUMER = "llmall-user-service";
 
     private final PointsFlowMapper pointsFlowMapper;
     private final UserInfoMapper userInfoMapper;
@@ -54,7 +53,7 @@ public class PointsServiceImpl implements IPointsService {
             consumeRecordMapper.insert(new ConsumeRecord()
                     .setBizType(MqConstants.BIZ_ORDER_PAID)
                     .setBizId(bizId)
-                    .setConsumer(CONSUMER));
+                    .setConsumer(MqConstants.CONSUMER_USER));
         } catch (DuplicateKeyException e) {
             log.info("该订单消息已消费过，幂等跳过: orderId={}", bizId);
             return false;

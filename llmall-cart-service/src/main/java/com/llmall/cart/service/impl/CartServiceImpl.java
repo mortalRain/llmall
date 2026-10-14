@@ -5,29 +5,44 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.api.client.ItemClient;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.api.dto.ItemDTO;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.config.CartProperties;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.constant.CartRedisConstants;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.constant.CartRedisScripts;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.domain.dto.CartFormDTO;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.domain.po.Cart;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.domain.vo.CartVO;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.mapper.CartMapper;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.service.ICartService;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.BadRequestException;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.BizIllegalException;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.UnauthorizedException;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.ForbiddenException;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.BeanUtils;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.CollUtils;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -258,16 +273,7 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
         if (userId == null) {
             return;
         }
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    rebuildFromDb(userId);
-                }
-            });
-            return;
-        }
-        rebuildFromDb(userId);
+        TxAfterCommit.run("rebuild cart cache user=" + userId, () -> rebuildFromDb(userId));
     }
 
     /** 从 DB 重新读一遍整份重建缓存：以"库里那一刻的样子"为准，不猜哪个字段变了 */

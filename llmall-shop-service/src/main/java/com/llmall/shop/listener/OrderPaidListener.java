@@ -31,8 +31,6 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class OrderPaidListener {
 
-    private static final String CONSUMER = "llmall-shop-service";
-
     private final IShopService shopService;
     private final ConsumeRecordMapper consumeRecordMapper;
 
@@ -53,7 +51,7 @@ public class OrderPaidListener {
         ConsumeRecord record = new ConsumeRecord()
                 .setBizType(MqConstants.BIZ_ORDER_PAID)
                 .setBizId(bizId)
-                .setConsumer(CONSUMER);
+                .setConsumer(MqConstants.CONSUMER_SHOP);
         try {
             consumeRecordMapper.insert(record);
         } catch (DuplicateKeyException e) {

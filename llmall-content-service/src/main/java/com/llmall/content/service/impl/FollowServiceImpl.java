@@ -11,7 +11,7 @@ import com.llmall.content.domain.po.Follow;
 import com.llmall.content.mapper.FeedInboxMapper;
 import com.llmall.content.mapper.FollowMapper;
 import com.llmall.content.service.IFollowService;
-import com.llmall.content.support.TxAfterCommit;
+import com.llmall.common.tx.TxAfterCommit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;

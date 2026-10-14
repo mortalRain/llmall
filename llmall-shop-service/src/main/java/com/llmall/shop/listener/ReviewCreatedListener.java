@@ -30,8 +30,6 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class ReviewCreatedListener {
 
-    private static final String CONSUMER = "llmall-shop-service";
-
     private final IShopService shopService;
     private final ConsumeRecordMapper consumeRecordMapper;
 
@@ -52,7 +50,7 @@ public class ReviewCreatedListener {
         ConsumeRecord record = new ConsumeRecord()
                 .setBizType(MqConstants.BIZ_REVIEW_CREATED)
                 .setBizId(bizId)
-                .setConsumer(CONSUMER);
+                .setConsumer(MqConstants.CONSUMER_SHOP);
         try {
             consumeRecordMapper.insert(record);
         } catch (DuplicateKeyException e) {
