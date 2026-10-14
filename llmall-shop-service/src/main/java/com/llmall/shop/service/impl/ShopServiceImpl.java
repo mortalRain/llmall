@@ -60,6 +60,7 @@ import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -99,16 +100,21 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             Long.class);
 
     /**
-     * UV 计数脚本：PFADD + 首次 PEXPIRE 一次往返完成。
+     * 访问计数脚本：PFADD（UV，HyperLogLog）+ INCR（PV）+ 首次 PEXPIRE，一次往返完成。
      *
-     * 【注意】拆成两条命令时，第二条失败或进程在两条之间退出，这个 key 就永久没有 TTL；
-     * 而 {@code uv:shop:{日期}:{门店id}} 是按天新建 key 的，无 TTL 会按"天数 × 门店数"累积
+     * 【注意】拆成多条命令时，后续命令失败或进程在中途退出，这个 key 就永久没有 TTL；
+     * 而 {@code uv:shop:{日期}:{门店id}} 与 {@code pv:shop:{日期}:{门店id}} 都是按天新建 key 的，
+     * 无 TTL 会按"天数 × 门店数"累积
      * （现役 Redis 为 {@code maxmemory 0} + {@code noeviction}，既不淘汰也不过期）。
      * 【注意】{@code PEXPIRE ... NX} 只在没有 TTL 时设置：否则每次访问都续期，活跃 key 等于永不过期。
+     * 返回值沿用 UV key 的 PEXPIRE 结果，供调用方判断是否首次创建。
      */
     private static final DefaultRedisScript<Long> VISIT_UV_SCRIPT = new DefaultRedisScript<>(
             "redis.call('pfadd', KEYS[1], ARGV[1]) "
-                    + "return redis.call('pexpire', KEYS[1], ARGV[2], 'NX')",
+                    + "local ttl = redis.call('pexpire', KEYS[1], ARGV[2], 'NX') "
+                    + "redis.call('incr', KEYS[2]) "
+                    + "redis.call('pexpire', KEYS[2], ARGV[2], 'NX') "
+                    + "return ttl",
             Long.class);
 
     /**
@@ -885,18 +891,19 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         // 未登录访客统一用 "guest"：HyperLogLog 的 UV 口径是"登录用户数 + 匿名 1"，匿名流量不做去重，
         // 要精确统计匿名 UV 需按 IP/session 生成随机标识，本项目不追求该精度
         String visitor = userId == null ? "guest" : String.valueOf(userId);
-        String key = SHOP_UV_KEY + LocalDate.now() + ":" + shopId;
-        // HyperLogLog 是估算结构，误差 0.81%，只占 12KB
+        String uvKey = SHOP_UV_KEY + LocalDate.now() + ":" + shopId;
+        String pvKey = SHOP_PV_KEY + LocalDate.now() + ":" + shopId;
+        // HyperLogLog 是估算结构，误差 0.81%，只占 12KB；PV 是计数器，同一次往返里一起写
         long ttlMillis = Duration.ofDays(uvTtlDays).toMillis();
         try {
-            Long ttlSet = redisTemplate.execute(VISIT_UV_SCRIPT, Collections.singletonList(key),
+            Long ttlSet = redisTemplate.execute(VISIT_UV_SCRIPT, Arrays.asList(uvKey, pvKey),
                     visitor, String.valueOf(ttlMillis));
             if (ttlSet != null && ttlSet > 0) {
-                log.debug("UV 计数器首次创建并设置 TTL: key={}, ttl={}天", key, uvTtlDays);
+                log.debug("访问计数器首次创建并设置 TTL: uvKey={}, ttl={}天", uvKey, uvTtlDays);
             }
         } catch (Exception e) {
-            // UV 是统计口径的旁路数据，写失败绝不能影响"用户在看门店"这件事
-            log.warn("记录门店访问失败（UV 统计有损，不影响主流程）: shopId={}", shopId, e);
+            // 访问统计是旁路数据，写失败绝不能影响"用户在看门店"这件事
+            log.warn("记录门店访问失败（UV/PV 统计有损，不影响主流程）: shopId={}", shopId, e);
         }
     }
 

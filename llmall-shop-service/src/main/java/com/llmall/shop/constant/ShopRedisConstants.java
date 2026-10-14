@@ -26,6 +26,9 @@ public interface ShopRedisConstants {
     /** 门店访问 UV（HyperLogLog）：uv:shop:{date}:{shopId} */
     String SHOP_UV_KEY = "uv:shop:";
 
+    /** 门店访问 PV（当日访问次数计数器）：pv:shop:{date}:{shopId} */
+    String SHOP_PV_KEY = "pv:shop:";
+
     /** 门店详情逻辑过期时长（分钟），可由 llmall.shop.cache.ttl-minutes 覆盖 */
     long CACHE_TTL_MINUTES = 30;
 
@@ -63,6 +66,6 @@ public interface ShopRedisConstants {
     /** 门店不存在时写空值哨兵前的合并窗口（毫秒），把并发未命中收敛为一次写入 */
     long NULL_SENTINEL_MERGE_MILLIS = 50;
 
-    /** UV 计数器保留天数，uv key 按天新建，无 TTL 会按天累积 */
+    /** 访问计数器保留天数，uv/pv key 都按天新建，无 TTL 会按天累积 */
     long UV_TTL_DAYS = 2;
 }

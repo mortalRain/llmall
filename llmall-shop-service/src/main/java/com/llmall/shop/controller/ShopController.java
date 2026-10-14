@@ -6,13 +6,16 @@ import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.utils.UserContext;
 import com.llmall.shop.domain.vo.HotReconcileResultVO;
 import com.llmall.shop.service.IShopService;
+import com.llmall.shop.task.ShopStatRollupTask;
 import com.llmall.shop.task.ShopSearchReconcileTask;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import io.swagger.v3.oas.annotations.Operation;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -32,6 +35,9 @@ public class ShopController {
 
     /** 对账任务：手动触发入口（定时触发见 ShopSearchReconcileTask#scheduledReconcile） */
     private final ShopSearchReconcileTask shopSearchReconcileTask;
+
+    /** 访问统计落库任务：手动触发入口（定时触发见 ShopStatRollupTask#scheduledRollup） */
+    private final ShopStatRollupTask shopStatRollupTask;
 
     /**
      * 运维接口总开关（llmall.maintenance.enabled，application.yaml 中默认 true）。
@@ -139,5 +145,25 @@ public class ShopController {
     public void markOffline(@PathVariable("id") Long id) {
         checkMaintenanceEnabled();
         shopService.markShopOffline(id);
+    }
+
+    /**
+     * 门店访问统计落库：把 Redis 里的 UV/PV 落到 shop_stat。
+     *
+     * 【注意】带 date 参数时直接落该日期，用于演示与排障 —— 定时任务是凌晨落"前一天"的数据，
+     * 没有这个入口就只能等到第二天才能确认落库是否真的发生。不带参数则等同于定时任务的行为。
+     *
+     * @param date 要落库的统计日期（可选，默认前一天）
+     * @return 实际写入的门店数
+     */
+    @Operation(summary = "门店访问统计落库（运维/排障用）：UV/PV 从 Redis 落到 shop_stat")
+    @PostMapping("/stat/rollup")
+    public int rollupVisitStat(
+            @RequestParam(value = "date", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        checkMaintenanceEnabled();
+        return date == null
+                ? shopStatRollupTask.rollupYesterday()
+                : shopStatRollupTask.rollup(date);
     }
 }
