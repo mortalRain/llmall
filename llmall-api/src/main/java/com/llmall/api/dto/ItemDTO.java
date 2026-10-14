@@ -12,13 +12,10 @@ import javax.validation.constraints.Size;
 /**
  * 商品实体（既是商品域返回给前端的视图，也是新增/更新商品的入参）。
  *
- * <p>为什么在一个"跨服务 DTO"上加校验注解：llmall-item-service 的写接口（POST/PUT /items）
- * 直接收这个对象并落库，而 item 表的 name/price/stock 都是 NOT NULL、
- * name 是 varchar(200)、stock 是 int unsigned（负数会直接报错）。
- * 不在这里写边界，就会出现"接口 200、库里报错"或者更糟的"负数库存落库成功"。
+ * 校验注解的边界与 item 表对齐：name/price/stock 均为 NOT NULL、name 为 varchar(200)、
+ * stock 为 int unsigned，缺少边界会出现接口 200 而落库报错，或负数库存落库成功。
  *
- * <p>这些注解只在被 {@code @Valid} 标注的**请求入参**上生效，
- * 作为 Feign/接口的**返回值**时不会触发校验，不影响任何查询链路。
+ * 【注意】这些注解只在被 @Valid 标注的请求入参上生效，作为 Feign 返回值时不触发校验。
  */
 @Data
 @Schema(description = "商品实体")
@@ -35,7 +32,7 @@ public class ItemDTO {
     private String name;
     @Schema(description = "价格（分）")
     @NotNull(message = "商品价格不能为空")
-    // 0 元是合法的（赠品/兑换券），负数不是：负单价会直接把订单总价算成负数
+    // 0 元合法（赠品/兑换券）；负单价会把订单总价算成负数
     @Min(value = 0, message = "商品价格不能为负数")
     private Integer price;
     @Schema(description = "库存数量")

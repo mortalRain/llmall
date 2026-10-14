@@ -9,8 +9,7 @@ import java.time.LocalDateTime;
 /**
  * 券列表/详情视图。
  *
- * 秒杀券与普通券共用同一个 VO：前端一张卡片就能渲染两种券，
- * 差异只体现在"有没有 beginTime/endTime/remainingStock"上，不必为两种券写两套接口。
+ * 秒杀券与普通券共用：差异只体现在 beginTime/endTime/remainingStock 有没有值，不必为两种券写两套接口。
  */
 @Data
 @Accessors(chain = true)
@@ -47,10 +46,7 @@ public class VoucherVO implements Serializable {
     /** 秒杀结束时间（非秒杀券为 null） */
     private LocalDateTime endTime;
 
-    /**
-     * 剩余库存（非秒杀券为 null）。
-     * 取值优先用 Redis 预扣后的实时值，键不存在时回落到 DB —— 理由见 VoucherServiceImpl。
-     */
+    /** 剩余库存（非秒杀券为 null）：优先取 Redis 预扣后的实时值，键不存在时回落到 DB */
     private Integer remainingStock;
 
     /** 当前是否处于秒杀时段；非秒杀券为 null，用于前端把"未开始/已结束"的按钮置灰 */

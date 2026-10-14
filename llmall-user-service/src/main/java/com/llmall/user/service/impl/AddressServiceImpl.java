@@ -8,12 +8,7 @@ import com.llmall.user.service.IAddressService;
 import org.springframework.stereotype.Service;
 
 /**
- * <p>
- *  服务实现类
- * </p>
- *
- * @author 同城生活
- * @since 2023-05-05
+ * 收货地址服务实现，CRUD 全部由 MyBatis-Plus 的 ServiceImpl 提供。
  */
 @Service
 public class AddressServiceImpl extends ServiceImpl<AddressMapper, Address> implements IAddressService {

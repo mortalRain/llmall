@@ -8,10 +8,6 @@ import org.springframework.stereotype.Component;
 @Component
 @ConfigurationProperties(prefix = "llmall.cart")
 public class CartProperties {
-    /**
-     * 购物车最大条目数。**给默认值**是有意的：该值来自 Nacos 的 llmall-cart-service.yaml，
-     * 配置中心缺这一项时字段会是 null，而调用处是 `count >= getMaxAmount()` 这种拆箱比较，
-     * 会直接抛 NPE 变成 500（实测踩过）。默认 10 与配置一致，缺配置时退化为"仍可用"。
-     */
+    /** 购物车最大条目数；默认值不可去：配置中心缺该项时字段为 null，调用处拆箱比较会直接 NPE */
     private Integer maxAmount = 10;
 }

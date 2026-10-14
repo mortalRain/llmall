@@ -18,10 +18,9 @@ import java.util.Date;
 /**
  * JWT 签发与解析（用户服务侧）。
  *
- * 相对课程原版的增强：
- * 1. 令牌带 jti（唯一编号）→ 支撑登出黑名单与 refresh token 轮换；
- * 2. 令牌带 type（access/refresh）→ 防止把 refresh token 当 access token 直接访问业务接口；
- * 3. 解析时区分"已过期"与"非法"，过期抛 TokenExpiredException，供网关触发无感刷新。
+ * 【注意】令牌带 jti 与 type（access/refresh）：jti 供登出黑名单与 refresh 轮换使用，
+ * type 用于阻止 refresh token 直接访问业务接口。解析区分"已过期"与"非法"，
+ * 过期抛 TokenExpiredException，供网关触发无感刷新。
  */
 @Component
 public class JwtTool {

@@ -13,9 +13,7 @@ import java.time.LocalDateTime;
 /**
  * 积分流水。
  *
- * 与 user_info.credits 同库同事务，保证"加积分 + 记流水"要么都成功、要么都回滚。
- * (biz_type, biz_id, type) 唯一索引同时承担：
- *  ① 幂等闸门（同一订单只加一次积分）；② 对账判据（交易域问"这笔订单积分发了吗"就查它）。
+ * (biz_type, biz_id, type) 唯一索引是幂等闸门，也是对账判据。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)

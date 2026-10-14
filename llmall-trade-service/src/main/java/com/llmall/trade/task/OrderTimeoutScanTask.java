@@ -13,18 +13,16 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 /**
- * 超时未关单订单的兜底扫描。
+ * 超时未关单订单的兜底扫描：查出创建时间已超时但仍待付款的订单，逐笔走关单裁决。
  *
- * <h3>为什么延迟消息之外还需要它</h3>
- * 延迟消息是"到点自动关单"的主路径，但它依赖 MQ：Broker 重启、队列被误删、
- * 消息在重投上限内被丢弃、服务长时间停机导致延迟消息到期时没人消费……
- * 任何一种都会留下"永远停在待付款"的订单 —— 库存被占、券被锁，用户却什么都没得到。
- * 兜底扫描只问一个纯本地的问题："库里还有没有创建时间已经超过超时时间、
- * 但状态仍是待付款的订单？" 有就逐笔走同一套关单裁决逻辑，把主路径漏掉的补上。
+ * 延迟消息是"到点自动关单"的主路径，但它依赖 MQ（Broker 重启、队列被误删、
+ * 重投上限内被丢弃、服务长时间停机导致消息到期时没人消费），任何一种都会留下
+ * "永远停在待付款"的订单：库存被占、券被锁，用户却什么都没得到，
+ * 因此必须有这条不依赖 MQ 的本地兜底扫描。
  *
- * <h3>为什么它也必须遵守"未知不关单"</h3>
- * 扫描同样要查支付状态才能关单（见 {@link OrderCloseGuard}）。如果这里图省事直接 cancel，
- * 就等于给"支付服务不可用时照样关单"留了后门，E1 的修复会被这条路径重新打穿。
+ * 【注意】扫描同样必须先复核支付状态才能关单（见 {@link OrderCloseGuard}）：
+ * 图省事直接 cancel，就等于给"支付服务不可用时照样关单"留了后门，
+ * 状态未知时一律保持待付款、留待下轮。
  */
 @Slf4j
 @Component
@@ -43,8 +41,8 @@ public class OrderTimeoutScanTask {
 
     @Scheduled(fixedDelayString = "${llmall.trade.order-scan-interval-ms:300000}")
     public void scanTimeoutUnpaidOrders() {
-        // 整个任务体包 try/catch：定时任务抛异常会被调度线程记日志后终止后续执行，
-        // 一次数据库抖动就再也不会扫描了 —— 兜底机制必须自己先"兜得住"。
+        // 【注意】任务体必须自己包 try/catch：定时任务抛异常会被调度线程记日志后终止后续执行，
+        // 一次数据库抖动就再也不会扫描了。
         try {
             LocalDateTime deadline = LocalDateTime.now().minusSeconds(orderTimeoutSeconds);
             List<Order> orders = orderService.lambdaQuery()

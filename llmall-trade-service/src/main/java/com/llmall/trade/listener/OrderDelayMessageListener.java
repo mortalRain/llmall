@@ -15,19 +15,12 @@ import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Component;
 
 /**
- * 订单超时延迟消息消费：到点后判断"到底付没付"，再决定关单还是标记已支付。
+ * 订单超时延迟消息消费：到点后判断订单是否已支付，再决定关单还是标记已支付。
  *
- * <h3>本类最重要的原则：降级/未知状态绝不能翻译成"未支付"</h3>
- * 原实现在查不到支付单时直接走关单分支，于是 llmall-pay-service 一抖动，
- * 已付款的订单就被关掉并退库存（钱扣了、单没了）。现在的规则是三分支：
- * <ul>
- *   <li>确认已支付 → 标记订单已支付；</li>
- *   <li>确认未支付（含"确认没有支付单"）→ 关单 + 回滚库存；</li>
- *   <li>状态未知（支付服务不可用/查询失败）→ **不关单**，按指数退避重新投递延迟消息，
- *       超过 {@code llmall.trade.order-close-max-retry} 次后只告警、订单保持待付款等人工处理。</li>
- * </ul>
- * 为什么宁可"订单挂着"：挂着最多是库存被占一会儿（有兜底扫描与人工可处理），
- * 而错误关单是用户钱没了、货也没了。两个错误方向的代价不对称，所以选择偏保守的一侧。
+ * 【注意】支付状态未知（支付服务不可用 / 查询失败）不等于未支付，三分支口径为：
+ * 已支付 → 标记已支付；确认未支付（含"确认没有支付单"）→ 关单 + 回滚库存；
+ * 未知 → 不关单，按指数退避重新投递，超过 {@code llmall.trade.order-close-max-retry}
+ * 次后只告警、订单保持待付款等人工处理。错误关单（用户钱货两失）的代价高于订单多挂一会儿。
  */
 @Slf4j
 @Component
@@ -36,9 +29,9 @@ public class OrderDelayMessageListener {
 
     /**
      * 重新投递时携带的"已重试次数"消息头。
-     * 为什么放在消息头而不是数据库：重投的是同一条逻辑消息，只有这条链路自己需要这个计数，
-     * 放消息上最简单且不引入新表；进程重启/消息丢失会让计数归零，
-     * 而计数归零的后果只是"多查几次支付状态"，不会关错单，可接受。
+     *
+     * 【注意】计数随消息走、不落库（只有这条重投链路需要它）：进程重启或消息丢失会让计数归零，
+     * 而归零只会多查几次支付状态，不会关错单。
      */
     public static final String HEADER_CLOSE_RETRY = "x-order-close-retry";
 
@@ -61,7 +54,7 @@ public class OrderDelayMessageListener {
     public void listenOrderDelayMessage(Long orderId,
                                         @Header(name = HEADER_CLOSE_RETRY, required = false) Integer retryCount) {
         int retry = retryCount == null ? 0 : retryCount;
-        // 订单不存在 / 已不是待付款 → 无需处理（重复投递的常态）
+        // 订单不存在或已不是待付款 → 无需处理（重复投递的常态）
         OrderCloseGuard.Outcome outcome = orderCloseGuard.settle(orderId);
         if (outcome != OrderCloseGuard.Outcome.UNKNOWN) {
             return;
@@ -69,14 +62,10 @@ public class OrderDelayMessageListener {
         redeliverAfterUnknown(orderId, retry);
     }
 
-    /**
-     * 支付状态未知 → 重新投递延迟消息（指数退避），而不是关单。
-     * 重投上限由 llmall.trade.order-close-max-retry 控制，默认 5 次。
-     */
+    /** 支付状态未知：按指数退避重新投递延迟消息而不关单，重投上限见 llmall.trade.order-close-max-retry */
     private void redeliverAfterUnknown(Long orderId, int retry) {
         if (retry >= orderCloseMaxRetry) {
-            // 放弃自动关单并升级为 ERROR：这属于"需要人看一眼"的订单，
-            // 而不是"可以默默处理掉"的订单。保持待付款是安全的一侧。
+            // 重投达上限：停止自动关单并升级为 ERROR，保持待付款是安全的一侧
             log.error("【需人工介入】订单支付状态连续 {} 次无法确认，已停止自动关单，订单保持待付款: orderId={}",
                     retry, orderId);
             return;

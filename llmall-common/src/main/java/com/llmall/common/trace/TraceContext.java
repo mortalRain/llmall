@@ -8,22 +8,12 @@ import java.util.regex.Pattern;
 /**
  * 全链路追踪 ID（traceId）的口径。
  *
- * <p>【要解决什么】一个用户请求进了网关，会被拆成"网关 → trade → item → pay"好几跳，
- * 中间还有 Feign 线程池与 MQ 异步。没有统一 ID 时，排查一次下单失败要在 4 份日志里
- * 按时间戳人肉对齐（并发一高就对不上）。traceId 的作用就是让这 4 份日志能被一条命令捞出来。
+ * 网关生成并全程透传（入口已有 X-Trace-Id 则沿用，但必须先过 {@link #normalize} 校验）；
+ * 跨线程靠 SLF4J MDC 传递，异步线程需显式传递（同 UserContextTaskDecorator 传递用户）；
+ * 响应头回写同一个 traceId，供对外报障时定位整条链路。
  *
- * <p>【三条约定】
- * <ol>
- *   <li>**网关生成、全程透传**：入口没有 {@code X-Trace-Id} 就生成一个；有就沿用
- *       （便于把前端/压测工具/上游网关的 ID 串起来），但必须先过白名单校验 —— 见 {@link #normalize}。</li>
- *   <li>**跨线程靠 MDC**：写进 SLF4J 的 MDC，日志格式里用 {@code %X{traceId}} 输出；
- *       异步线程要显式传递（本项目的异步线程池已用 UserContextTaskDecorator 传递用户，traceId 同理）。</li>
- *   <li>**对外可查**：响应头回写同一个 traceId，用户报障时报这一个值就能定位整条链路。</li>
- * </ol>
- *
- * <p>【为什么要校验而不是照抄请求头】追踪 ID 会进日志。原样采信外部传入的值等于允许
- * 攻击者往日志里注入换行/伪日志行（日志伪造），所以只接受"字母数字 + . _ -，长度 ≤ 64"的形态，
- * 不合格就当没传、自己生成一个。
+ * 【注意】traceId 会进日志，不能照抄请求头：只接受"字母数字 + . _ -、长度不超过 64"的形态，
+ * 否则外部可注入换行伪造日志行；不合格即视为未传，自行生成。
  */
 public final class TraceContext {
 
@@ -52,7 +42,7 @@ public final class TraceContext {
         return SAFE.matcher(trimmed).matches() ? trimmed : null;
     }
 
-    /** 生成一个新的 traceId（32 位十六进制去掉分隔符的前 16 位：足够唯一，又不至于把日志行撑长）。 */
+    /** 生成一个新的 traceId（32 位十六进制去掉分隔符后取前 16 位）。 */
     public static String generate() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
     }

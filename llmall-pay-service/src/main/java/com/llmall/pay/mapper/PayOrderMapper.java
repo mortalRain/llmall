@@ -5,9 +5,7 @@ import com.llmall.pay.domain.po.PayOrder;
 
 
 /**
- * <p>
  * 支付订单 Mapper 接口
- * </p>
  *
  * @author 同城生活
  * @since 2023-05-16

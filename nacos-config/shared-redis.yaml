@@ -1,11 +1,30 @@
 spring:
   redis:
+    # 连接方式：哨兵模式 —— 客户端向 sentinel.nodes 询问 llmall-master 当前是谁，主从切换后自动跟到新主库
+    # 【注意】只直连 host:6379 时没有客户端去问哨兵，主库挂掉应用即连不上（哨兵白装）；
+    # 哨兵模式下 host/port 不再决定连接目标，仅作占位保留（application-local.yaml 与共享配置仍引用该变量）
     host: ${llmall.redis.host}
     port: 6379
+    # 【注意】这是连数据节点用的口令，不是哨兵口令（本方案哨兵不设密码，见下方 sentinel 段）
     password: ${llmall.redis.pw}
+    # 【注意】超时必须显式配：Spring Data Redis 默认命令超时 60s，Redis 一旦 hang 住每个用到它的请求
+    # 都会卡满 60s，Tomcat 线程池被瞬间占满 —— Redis 抖动会放大成整个服务不可用；
+    # 2s 取自最慢调用（缓存重建互斥锁等待，业务侧默认 500ms）的余量，主从切换期间也能干脆失败走降级
+    connect-timeout: 2s
+    timeout: 2s
+    sentinel:
+      # 主库逻辑名，必须与哨兵配置里的 `sentinel monitor <name>` 完全一致
+      master: llmall-master
+      # 三个哨兵地址：客户端会依次尝试，单个哨兵挂掉不影响取地址
+      # 【注意】哨兵不设密码：Spring Boot 2.7 只有一个 spring.redis.sentinel.password，无法同时表达
+      # "哨兵口令"与"数据节点口令"，设成不同值必然配错（数据节点仍保留 requirepass）
+      nodes: ${llmall.redis.host}:26379,${llmall.redis.host}:26380,${llmall.redis.host}:26381
     lettuce:
       pool:
         max-active: 10
         max-idle: 10
         min-idle: 1
         time-between-eviction-runs: 10s
+        # 【注意】max-wait 必须配：不配时 commons-pool2 默认 -1（无限等待），max-active=10 下第 11 个
+        # 并发请求会永远阻塞在 borrowObject，且该等待不包含在上面的命令超时内；取 1s（< 2s）以快速失败触发降级
+        max-wait: 1s

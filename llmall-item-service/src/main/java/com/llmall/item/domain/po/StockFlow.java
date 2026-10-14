@@ -11,11 +11,9 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * 库存变动流水。
+ * 库存变动流水：每次库存变动留一条记录，供幂等判定与对账补偿逐笔比对。
  *
- * 为什么必须有它：只改库存不留痕，"到底扣没扣、扣了几次"就无从查证，
- * 后续的**对账补偿**（亮点 B）也就无从下手 —— 对账的本质就是拿流水跟订单逐笔比对。
- * (biz_type, biz_id, item_id) 唯一索引同时承担两个职责：幂等闸门 + 对账依据。
+ * 【注意】(biz_type, biz_id, item_id) 唯一索引同时承担两个职责：幂等闸门 + 对账依据。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
@@ -28,10 +26,9 @@ public class StockFlow implements Serializable {
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
-    /** 商品/SKU id */
     private Long itemId;
 
-    /** 冗余门店 id（便于按门店统计与对账） */
+    /** 冗余门店 id，便于按门店统计与对账 */
     private Long shopId;
 
     /** 变动数量：负数=扣减，正数=回滚/入库 */

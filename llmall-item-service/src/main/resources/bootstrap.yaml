@@ -1,22 +1,21 @@
 # bootstrap 阶段就要知道应用名与配置中心地址，所以这些必须写在这里（不能只写在 application.yaml）。
 spring:
   application:
-    name: llmall-item-service # 核心标识，Nacos 注册与配置、日志里的服务名都依赖它
+    name: llmall-item-service   # 核心标识：Nacos 注册与配置、日志都依赖它
   profiles:
-    # local：本机/虚拟机地址（VM 里的容器名 mysql 只有在 docker 网络内才解析得到）
-    active: local
+    active: local               # local：本机/虚拟机地址（VM 里的容器名只有在 docker 网络内才解析得到）
   cloud:
     nacos:
-      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}   # 本地默认 192.168.189.128，容器/云服务器用 NACOS_ADDR 覆盖
       # 服务发现
       discovery:
         namespace: ${NACOS_NAMESPACE:public}
-      # 配置中心：shared-*.yaml 是"跨服务的同一份口径"，改动在 Nacos 上发布即对所有服务生效
+      # 配置中心：shared-*.yaml 是跨服务的同一份口径，在 Nacos 上发布即对所有服务生效
       config:
         server-addr: ${NACOS_ADDR:192.168.189.128:8848}
         file-extension: yaml
         shared-configs:
-          # 数据源（url/hikari）+ MyBatis + 日志/运行时口径 + 接口文档
+          # 数据源（url/hikari 连接池）、MyBatis、日志/运行时口径、接口文档
           - dataId: shared-jdbc.yaml
             refresh: true
           - dataId: shared-mybatis.yaml

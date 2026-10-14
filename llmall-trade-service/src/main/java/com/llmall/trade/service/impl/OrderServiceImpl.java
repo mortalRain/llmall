@@ -61,7 +61,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private static final int ORDER_TYPE_VOUCHER = 2;
     private static final int ITEM_TYPE_PACKAGE = 2;
 
-    /** 核销码字母表：剔除 0/O、1/I/L、2/Z、5/S、8/B 等易混字符，避免"码是对的但报不存在"的客服工单；8 位长度 + SecureRandom 生成 */
+    /** 核销码字母表：剔除 0/O、1/I/L、2/Z、5/S、8/B 等易混字符，避免用户念错码；长度 8 位，SecureRandom 生成 */
     private static final char[] VERIFY_CODE_ALPHABET = "ACDEFGHJKMNPQRTUVWXY34679".toCharArray();
     private static final int VERIFY_CODE_LENGTH = 8;
     private static final SecureRandom VERIFY_CODE_RANDOM = new SecureRandom();
@@ -79,18 +79,15 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private long orderTimeoutSeconds;
 
     /**
-     * Seata AT 是否开启（默认 false）。
-     * 用来决定"下单事务回滚后要不要自己回补库存"：开启时跨服务扣库存是全局事务的一个分支，
-     * 回滚由 TC 用 undo_log 完成，这里再调一次 restoreStock 会变成回滚两次 → 库存凭空变多。
+     * Seata AT 开关（默认 false）：开启时跨服务扣库存是全局事务的一个分支，回滚由 TC 用 undo_log 完成，
+     * 本地再调一次 restoreStock 会变成回滚两次、库存凭空变多。
      */
     @org.springframework.beans.factory.annotation.Value("${seata.enabled:false}")
     private boolean seataEnabled;
 
     /**
-     * 故障注入开关（默认关闭）：扣库存成功后人为失败，用来验证"库存已扣 → 本地事务回滚 → 自动回补库存"。
-     * 为什么需要它：这条路径要求"扣库存成功、之后的步骤失败"，而正常业务里扣库存之后的步骤都不会失败
-     * （清购物车已改成走本地消息表、延迟消息有 try/catch + 扫描兜底），不注入就永远测不到 ——
-     * 而它恰恰是"少卖"这种不可自愈问题的唯一防线。生产必须保持 false（默认值即 false）。
+     * 故障注入开关（默认 false）：扣库存成功后人为失败，用于触发"库存已扣 → 本地事务回滚 → 自动回补库存"这条路径。
+     * 【注意】该路径在正常业务中不会自然出现，生产必须保持 false。
      */
     @org.springframework.beans.factory.annotation.Value("${llmall.trade.fault-injection.after-deduct:false}")
     private boolean faultInjectAfterDeduct;
@@ -101,11 +98,11 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
      * 金额单位一律为分；库存按 (biz_type, bizId, itemId)、券按 userVoucherId + orderId 幂等，重复调用不会重复扣减/锁定。
      */
     @Override
-    // Seata AT 全局事务（下单 + 跨服务扣库存/锁券）；seata.enabled=false（默认）时此注解不生效，方法退化为纯本地事务
+    // Seata AT 全局事务（下单 + 跨服务扣库存/锁券）；seata.enabled=false（默认）时注解不生效，方法退化为纯本地事务
     @GlobalTransactional(name = "llmall-create-order", rollbackFor = Exception.class)
     @Transactional(rollbackFor = Exception.class)
     public Long createOrder(OrderFormDTO orderFormDTO) {
-        // 0.入参校验放在最前面：num 必须是 1~99，否则扣库存的 SQL 会退化成加库存、总价算成负数，落库即脏数据；上限让单次下单金额可预估
+        // num 必须在 1~99：num<=0 会让扣库存 SQL 退化成加库存、总价算成负数，落库即脏数据
         List<OrderDetailDTO> detailDTOS = orderFormDTO.getDetails();
         if (CollUtils.isEmpty(detailDTOS)) {
             throw new BadRequestException("下单商品不能为空");
@@ -122,24 +119,21 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             throw new BadRequestException("支付方式不能为空");
         }
 
-        // 1.订单数据
         Map<Long, Integer> itemNumMap = detailDTOS.stream()
                 .collect(Collectors.toMap(OrderDetailDTO::getItemId, OrderDetailDTO::getNum, (a, b) -> a));
         Set<Long> itemIds = itemNumMap.keySet();
 
-        // 1.1.查询商品
         List<ItemDTO> items = itemClient.queryItemByIds(itemIds);
         if (items == null || items.size() < itemIds.size()) {
             throw new BadRequestException("商品不存在");
         }
 
-        // 1.2.计算总价：total 必须等于 price×num 之和，漏乘数量会直接造成资损
         int total = 0;
         for (ItemDTO item : items) {
             total += item.getPrice() * itemNumMap.getOrDefault(item.getId(), 0);
         }
 
-        // 1.3.组装订单（本地生活场景：套餐挂在门店下，订单需记录门店与订单类型 1 实物 / 2 团购券，取第一件商品所属门店）
+        // 订单类型 1 实物 / 2 团购券（本地生活场景套餐挂在门店下）；门店取第一件商品所属门店
         Order order = new Order();
         order.setTotalFee(total);
         order.setPaymentType(orderFormDTO.getPaymentType());
@@ -150,8 +144,8 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         order.setOrderType(ITEM_TYPE_PACKAGE == (firstItem.getType() == null ? 1 : firstItem.getType())
                 ? ORDER_TYPE_VOUCHER : ORDER_TYPE_PHYSICAL);
 
-        // 1.3.1 优惠券抵扣：必须在落库之前定完 —— total_fee 落库即用户实付，支付侧只做"金额相等"校验（单位：分）
-        //       max(0, ...) 保证券面额大于订单金额时 total_fee 不为负；order.voucher_id 记录本单用了哪张券实例，是取消/退款退券的唯一线索
+        // 券抵扣必须在落库之前算完：total_fee 落库即用户实付，支付侧只做"金额相等"校验（单位：分）
+        // max(0, ...) 保证券面额大于订单金额时 total_fee 不为负；voucher_id 记录本单用了哪张券实例，是取消/退款退券的唯一线索
         Long userVoucherId = orderFormDTO.getUserVoucherId();
         if (userVoucherId != null) {
             UserVoucherDTO voucher = queryUsableVoucher(userVoucherId, firstItem.getShopId());
@@ -161,14 +155,11 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
         save(order);
 
-        // 2.保存订单详情
         List<OrderDetail> details = buildDetails(order.getId(), items, itemNumMap);
         detailService.saveBatch(details);
 
-        // 3.扣减库存：带上业务号，库存服务据此记录流水并做幂等（重复扣减会被唯一键挡住）；失败抛异常回滚本地事务，不生成"无库存的订单"
-        //   3.0 在真正扣库存**之前**登记"事务没提交就把库存补回来"的钩子：扣库存是跨服务调用，
-        //       一旦响应丢失（去了、扣了、回包没收到），本地事务回滚后订单不存在、库存却少了，
-        //       这就是审计里说的"永久少卖且无法自动补偿"。详见 compensateDeductedStockAfterRollback。
+        // 扣库存带业务号，库存服务据此记流水并做幂等（重复扣减被唯一键挡住）；失败抛异常回滚本地事务，不生成"无库存的订单"
+        // 补偿钩子必须在真正扣库存之前登记：一旦响应丢失（扣了、回包没收到），本地事务回滚后订单不存在、库存却少了，详见 compensateDeductedStockAfterRollback
         registerStockCompensationOnRollback(order.getId(), detailDTOS);
         detailDTOS.forEach(dto -> dto.setBizType(MqConstants.BIZ_ORDER_CREATED)
                 .setBizId(String.valueOf(order.getId()))
@@ -183,24 +174,21 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                     + "用于验证事务回滚后的库存回补");
         }
 
-        // 3.1 锁定优惠券（券 1 → 2 并绑定订单号）：登记为"本地事务提交之后"执行，见 lockVoucherAfterCommit；
-        //     顺序仍是 [先扣库存 → 提交订单 → 再锁券]：券是用户资产，只有订单真正落地后才允许锁；锁券失败则关单 + 回滚库存补偿
+        // 锁券（券 1 → 2 并绑定订单号）登记在本地事务提交之后执行，见 lockVoucherAfterCommit；
+        // 顺序固定为 [先扣库存 → 提交订单 → 再锁券]：券是用户资产，只有订单真正落地后才允许锁，锁券失败则关单 + 回滚库存补偿
         if (userVoucherId != null) {
             lockVoucherAfterCommit(userVoucherId, order.getId());
         }
 
-        // 4.清理购物车：走本地消息表（同事务登记 → 提交后投递 → 失败按退避重试），
-        //   不再"发不出去就只打一行 error 算了" —— 那样用户会看到"下单成功了但购物车还留着"，
-        //   且没有任何重试与对账能把它补回来。清理购物车本身幂等（按 itemIds 删），重投安全。
+        // 清购物车走本地消息表（同事务登记 → 提交后投递 → 失败按退避重试）；该动作按 itemIds 删除、本身幂等，重投安全
         CartClearEvent event = new CartClearEvent(UserContext.getUser(), new ArrayList<>(itemIds));
         messageLogService.record(MqConstants.BIZ_CART_CLEAR, String.valueOf(order.getId()),
                 MqConstants.TRADE_EXCHANGE, MqConstants.ORDER_CREATE_KEY, event);
         messageLogService.dispatchAfterCommit(MqConstants.BIZ_CART_CLEAR, String.valueOf(order.getId()));
 
-        // 5.发送延迟消息，检测订单支付状态（超时未支付则关单并回滚库存）；延迟时长取 llmall.trade.order-timeout-seconds（默认 900 秒）
-        //   必须 try/catch：此刻库存已经扣掉、订单也已提交，这里再抛异常会把本地事务回滚成"订单不存在但库存少了"，
-        //   而回滚后连订单号都没有、取消/对账都无从补偿。延迟消息只是"尽早关单"的优化，
-        //   真丢了下游还有 OrderTimeoutScanTask 的定时扫描兜底，所以吞掉并告警即可。
+        // 延迟消息用于超时关单，时长取 llmall.trade.order-timeout-seconds（默认 900 秒）
+        // 【注意】必须 try/catch：此刻库存已扣、订单已提交，这里抛异常会把本地事务回滚成"订单不存在但库存少了"，且回滚后连订单号都没有、取消/对账都无从补偿；
+        // 延迟消息只是"尽早关单"的优化，丢了还有 OrderTimeoutScanTask 定时扫描兜底，故吞掉并告警即可
         try {
             rabbitTemplate.convertAndSend(
                     MqConstants.DELAY_EXCHANGE,
@@ -217,20 +205,11 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     }
 
     /**
-     * 登记"下单事务没提交就把库存补回来"的钩子（必须在真正扣库存之前调用）。
+     * 登记"下单事务没提交就把库存补回来"的钩子，必须在真正扣库存之前调用。
      *
-     * <h3>它兜的是什么</h3>
-     * 扣库存是跨服务调用：如果请求**已经到了 llmall-item-service 并且扣减成功**，
-     * 但回包丢失/超时（Feign 抛异常），本地下单事务会回滚 —— 结果是"订单不存在、库存少了"。
-     * 原实现对此无能为力：本地没有订单号可查、库存服务那边也没有人来问，只能人工发现（审计 B1 的"永久少卖"）。
-     *
-     * <h3>为什么用 afterCompletion 而不是 catch</h3>
-     * catch 只能覆盖"方法体抛异常"；提交阶段失败（status=UNKNOWN）时方法已经正常返回，
-     * catch 根本不会执行。判据必须是"不等于 COMMITTED"。
-     *
-     * <h3>为什么 Seata 开启时要跳过</h3>
-     * AT 模式下扣库存是全局事务的分支，回滚由 TC 依据 undo_log 完成；这里再补一次就是回滚两次，
-     * 库存会凭空变多 —— 比少卖更难查。
+     * 兜的是跨服务调用丢回包的场景：库存侧已扣成功而回包丢失/超时，本地事务回滚后会留下"订单不存在、库存少了"且无人可查的少卖。
+     * 用 afterCompletion 而非 catch：提交阶段失败（status=UNKNOWN）时方法已正常返回，catch 不会执行，判据必须是不等于 COMMITTED。
+     * 【注意】Seata 开启时必须跳过：扣库存是全局事务分支，回滚由 TC 依据 undo_log 完成，这里再补一次就是回滚两次、库存凭空变多。
      */
     private void registerStockCompensationOnRollback(Long orderId, List<OrderDetailDTO> details) {
         if (seataEnabled) {
@@ -253,11 +232,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     }
 
     /**
-     * 事务未提交时的库存核对与补偿：先问库存服务"这笔业务号到底扣没扣"，扣了才补。
+     * 事务未提交时的库存核对与补偿：先向库存服务确认该业务号是否真的扣过，扣了才补。
      *
-     * <p>为什么必须先问：补偿的唯一危险方向是"没扣却补" —— 那会凭空多出库存（超卖）。
-     * 而"扣了没补"只是少卖，且这里还会打 ERROR 让人介入。两个方向的代价不对称，所以偏保守：
-     * 查询失败（拿不到结论）时**不补**，只报警。
+     * 两个方向的代价不对称："没扣却补"会凭空多出库存（超卖），"扣了没补"只是少卖且这里会打 ERROR 让人介入。
+     * 故偏保守：查询失败（拿不到结论）时不补，只报警。
      */
     private void compensateDeductedStockAfterRollback(Long orderId, List<OrderDetailDTO> details, int status) {
         String bizId = String.valueOf(orderId);
@@ -266,8 +244,8 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 log.info("下单事务未提交（status={}），库存未扣减，无需补偿: orderId={}", status, orderId);
                 return;
             }
-            // 回滚用独立的业务类型 ORDER_CANCELED：与扣减的 ORDER_CREATED 分开记流水，
-            // 这样"扣了又补"在流水里是一对可对账的记录，而不是被幂等键互相顶掉
+            // 回滚用独立业务类型 ORDER_CANCELED：与扣减的 ORDER_CREATED 分开记流水，
+            // 这样"扣了又补"是一对可对账的记录，而不会被幂等键互相顶掉
             details.forEach(dto -> dto.setBizType(MqConstants.BIZ_ORDER_CANCELED).setBizId(bizId));
             itemClient.restoreStock(details);
             log.warn("下单事务未提交（status={}）但库存已扣减，已自动回补库存（避免少卖）: orderId={}", status, orderId);
@@ -276,7 +254,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
     }
 
-    /** 标记订单支付成功：条件更新 1 → 2 并在同一本地事务内写本地消息表，提交后立刻投递；重复回调 affected rows = 0 即幂等，投递失败由重试/对账兜底 */
+    /** 支付成功回调：条件更新 1 → 2 并在同一本地事务内写本地消息表、提交后立刻投递；重复回调 affected rows = 0 即幂等，投递失败由重试/对账兜底 */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void markOrderPaySuccess(Long orderId) {
@@ -309,7 +287,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         if (exist == null) {
             throw new BadRequestException("订单不存在");
         }
-        // 幂等：只有 status=1（未支付）能被关闭，已核销（status=7）被状态条件排除、affected rows=0 时直接早返回，下面的断言再把"核销后不得取消"钉死
+        // 幂等：只有 status=1 能被关闭（已核销被状态条件排除），affected rows=0 时直接早返回；下面的断言再钉死"核销后不得取消"
         assertNotVerified(exist, "取消");
         boolean closed = lambdaUpdate()
                 .eq(Order::getId, orderId)
@@ -376,9 +354,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         return details;
     }
 
-    // ==================== 面向用户端的订单查询 ====================
-
-    /** 我的订单分页：必须按 userId 过滤（绝不返回他人订单）；明细一次 IN 查询后内存分组，避免 N 个订单打 N 次库 */
+    /** 我的订单分页：必须按 userId 过滤，绝不返回他人订单；明细一次 IN 查询后内存分组，避免 N 个订单打 N 次库 */
     @Override
     public PageDTO<OrderVO> queryMyOrders(PageQuery query, Integer status) {
         Long userId = requireLogin();
@@ -410,7 +386,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         if (order == null) {
             throw new BadRequestException("订单不存在");
         }
-        // 归属校验 fail-closed：没有登录态一律拒绝 —— 订单 VO 里带核销码（到店出示即可核销的凭证），"身份为空就放行"等于给直连服务端口的调用开后门
+        // 归属校验 fail-closed：订单 VO 带核销码（到店出示即可核销的凭据），身份为空必须拒绝，否则等于给直连服务端口的调用开后门
         Long userId = UserContext.getUser();
         if (userId == null) {
             throw new ForbiddenException("无权查看该订单");
@@ -433,11 +409,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         cancelOrder(orderId);
     }
 
-    // ==================== 到店核销闭环 ====================
-
     /**
-     * 到店核销：status 2（已付款待使用）→ 7（已核销）。并发重复核销靠条件更新 WHERE status = 2 由数据库裁决（第二次 affected rows = 0），比"先查出来再 update"可靠。
-     * verify_code 上没有唯一索引：同码命中多单说明数据已不可信，宁可拒绝核销也不取第一条 —— 核销错了要按错的订单退款、给错的门店结算。
+     * 到店核销：status 2（已付款待使用）→ 7（已核销），并发重复核销靠条件更新 WHERE status = 2 由数据库裁决（第二次 affected rows = 0），比"先查再 update"可靠。
+     * verify_code 上没有唯一索引：同码命中多单说明数据已不可信，宁可拒绝核销也不取第一条（核销错了要按错的订单退款、给错的门店结算）。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -452,7 +426,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
         String verifyCode = verifyDTO.getVerifyCode().trim().toUpperCase();
 
-        // 1.按核销码查订单：用 list 而非 getOne，命中多条时显式报错并留 ERROR 日志（getOne 抛的 TooManyResultsException 会被统一异常处理器翻译成"服务器内部异常"，看不出原因）
+        // 用 list 而非 getOne：命中多条时显式报错并留 ERROR 日志（getOne 抛的 TooManyResultsException 会被统一异常处理器翻译成"服务器内部异常"，看不出原因）
         List<Order> matched = lambdaQuery().eq(Order::getVerifyCode, verifyCode).list();
         if (CollUtils.isEmpty(matched)) {
             throw new BadRequestException("核销码不存在");
@@ -464,18 +438,17 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
         Order order = matched.get(0);
 
-        // 2.状态校验：只有 status=2（已付款待使用）能被核销
         if (order.getStatus() == null || order.getStatus() != Order.STATUS_PAID) {
             throw new BizIllegalException("核销码已使用或订单状态不允许核销");
         }
-        // 3.门店校验：券的适用门店与核销门店必须一致，不一致属于越权
+        // 券的适用门店与核销门店必须一致，不一致属于越权
         if (!Objects.equals(order.getShopId(), verifyDTO.getShopId())) {
             log.warn("核销码不属于该门店: orderId={}, orderShopId={}, verifyShopId={}, operator={}",
                     order.getId(), order.getShopId(), verifyDTO.getShopId(), operator);
             throw new ForbiddenException("核销码不属于该门店");
         }
 
-        // 4.条件更新核销：受影响行数是唯一的成功判据（并发/重复调用天然幂等）
+        // 受影响行数是唯一的成功判据，并发/重复调用天然幂等
         boolean verified = lambdaUpdate()
                 .eq(Order::getId, order.getId())
                 .eq(Order::getStatus, Order.STATUS_PAID)
@@ -489,8 +462,8 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         log.info("订单核销成功: orderId={}, shopId={}, userId={}, operator={}",
                 order.getId(), order.getShopId(), order.getUserId(), operator);
 
-        // 5.投递核销事件（为门店结算/对账留钩子）：核销事实已落库，消息丢失只是"结算晚一点"，
-        //    为发消息把核销回滚却会变成"顾客到店用不了券"，所以失败只记日志（可用性优先）
+        // 核销事件（为门店结算/对账留钩子）投递失败只记日志：核销事实已落库，消息丢失只是"结算晚一点"，
+        // 为发消息把核销回滚却会变成"顾客到店用不了券"，故可用性优先
         try {
             OrderVerifiedEvent event = new OrderVerifiedEvent()
                     .setBizId(String.valueOf(order.getId()))
@@ -506,14 +479,11 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         return order.getId();
     }
 
-    // ==================== 已支付订单退款闭环 ====================
-
     /**
-     * 已支付订单退款（用户发起）。状态约定：order 表没有退款专用字段且不允许加列，故复用 status 2 → 5 + close_time 表示"退款关闭"；
-     * 与"未付款取消"共用 5 是有意的（资金视角同为"钱不在平台"的终态），代价是"是否退过款"须结合 pay_time 判断，
-     * 因此本方法的幂等不依赖状态语义，而依赖条件更新：第二次调用 affected rows = 0，不会重复退钱。
-     * 顺序：条件更新关单（唯一并发闸门）→ 退余额 → 回滚库存 → 退券 → 关支付单；退余额失败必须把订单改回 2 并抛错，
-     * 绝不允许"订单关了、钱没退"；后面几步失败只记日志（钱已退给用户，不可回滚）。
+     * 已支付订单退款（用户发起）：order 表没有退款专用字段且不允许加列，故复用 status 2 → 5 + close_time 表示"退款关闭"，与"未付款取消"共用 5 是有意的（资金视角同为终态）。
+     * 代价是"是否退过款"须结合 pay_time 判断，因此本方法的幂等不依赖状态语义而依赖条件更新：第二次调用 affected rows = 0，不会重复退钱。
+     * 顺序：条件更新关单（唯一并发闸门）→ 退余额 → 回滚库存 → 退券 → 关支付单；退余额失败必须把订单改回 2 并抛错，绝不允许"订单关了、钱没退"；
+     * 后面几步失败只记日志（钱已退给用户，不可回滚）。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -526,7 +496,6 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         if (!userId.equals(order.getUserId())) {
             throw new ForbiddenException("无权操作他人订单");
         }
-        // 只有 status=2（已付款且未核销）可以退款
         if (order.getStatus() == null || order.getStatus() != Order.STATUS_PAID) {
             if (order.getStatus() != null && order.getStatus() == Order.STATUS_UNPAID) {
                 throw new BizIllegalException("订单尚未支付，无法退款（未支付订单请直接取消）");
@@ -536,10 +505,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             }
             throw new BizIllegalException("订单已关闭或状态不允许退款");
         }
-        // 双保险：状态为 2 但已有核销时间，说明数据不一致，宁可拒绝
+        // 双保险：状态为 2 但已有核销时间说明数据不一致，宁可拒绝
         assertNotVerified(order, "退款");
 
-        // 1.并发闸门：条件更新 2 → 5；affected rows = 0 即"已经被别的请求退过了/已核销"，这是本方法唯一的幂等保证
+        // 并发闸门：条件更新 2 → 5；affected rows = 0 即"已被别的请求退过/已核销"，这是本方法唯一的幂等保证
         boolean closed = lambdaUpdate()
                 .eq(Order::getId, orderId)
                 .eq(Order::getStatus, Order.STATUS_PAID)
@@ -550,8 +519,8 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             throw new BizIllegalException("订单状态已变更，退款失败（可能已退款或已核销）");
         }
 
-        // 2.退余额。失败必须补偿回 status=2 —— "订单关了钱没退"是绝不能接受的中间态
-        //   幂等键按订单维度取：同一订单被重复退款（并发、人工重试）时下游只入账一次
+        // 退余额：幂等键按订单维度取（ORDER_REFUND:{orderId}），同一订单并发/人工重试时下游只入账一次；
+        // 失败必须补偿回 status=2 —— "订单关了钱没退"是绝不能接受的中间态
         try {
             userClient.refundMoney(order.getUserId(), order.getTotalFee(), "ORDER_REFUND:" + orderId);
         } catch (Exception e) {
@@ -571,7 +540,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             throw new BizIllegalException("退款失败，请稍后重试", e);
         }
 
-        // 3.回滚库存（业务号用 ORDER_REFUNDED，与"未付款取消"的流水区分开）
+        // 业务号用 ORDER_REFUNDED，与"未付款取消"的流水区分开
         try {
             recoverStock(order, MqConstants.BIZ_ORDER_REFUNDED);
         } catch (Exception e) {
@@ -579,17 +548,15 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             log.error("退款成功但库存回滚失败，需补偿: orderId={}", orderId, e);
         }
 
-        // 4.退券：下单时锁的券要还给用户，否则退款只退钱、券被吞掉
+        // 退券：下单时锁的券必须还给用户，否则退款只退钱、券被吞掉
         refundVoucherQuietly(order, "订单退款");
 
-        // 5.关闭支付单：让支付账本与交易账本收敛（失败只记日志，见 closePayOrderQuietly）
+        // 关闭支付单，让支付账本与交易账本收敛（失败只记日志，见 closePayOrderQuietly）
         closePayOrderQuietly(order);
         log.info("订单退款完成: orderId={}, userId={}, amount={}", orderId, order.getUserId(), order.getTotalFee());
     }
 
-    // ==================== 券 / 核销码 相关的内部方法 ====================
-
-    /** 下单前校验券可用性并返回券的权威信息：归属 / 状态（未使用）/ 有效期 / 适用门店四条缺一不可，判定都在营销域完成，交易域只补充"门店与订单上下文匹配" */
+    /** 下单前校验券可用性并返回券的权威信息：归属 / 状态（未使用）/ 有效期 / 适用门店四条缺一不可，判定均在营销域完成，交易域只补充"门店与订单上下文匹配" */
     private UserVoucherDTO queryUsableVoucher(Long userVoucherId, Long shopId) {
         UserVoucherDTO voucher;
         try {
@@ -606,7 +573,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                     ? "该券已被使用" : "该券已过期"));
         }
         if (voucher.getExpireTime() != null && voucher.getExpireTime().isBefore(LocalDateTime.now())) {
-            // 状态还是 1 但已过期：营销域按 expire_time 惰性判定过期，交易域必须再判一次（两边时钟可能不同、券也可能就在这一步之间过期）
+            // status 仍为 1 但已过期：营销域按 expire_time 惰性判定过期，交易域必须再判一次（两边时钟可能不同，券也可能刚在这一步之间过期）
             throw new BadRequestException("优惠券不可用：该券已过期");
         }
         // 券的 shopId 为空 = 全平台通用券；非空则必须与订单门店一致，否则会出现"用 A 店的券抵 B 店的单"
@@ -620,10 +587,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     }
 
     /**
-     * 锁定券：把券置为已使用并绑定订单号（营销域的条件更新 1 → 2），登记在本地事务提交之后执行。
+     * 锁定券：把券置为已使用并绑定订单号（营销域条件更新 1 → 2），约定在本地事务提交之后执行。
      * 顺序原因：营销域会拿 orderId 回查交易订单（存在、属于本人、门店一致、voucher_id 匹配），事务内订单行还未提交、
-     * 另一个连接看不到它，回查会得到"订单不存在"而拒锁 —— 券是用户资产，只有确认订单真正落地（提交成功）之后才允许锁死。
-     * 锁券失败时事务已提交、无法靠回滚撤销，只能显式补偿：关掉这张订单 + 回滚库存；用户还没付过钱，取消不产生资金动作。
+     * 另一个连接看不到它，回查会得到"订单不存在"而拒锁 —— 券是用户资产，只有确认订单真正落地后才允许锁死。
+     * 锁券失败时事务已提交、无法靠回滚撤销，只能显式补偿：关单 + 回滚库存（用户还没付过钱，取消不产生资金动作）。
      */
     private void lockVoucherAfterCommit(Long userVoucherId, Long orderId) {
         Runnable lockAction = () -> {
@@ -647,7 +614,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 }
             });
         } else {
-            // 理论不会发生（本方法由 @Transactional 方法调用）；真要走到这里也必须锁，否则就是"订单用了券但券没锁"的一券多用资损面
+            // 理论不会发生（本方法由 @Transactional 方法调用）；真要走到这里也必须锁，否则就是"订单用了券但券没锁"的一券多用资损
             lockAction.run();
         }
     }
@@ -676,7 +643,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 recoverStock(order, MqConstants.BIZ_ORDER_CANCELED);
             }
         } catch (Exception e) {
-            // 补偿本身失败：订单可能停在"未支付但占着库存"的状态，由超时关单兜底（延迟消息会把它关掉）
+            // 补偿本身失败：订单可能停在"未支付但占着库存"，由超时关单兜底（延迟消息会把它关掉）
             log.error("【需人工介入】锁券失败后的补偿动作失败: orderId={}", orderId, e);
         }
     }
@@ -689,11 +656,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     }
 
     /**
-     * 退回券（幂等）；失败只记 ERROR —— 调用方此时钱/库存的动作都已经完成，让"退券"失败把整个退款回滚反而会变成"钱退了一半"。
-     * 为什么要显式设置 UserContext：退券接口靠网关写入、拦截器放进 ThreadLocal 的身份做归属校验，而本方法会在两种线程里被调用：
-     * ① 用户请求线程（取消/退款）—— 原本就有登录态；② MQ 延迟消息线程（超时关单）—— 没有登录态，Feign 拦截器不会带 user-info 头，
-     * 营销域直接 401，券永远退不出去。显式以"订单归属人"的身份调用是安全的：userId 来自我们自己的订单表、不是任何外部输入，
-     * 而且券绑定的订单号必须与传入的 orderId 一致，别的订单也退不走这张券。
+     * 退还券（幂等）；失败只记 ERROR：调用方此时钱/库存的动作都已完成，为退券失败把整个退款回滚反而会变成"钱退了一半"。
+     * 【注意】必须显式设置 UserContext：退券接口靠 ThreadLocal 里的身份做归属校验，而超时关单跑在 MQ 线程上没有登录态，
+     * Feign 拦截器不会带 user-info 头、营销域直接 401，券永远退不出去；以订单归属人身份调用是安全的（userId 取自本地订单表，券绑定的订单号须与 orderId 一致）。
      */
     private void refundVoucherQuietly(Long userVoucherId, Long orderId, String scene) {
         if (userVoucherId == null) {
@@ -714,7 +679,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         } catch (Exception e) {
             log.error("{}：优惠券退回失败，需补偿: userVoucherId={}, orderId={}", scene, userVoucherId, orderId, e);
         } finally {
-            // 恢复线程上下文，避免把身份"泄漏"给同一线程上的后续逻辑
+            // 恢复线程上下文，避免把身份泄漏给同一线程上的后续逻辑
             if (previous == null) {
                 UserContext.removeUser();
             } else {
@@ -735,7 +700,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private String generateVerifyCode() {
         for (int i = 0; i < 5; i++) {
             String code = randomVerifyCode();
-            // MyBatis-Plus 3.5.x 起 selectCount 返回 Long（3.4.x 是 Integer），类型必须跟着改
+            // 【注意】MyBatis-Plus 3.5.x 起 selectCount 返回 Long，接收类型不能写成 Integer
             Long exists = baseMapper.selectCount(new LambdaQueryWrapper<Order>()
                     .eq(Order::getVerifyCode, code));
             if (exists == null || exists.longValue() == 0L) {
@@ -743,7 +708,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             }
             log.warn("核销码重复，重新生成: code={}, 第 {} 次", code, i + 1);
         }
-        // 连续撞码 5 次说明码空间被大量占用或数据异常，此时不能"随便给一个"：生成失败的代价是这次重试，撞码的代价是两笔订单无法区分
+        // 连续撞码 5 次说明码空间被大量占用或数据异常，此时不能"随便给一个"：生成失败只是这次重试，撞码会让两笔订单无法区分
         throw new BizIllegalException("核销码生成失败，请重试");
     }
 
@@ -771,7 +736,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                     .map(d -> BeanUtils.copyBean(d, OrderDetailVO.class))
                     .collect(Collectors.toList()));
         }
-        // 核销码只对订单归属人可见：它是"到店出示即可核销"的一次性凭据，任何一条查询路径的归属校验出缺口都会泄漏可变现凭证，故在出口处再兜一次、非本人即置空
+        // 核销码只对订单归属人可见：它是到店出示即可核销的可变现凭据，故在出口处再兜一次，非本人即置空
         Long currentUserId = UserContext.getUser();
         if (vo.getVerifyCode() != null
                 && (currentUserId == null || !currentUserId.equals(order.getUserId()))) {

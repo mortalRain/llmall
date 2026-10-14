@@ -4,24 +4,17 @@ import com.llmall.common.utils.UserContext;
 import org.springframework.core.task.TaskDecorator;
 
 /**
- * 把当前线程的登录用户上下文传递到异步线程。
+ * 把当前线程的登录用户上下文传递到异步线程，注册为线程池的 taskDecorator 使用（见 llmall-user-service 的 AsyncConfig）。
  *
- * 为什么需要它：UserContext 是 ThreadLocal，只对当前线程可见。
- * 一旦业务里用了 @Async、线程池、CompletableFuture，异步线程里 UserContext.getUser() 就是 null，
- * 于是"Feign 透传用户"在异步场景下静默失效——表现为下游服务拿不到用户、或写入的数据丢了 user_id。
- * 这是 ThreadLocal + 异步组合的经典坑，TaskDecorator 是标准解法。
- *
- * 用法（见 llmall-user-service 的 AsyncConfig）：
- * <pre>
- * ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
- * executor.setTaskDecorator(new UserContextTaskDecorator());
- * </pre>
+ * 【注意】UserContext 是 ThreadLocal，只对当前线程可见；用了 @Async、线程池或 CompletableFuture 后，
+ * 异步线程里 UserContext.getUser() 恒为 null，Feign 透传用户在异步场景下静默失效
+ * （下游拿不到用户，或写入的数据丢了 user_id）。TaskDecorator 是标准解法。
  */
 public class UserContextTaskDecorator implements TaskDecorator {
 
     @Override
     public Runnable decorate(Runnable runnable) {
-        // 在"提交任务的线程"里捕获用户，注意必须在提交时取，不能在执行时取
+        // 必须在提交任务的线程里捕获用户：执行时已经是异步线程，取不到原上下文
         Long userId = UserContext.getUser();
         return () -> {
             try {

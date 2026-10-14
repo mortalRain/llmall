@@ -10,12 +10,9 @@ import java.util.List;
 /**
  * 下单成功事件（llmall-trade-service 发布 → llmall-cart-service 消费，用于清理购物车中已下单的商品）。
  *
- * 为什么事件里必须带 userId：
- *   原来的实现只发"商品 id 集合"，消费端用 UserContext.getUser() 去过滤用户 ——
- *   但 MQ 监听线程里**没有登录上下文**（UserContext 是 ThreadLocal，由网关请求线程写入），
- *   于是 eq(user_id, null) 恒不匹配，购物车永远清不掉，而且不报错、只静默失效。
- *   把 userId 放进消息体，是"跨线程/跨服务传递身份"的正确做法：
- *   身份来自下单那一刻的登录态，由消息携带，而不是指望消费线程能读到 ThreadLocal。
+ * 【注意】必须随消息携带 userId：MQ 监听线程没有登录上下文（UserContext 是 ThreadLocal，
+ * 只由网关请求线程写入），消费端若用 UserContext.getUser() 过滤会恒等于 eq(user_id, null)，
+ * 购物车清不掉且静默失效。身份取自下单那一刻的登录态，由消息传递。
  */
 @Data
 @NoArgsConstructor

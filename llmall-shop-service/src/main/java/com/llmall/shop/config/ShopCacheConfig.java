@@ -12,9 +12,8 @@ import java.util.concurrent.ThreadPoolExecutor;
 /**
  * 缓存重建线程池。
  *
- * 逻辑过期方案里，缓存重建必须**异步**：持锁线程把任务丢进线程池后立刻返回旧数据，
- * 否则"异步重建"就退化成了"同步重建"，还是会阻塞用户请求。
- * 队列满时用 CallerRunsPolicy，宁可让调用线程兜底执行，也不静默丢弃重建任务。
+ * 【注意】逻辑过期方案的重建必须异步：持锁线程投递任务后立即返回旧值，否则就退化成同步重建、照样阻塞请求。
+ * 队列满走 CallerRunsPolicy，宁可让调用线程兜底执行，也不静默丢弃重建任务。
  */
 @Configuration
 @EnableAsync
@@ -27,7 +26,7 @@ public class ShopCacheConfig {
         executor.setMaxPoolSize(8);
         executor.setQueueCapacity(100);
         executor.setThreadNamePrefix("shop-cache-rebuild-");
-        // 重建过程中若触发 Feign 调用，同样需要用户上下文（顺带复用共享的装饰器）
+        // 重建过程中若触发 Feign 调用，同样需要用户上下文
         executor.setTaskDecorator(new UserContextTaskDecorator());
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         executor.initialize();

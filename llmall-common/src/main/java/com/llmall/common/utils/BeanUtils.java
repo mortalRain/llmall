@@ -6,12 +6,12 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * 继承自 hutool 的BeanUtil，增加了bean转换时自定义转换器的功能
+ * 基于 hutool BeanUtil 的扩展：对象转换时可用转换器处理字段不匹配的部分。
  */
 public class BeanUtils extends BeanUtil {
 
     /**
-     * 将原对象转换成目标对象，对于字段不匹配的字段可以使用转换器处理
+     * 将原对象转换成目标对象，字段不匹配处交给转换器处理。
      *
      * @param source  原对象
      * @param clazz   目标对象的class
@@ -28,7 +28,7 @@ public class BeanUtils extends BeanUtil {
         return target;
     }
     /**
-     * 将原对象转换成目标对象，对于字段不匹配的字段可以使用转换器处理
+     * 将原对象转换成目标对象，source 为 null 时返回 null。
      *
      * @param source  原对象
      * @param clazz   目标对象的class

@@ -11,9 +11,7 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 
 /**
- * <p>
- * 订单详情表 服务实现类
- * </p>
+ * 订单明细查询：按订单 id 取该订单下的全部商品明细。
  *
  * @author 同城生活
  * @since 2023-05-05
@@ -24,10 +22,8 @@ public class OrderDetailServiceImpl extends ServiceImpl<OrderDetailMapper, Order
 
     @Override
     public List<OrderDetail> listByOrderId(Long orderId) {
-        // 构建Lambda查询条件：根据order_id字段匹配
         LambdaQueryWrapper<OrderDetail> queryWrapper = new LambdaQueryWrapper<OrderDetail>()
                 .eq(OrderDetail::getOrderId, orderId);
-        // 调用MyBatis-Plus的list方法查询
         return this.list(queryWrapper);
     }
 }

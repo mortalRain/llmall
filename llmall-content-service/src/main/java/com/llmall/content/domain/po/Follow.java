@@ -11,8 +11,7 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * 关注关系
- * (user_id, follow_user_id) 唯一索引保证不会重复关注。
+ * 关注关系；(user_id, follow_user_id) 唯一索引保证不会重复关注。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)

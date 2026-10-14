@@ -22,9 +22,8 @@ public class PageQuery {
     public static final int MAX_PAGE_SIZE = 100;
 
     /**
-     * 全局上限。为什么是静态字段而不是每个服务各配一份：
-     * 分页是**所有业务接口**共用的能力，漏掉任何一个入口（新加的分页接口、Feign 之间互调透传的参数）
-     * 都等于把整张表开放出去；放在公共件里做兜底，新增接口默认就是安全的。
+     * 全局每页条数上限。放在公共件里兜底：分页是所有业务接口共用的能力，漏掉任何一个入口（新加的分页接口、
+     * Feign 之间互调透传的参数）都等于把整张表开放出去。
      * volatile：启动时写一次，之后被所有请求线程读。
      */
     private static volatile int maxPageSize = MAX_PAGE_SIZE;
@@ -41,8 +40,8 @@ public class PageQuery {
 
     /**
      * 页码收敛：负数/0/null 一律当第 1 页。
-     * 为什么必须收敛：MyBatis-Plus 的 Page 对 current&lt;1 会算出负数 offset，
-     * 轻则 SQL 报错，重则在某些方言下被当成"未分页"。
+     *
+     * 【注意】MyBatis-Plus 的 Page 对小于 1 的 current 会算出负数 offset，某些方言下还会被当成"未分页"。
      */
     public static int normalizePageNo(Integer pageNo) {
         return (pageNo == null || pageNo < 1) ? DEFAULT_PAGE_NUM : pageNo;
@@ -51,12 +50,9 @@ public class PageQuery {
     /**
      * 每页条数收敛到 [1, maxPageSize]。
      *
-     * <p>为什么这是"必须"而不是"最好有"：MyBatis-Plus 3.4.2 的 {@code new Page<>(current, size)}
-     * 在 size &lt; 0 时表示**不分页**（等价于 selectList），也就是免登录的
-     * {@code /items/page?pageSize=-1} 能一次拉走整张商品表 —— 既是性能风险也是数据暴露面；
-     * size 特别大（如 100000）虽然没有语义问题，但同样是一次全表扫描 + 大对象返回。
-     * 这里统一按"非法取默认、超大取上限"处理，而不是抛 400：
-     * 分页参数是"可自愈的输入"，把它变成错误会让前端翻页组件因为一个脏参数整页报错。
+     * 【注意】MyBatis-Plus 3.4.2 的 {@code new Page<>(current, size)} 在 size 小于 0 时表示不分页
+     * （等价于 selectList），即 {@code /items/page?pageSize=-1} 能一次拉走整张商品表。
+     * 非法值取默认、超大取上限而不抛 400：分页参数属可自愈的输入，把它变成错误会让前端翻页组件整页报错。
      */
     public static int normalizeSize(Integer size) {
         return normalizeSize(size, DEFAULT_PAGE_SIZE, maxPageSize);
@@ -67,7 +63,7 @@ public class PageQuery {
     }
 
     /**
-     * @param defaultSize size 缺失/非法时的默认值（各接口历史默认值不同，保留原语义）
+     * @param defaultSize size 缺失/非法时的默认值（各接口默认值不同，保留原语义）
      * @param maxSize     该接口自己的上限；只会把全局上限收得更紧，不会突破它
      */
     public static int normalizeSize(Integer size, int defaultSize, int maxSize) {
@@ -80,13 +76,11 @@ public class PageQuery {
     }
 
     /**
-     * 排序列的合法形态：单个数据库标识符（字母/下划线开头，其后字母/数字/下划线，最长 64）。
+     * 排序列白名单：单个数据库标识符（字母/下划线开头，其后字母/数字/下划线，最长 64）。
      *
-     * <p>为什么必须是校验而不是"信任前端"：sortBy 会被直接拼进 ORDER BY，而 MyBatis-Plus 3.4.2
-     * 不对列名做净化（实测其 jar 里没有 SqlInjectionUtils），于是
-     * {@code ?sortBy=(CASE WHEN(SUBSTRING((SELECT ...),1,1)='a') THEN id ELSE price END)}
-     * 就是一条可用的布尔盲注。非法值一律当作"没传"，退回接口默认排序 ——
-     * 排序字段属于可自愈的脏输入，不该让整页报错。
+     * 【注意】sortBy 是前端传入的字符串、会被直接拼进 ORDER BY，而 MyBatis-Plus 3.4.2 不对列名做净化，
+     * 原样拼接即可构造布尔盲注（如 CASE WHEN(子查询) THEN ...），所以必须限定为单个数据库标识符。
+     * 非法值一律当作"没传"，退回接口默认排序——排序字段属于可自愈的脏输入，不该让整页报错。
      */
     private static final Pattern SAFE_SORT_BY = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]{0,63}$");
 
@@ -118,14 +112,12 @@ public class PageQuery {
     public <T> Page<T> toMpPage(OrderItem... orderItems) {
         normalizeSelf();
         Page<T> page = new Page<>(pageNo, pageSize);
-        // 是否手动指定排序方式
         if (orderItems != null && orderItems.length > 0) {
             for (OrderItem orderItem : orderItems) {
                 page.addOrder(orderItem);
             }
             return page;
         }
-        // 前端是否有排序字段（列名须过 safeSortBy() 的正则校验，非法值当没传）
         String safeSort = safeSortBy();
         if (safeSort != null){
             OrderItem orderItem = new OrderItem();
@@ -154,15 +146,14 @@ public class PageQuery {
     }
 
     /**
-     * 把收敛结果写回字段：这样 from() / 业务代码里读 pageNo、pageSize 时拿到的是**同一份**值，
+     * 把收敛结果写回字段：这样 from() / 业务代码里读 pageNo、pageSize 时拿到的是同一份值，
      * 否则会出现"分页查询按 100 条取、业务按 -1 条算"的隐蔽不一致。
      */
     private void normalizeSelf() {
         this.pageNo = normalizePageNo(pageNo);
         this.pageSize = normalizeSize(pageSize);
-        // isAsc 是包装类型：`?isAsc=`（空串）会被 Spring 绑成 null，
-        // 而 MyBatis-Plus 的 OrderItem.setAsc 收的是原始 boolean，直接传会拆箱 NPE → 500。
-        // 这里统一收敛为默认升序，既是防御也符合"脏参数自愈"的约定。
+        // isAsc 是包装类型：`?isAsc=`（空串）会被 Spring 绑成 null，而 OrderItem.setAsc 收的是原始
+        // boolean，直接传会拆箱 NPE → 500，这里统一收敛为默认升序。
         if (this.isAsc == null) {
             this.isAsc = true;
         }

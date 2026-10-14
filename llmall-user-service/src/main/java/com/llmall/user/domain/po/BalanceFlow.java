@@ -13,12 +13,9 @@ import java.time.LocalDateTime;
 /**
  * 余额变动流水（资金账本）。
  *
- * <p>解决什么问题：余额原来只有一个当前值，既查不出"钱为什么少了"，也没有任何幂等键 ——
- * 上游重试、Feign 重发、并发双击都只能靠 Redis 锁挡，锁一过期、进程一重启就失去保护。
- *
- * <p>做法：每次余额变动都在**同一个本地事务**里写一条流水，靠唯一键 {@code uk_biz(biz_type, biz_no)} 幂等：
- * 同一业务号的第二次到达会被唯一键顶掉，调用方据此判定"已经处理过"。
- * 流水里带 {@code balance_after}，可与 {@code user.balance} 对账。
+ * 【注意】唯一键 (biz_type, biz_no) 即幂等键：同一业务号的第二次写入会被唯一键顶掉，
+ * 调用方据此判定是否已处理；流水必须与余额变动写在同一个本地事务里。
+ * balance_after 为变动后余额，用于与 user.balance 对账。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
@@ -39,16 +36,16 @@ public class BalanceFlow implements Serializable {
 
     private Long userId;
 
-    /** 变动金额（分）：正=入账，负=出账。 */
+    /** 变动金额（分）：正=入账，负=出账 */
     private Integer changeAmount;
 
-    /** 本次变动后的余额（分）。 */
+    /** 本次变动后的余额（分） */
     private Integer balanceAfter;
 
-    /** DEDUCT / REFUND。 */
+    /** DEDUCT / REFUND */
     private String bizType;
 
-    /** 业务号，与 bizType 组成幂等键。 */
+    /** 业务号，与 bizType 一起构成幂等键 */
     private String bizNo;
 
     private String remark;

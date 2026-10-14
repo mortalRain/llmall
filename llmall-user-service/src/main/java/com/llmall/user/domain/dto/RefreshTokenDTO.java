@@ -5,7 +5,9 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
 /**
- * 刷新令牌请求体（同时也支持用请求头 x-refresh-token 传递）。
+ * 刷新令牌请求体。
+ *
+ * 【注意】refresh token 也可以用请求头 x-refresh-token 传递。
  */
 @Data
 @Schema(description = "刷新令牌请求体")

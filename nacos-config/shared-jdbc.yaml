@@ -5,10 +5,9 @@ spring:
     username: root
     password: ${llmall.db.pw}
     hikari:
-      # 连接池上限压到 5（默认是 10）：11 个服务 × 10 条 = 110 条，已接近 MySQL 默认 max_connections=151。
-      # 更隐蔽的是"服务被杀后连接不会立刻释放"——要等 MySQL wait_timeout（默认 8 小时）才回收，
-      # 反复重启几次就能把连接数打满（实测踩过：Too many connections，连 root 都被拒之门外）。
-      # 本地/演示负载下 5 条足够，且把最坏情况从 110 降到 55。
+      # 【注意】上限压到 5（默认 10）：11 个服务 × 10 条 = 110 条，已接近 MySQL 默认 max_connections=151；
+      # 服务被杀后连接要等 wait_timeout（默认 8 小时）才回收，反复重启即可打满连接数
+      # （表现为 Too many connections，连 root 都被拒）。本地/演示负载 5 条足够，最坏情况从 110 降到 55。
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 5000

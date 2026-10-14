@@ -7,9 +7,7 @@ import lombok.Data;
 import java.io.Serializable;
 
 /**
- * 门店 DTO（跨服务传输用，不是数据库实体）。
- *
- * 约定：服务之间只传 DTO，不传各自的 PO，避免"别人改了我的表结构，我的服务跟着挂"。
+ * 门店 DTO（跨服务传输用，不是数据库实体）；服务之间只传 DTO，不传各自的 PO。
  */
 @Data
 @Schema(description = "门店信息")

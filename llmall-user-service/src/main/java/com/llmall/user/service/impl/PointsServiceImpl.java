@@ -20,12 +20,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 
 /**
- * 积分服务：亮点 B 的消费端实现。
+ * 积分服务：消费 order.paid 事件，按订单金额为用户发放下单积分。
  *
- * 与 llmall-shop-service 的消费端相比，这里的写法更简洁：**占位、业务、流水全部在一个本地事务里**，
- * 失败时整体回滚，MQ 重投即可重试，不需要"失败再撤销占位"。
- * （llmall-shop-service 那边因为业务方法各自带事务，占位与业务不在同一事务，所以必须显式撤销占位。）
- * 两种写法都可以，关键是"占位与业务要么同一事务，要么失败能撤销占位"——否则消息会永久丢失。
+ * 【注意】消息占位、业务、流水三段必须在同一个本地事务内完成，失败整体回滚后由 MQ 重投重试；
+ * 若占位与业务不在同一事务，就必须能显式撤销占位，否则消息会永久丢失。
  */
 @Slf4j
 @Service
@@ -51,7 +49,7 @@ public class PointsServiceImpl implements IPointsService {
         }
         String bizId = String.valueOf(event.getOrderId());
 
-        // 1. 消息级幂等占位（唯一索引挡住重复投递）
+        // 消息级幂等占位，重复投递由唯一索引挡住
         try {
             consumeRecordMapper.insert(new ConsumeRecord()
                     .setBizType(MqConstants.BIZ_ORDER_PAID)
@@ -68,7 +66,7 @@ public class PointsServiceImpl implements IPointsService {
             return false;
         }
 
-        // 2. 先写流水（唯一键是业务级幂等闸门，也是对账判据）
+        // 业务级幂等闸门：流水唯一键挡住重复发放，流水同时是对账判据
         try {
             pointsFlowMapper.insert(new PointsFlow()
                     .setUserId(event.getUserId())
@@ -82,10 +80,10 @@ public class PointsServiceImpl implements IPointsService {
             return false;
         }
 
-        // 3. 原子累加积分
+        // 原子累加积分
         int updated = userInfoMapper.addCredits(event.getUserId(), points);
         if (updated == 0) {
-            // 用户资料不存在：补建一份（并发下可能撞唯一键，撞了就改为直接累加）
+            // 用户资料不存在则补建；并发下可能撞唯一键，撞了就改为直接累加
             try {
                 userInfoMapper.insert(new UserInfo()
                         .setUserId(event.getUserId())
@@ -107,7 +105,7 @@ public class PointsServiceImpl implements IPointsService {
         if (orderId == null) {
             return true;
         }
-        // MyBatis-Plus 3.5.x 起 selectCount 返回 Long（3.4.x 是 Integer），类型必须跟着改
+        // MyBatis-Plus 3.5.x 起 selectCount 返回 Long，不能用 Integer 接收
         Long count = pointsFlowMapper.selectCount(new LambdaQueryWrapper<PointsFlow>()
                 .eq(PointsFlow::getBizType, MqConstants.BIZ_ORDER_PAID)
                 .eq(PointsFlow::getBizId, String.valueOf(orderId))

@@ -10,11 +10,10 @@ import java.util.List;
 public interface FollowMapper extends BaseMapper<Follow> {
 
     /**
-     * 共同关注（SQL 兜底版本）。
+     * 共同关注（SQL 兜底版本）：仅在 Redis 集合不可信（被清空后基数对不上 / 关注数超过缓存重建上限）时调用。
      *
-     * <p>只在 Redis 集合不可信（被清空后基数对不上 / 关注数超过缓存重建上限）时才走这里：
-     * 两边各自命中 uk_follow(user_id, follow_user_id) 的前缀做索引扫描，再按 follow_user_id 求交，
-     * 内存占用只有结果集大小 —— 用一趟 SQL 换"结果一定正确"，比拿一个残缺的缓存去求交集划算。
+     * 两侧各命中 uk_follow(user_id, follow_user_id) 前缀做索引扫描，再按 follow_user_id 求交，
+     * 内存占用只有结果集大小。
      */
     @Select("SELECT f1.follow_user_id FROM `follow` f1 "
             + "INNER JOIN `follow` f2 ON f1.follow_user_id = f2.follow_user_id "

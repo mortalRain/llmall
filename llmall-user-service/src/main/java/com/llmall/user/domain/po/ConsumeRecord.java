@@ -11,9 +11,9 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * 消息消费幂等记录（llmall-user-service 侧）。
- * 与 llmall-shop-service 的同一张表结构一致：**每个消费方在自己库里维护自己的消费记录**，
- * 这样多个服务消费同一事件时互不干扰。
+ * 消息消费幂等记录。
+ *
+ * 【注意】表结构与 llmall-shop-service 的同名表一致，每个消费方在自己库里维护自己的记录。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)

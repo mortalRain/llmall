@@ -1,17 +1,16 @@
 # bootstrap 阶段就要知道应用名与配置中心地址，所以这些必须写在这里（不能只写在 application.yaml）。
 spring:
   application:
-    name: llmall-pay-service # 核心标识，Nacos 注册与配置、日志里的服务名都依赖它
+    name: llmall-pay-service   # 核心标识：Nacos 注册与配置、日志都依赖它
   profiles:
-    # local：本机/虚拟机地址（VM 里的容器名 mysql/mq/redis 只有在 docker 网络内才解析得到）
-    active: local
+    active: local              # local：本机/虚拟机地址（VM 里的容器名只有在 docker 网络内才解析得到）
   cloud:
     nacos:
-      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}   # 本地默认 192.168.189.128，容器/云服务器用 NACOS_ADDR 覆盖
       # 服务发现
       discovery:
         namespace: ${NACOS_NAMESPACE:public}
-      # 配置中心：shared-*.yaml 是"跨服务的同一份口径"，改动在 Nacos 上发布即对所有服务生效
+      # 配置中心：shared-*.yaml 是跨服务的同一份口径，在 Nacos 上发布即对所有服务生效
       config:
         server-addr: ${NACOS_ADDR:192.168.189.128:8848}
         file-extension: yaml
@@ -20,10 +19,10 @@ spring:
             refresh: true
           - dataId: shared-mybatis.yaml
             refresh: true
-          # 支付并发闸门用的 Redis 连接（host/port/密码/lettuce 池）
+          # 支付并发闸门用的 Redis 连接（地址/口令/超时/哨兵/连接池）
           - dataId: shared-redis.yaml
             refresh: true
-          # 支付成功事件（pay.success）的 MQ 连接与消费口径
+          # pay.success 支付成功事件的 MQ 连接与消费口径
           - dataId: shared-mq.yaml
             refresh: true
           - dataId: shared-log.yaml

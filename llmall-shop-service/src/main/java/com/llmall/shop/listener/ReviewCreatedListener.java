@@ -16,21 +16,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 消费"评价产生"事件，更新门店评分/评价数并重算热度分。
+ * 消费"评价产生"事件，更新门店评分/评价数并重算热度分；内容域只管发评价，两个域之间没有任何直接调用。
  *
- * 这就是亮点 C 的关键一跳：内容域只管发评价，门店域负责把它折算成"热度"，
- * 两个域之间没有任何直接调用（不知道对方存在），只通过事件耦合。
- *
- * <h3>幂等策略（与 OrderPaidListener 同一套，见那边的详细论证）</h3>
- *  - **幂等先行**：先插入消费占位（唯一键 uk_consume(biz_type,biz_id,consumer) 裁决），
- *    插入成功才执行业务累加；插入冲突直接返回，绝不重复执行。
- *    这里绝不能用"先 selectCount 查一下有没有"来代替 —— 并发/重投下两个线程都查不到，
- *    于是 comments 被加两次，而且不会有任何报错（累加型操作错了也不报错，只能靠闸门）。
- *  - **占位与业务同事务**：本方法加了 @Transactional，占位插入与 applyReview/recomputeHotScore
- *    一起提交或一起回滚。因此**不再需要"失败时删除占位"那段逻辑**：
- *    抛异常 → 事务回滚 → 占位自动消失 → 容器重投 → 闸门放行、重新执行，
- *    既不会重复累加，也不会因为"占位留下了"而永久丢消息。
- *  - **失败分类**：业务失败（门店不存在等）记日志 + ack 不再重试；系统异常抛出交给容器重试。
+ * 【注意】幂等口径：先插入消费占位，由唯一键 uk_consume(biz_type,biz_id,consumer) 裁决，插入成功才执行
+ * 业务累加，冲突直接返回。绝不能用"先 selectCount 查一下有没有"代替 —— 并发/重投下两个线程都查不到，
+ * 于是 comments 被加两次，而且不会有任何报错（累加型操作错了也不报错，只能靠闸门）。
+ * 占位与业务同事务（本方法带 @Transactional）：抛异常 → 事务回滚 → 占位自动消失 → 容器重投 → 闸门放行，
+ * 因此不需要"失败时删除占位"的逻辑，也不会因占位残留而永久丢消息。
+ * 失败分类：业务失败（门店不存在等）记日志 + ack 不再重试；系统异常抛出交给容器重试。
  */
 @Slf4j
 @Component
@@ -67,24 +60,18 @@ public class ReviewCreatedListener {
             return;
         }
 
-        // 2. 业务处理：评分/评价数累加（comments+1 就在 applyReview 的 SQL 里）
+        // 2. 业务处理：评分/评价数累加（comments+1 在 applyReview 的 SQL 里完成）
         int updated = shopService.applyReview(event.getShopId(), event.getScore());
         if (updated == 0) {
-            // 【业务失败】门店不存在：属于脏数据，重试一万次结果也一样。
-            // 占位随事务提交保留 → 直接 ack，不再重试（否则消息会在重试队列里空转到死信）。
+            // 【业务失败】门店不存在属于脏数据，重试一万次结果也一样：占位随事务提交保留 → 直接 ack，
+            // 不再重试（否则只会把消息空转到死信队列，而那里不挂消费者，最终仍需人工处理）。
             log.warn("评价对应的门店不存在（不再重试，占位保留）: shopId={}, bizId={}", event.getShopId(), bizId);
             return;
         }
-        // 3. 重算热度（写入 DB + 榜单 ZSet）。
-        //    ⚠️ 审计 B4：这里原来紧接着在**事务内**调用 eventPublisher.publishHotChanged(...)，
-        //    而发布方投递失败只 log.error —— 事务回滚了事件可能已经发出去、事务提交了事件却可能永远发不出去，
-        //    MQ 抖一下就是"评价存在、热度不变"，且没有任何信号。
-        //    现在"通知搜索域"这件事内聚进 recomputeHotScore：它会把整行门店快照登记进本地消息表
-        //    （与本次事务同提交），提交后才投递，失败退避重试 + 定时对账补发。
-        //    好处是新增任何改热度的调用方都不会再漏发事件，本监听器也不必再持有发布器。
+        // 3. 重算热度（写入 DB + 榜单 ZSet）：
+        //    "通知搜索域"已内聚进 recomputeHotScore —— 它把整行门店快照登记进本地消息表（与本次事务同提交），
+        //    提交后才投递，失败退避重试 + 定时对账补发；因此本监听器不必持有发布器，新增改热度的调用方也不会漏发事件。
         double hotScore = shopService.recomputeHotScore(event.getShopId());
         log.info("门店热度已更新: shopId={}, hotScore={}", event.getShopId(), hotScore);
-        // 未捕获的系统异常 → 抛出 → 事务回滚（占位消失）→ 容器重投 → 闸门放行，
-        // 由唯一键保证"重投不会把评价数累加两次"。
     }
 }

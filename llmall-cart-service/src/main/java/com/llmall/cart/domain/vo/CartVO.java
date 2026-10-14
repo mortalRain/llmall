@@ -6,14 +6,7 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 
-/**
- * <p>
- * 订单详情表
- * </p>
- *
- * @author 同城生活
- * @since 2023-05-05
- */
+/** 购物车条目视图对象（含商品最新价格/状态/库存）。 */
 @Data
 @Schema(description = "购物车VO实体")
 public class CartVO {

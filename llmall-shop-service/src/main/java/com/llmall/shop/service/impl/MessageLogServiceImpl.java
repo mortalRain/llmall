@@ -23,15 +23,12 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 本地消息表实现（门店域，审计 B4）：把"发消息"变成"先落库、再投递、失败重试、对账兜底"。
+ * 门店域本地消息表：把"发消息"变成"先落库、再投递、失败重试、对账兜底"。
  *
- * 时序上分三段，各自解决一个问题（与 llmall-trade 的实现同一套设计）：
- *  1. record()             —— 与业务同事务：保证"业务成功 ⇒ 消息一定存在"（不丢）
- *  2. dispatchAfterCommit() —— 提交后立刻投递：保证低延迟，且**回滚了就不发**
- *  3. retryPending()/compensate() —— 定时重试 + 对账补偿：保证"当时投不出去，最终也能到"
- *
- * 这一段是审计 B4 的核心修复：原来的 ShopEventPublisher 直接 convertAndSend + catch{log.error}，
- * 既没有"提交后才发"的时序保证，也没有任何重试/对账 —— MQ 抖一下就永久断裂。
+ * 【注意】时序分三段，不可合并：
+ *  1. record() 与业务同事务：业务成功 ⇒ 消息一定存在（不丢）；
+ *  2. dispatchAfterCommit() 必须在事务提交后投递，回滚了就不发；
+ *  3. retryPending()/compensate() 定时重试 + 对账补偿：当时投不出去，最终也能到。
  */
 @Slf4j
 @Service
@@ -44,10 +41,11 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
 
     /**
      * bizType → 消息体目标类型。
-     * 为什么需要这个映射：本地消息表里存的是 JSON 字符串，投递时要还原成原本的事件对象，
-     * 下游的消息转换器才能按"字段名 + 类型"正确反序列化（把 payload 当 Map 发出去，
-     * 消费端拿到的是 LinkedHashMap，字段语义全靠猜）。新增事件类型时必须在这里登记，
-     * 否则投递阶段会直接抛"未注册的消息类型"，被 catch 成失败重试 —— 表现是消息永远发不出去。
+     *
+     * 【注意】本地消息表里存的是 JSON 字符串，投递时必须还原成原本的事件对象，下游消息转换器才能按
+     * "字段名 + 类型"正确反序列化（把 payload 当 Map 发出去，消费端拿到的是 LinkedHashMap）。
+     * 新增事件类型必须在这里登记，否则投递阶段直接抛"未注册的消息类型"、被 catch 成失败重试，
+     * 表现是消息永远发不出去。
      */
     private static final Map<String, Class<?>> PAYLOAD_TYPES = new HashMap<>();
 
@@ -81,12 +79,10 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
     /**
      * 事务提交后再投递。
      *
-     * 为什么不能就地发：本方法一定是在业务事务里被调用的（评价消费/订单支付消费都会改 shop 行），
-     * 就地发会出现两种都很难查的错：
-     *  ① 事务随后回滚 → 事件已经发出去了，下游按"没发生过的变更"改了搜索视图；
-     *  ② 提交之后进程崩溃 → 事件永远发不出去，业务却已经生效（"评价存在、热度不变"）。
-     * 注册到 afterCommit 后，注册时点与提交时点之间的窗口由"消息已经和业务同事务落库"兜住：
-     * 提交成功 ⇒ 消息一定在表里 ⇒ 即使这段窗口断电，重试任务也会把它发出去。
+     * 【注意】必须在业务事务内调用：就地发会出现"事务回滚了事件却已发出"与"提交后进程崩溃、事件永远
+     * 发不出去"（评价存在、热度不变）两种都很难查的错。注册到 afterCommit 后，注册时点与提交时点之间
+     * 的窗口由"消息已经和业务同事务落库"兜住：提交成功 ⇒ 消息一定在表里 ⇒ 即使这段窗口断电，
+     * 重试任务也会把它发出去。
      */
     @Override
     public void dispatchAfterCommit(String bizType, String bizId) {
@@ -100,9 +96,9 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    // afterCommit 里抛异常会传播给"提交事务的调用方"，让一个已经提交成功的事务
+                    // 【注意】afterCommit 里抛异常会传播给"提交事务的调用方"，让一个已经提交成功的事务
                     // 在调用方看来是失败的（MQ 消费方可能因此重投整条 review.created）。
-                    // dispatch 内部已经把所有异常吞成日志 + 失败状态，这里不会再抛。
+                    // dispatch 内部已把所有异常吞成日志 + 失败状态，这里不会再抛。
                     action.run();
                 }
             });
@@ -134,7 +130,6 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
                     .set(MessageLog::getNextRetryTime, LocalDateTime.now().plusSeconds(delaySeconds))
                     .set(MessageLog::getErrorMsg, truncate(e.getMessage(), 1000))
                     .update();
-            // 这里原来是事件永久丢失的地方（只有 log.error，没有任何后续动作）
             log.error("消息投递失败，将在 {} 秒后重试(第 {} 次): bizType={}, bizId={}",
                     delaySeconds, retry, messageLog.getBizType(), messageLog.getBizId(), e);
             return false;

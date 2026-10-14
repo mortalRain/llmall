@@ -10,9 +10,7 @@ import lombok.experimental.Accessors;
 import java.io.Serializable;
 
 /**
- * <p>
- * 
- * </p>
+ * 用户收货地址。
  *
  * @author 同城生活
  * @since 2023-05-05
@@ -28,49 +26,31 @@ public class Address implements Serializable {
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
-    /**
-     * 用户ID
-     */
     private Long userId;
 
-    /**
-     * 省
-     */
     private String province;
 
-    /**
-     * 市
-     */
     private String city;
 
     /**
-     * 县/区
+     * 县/区（库列名为 town）
      */
     private String town;
 
-    /**
-     * 手机
-     */
     private String mobile;
 
     /**
-     * 详细地址
+     * 详细地址（库列名为 street）
      */
     private String street;
 
-    /**
-     * 联系人
-     */
     private String contact;
 
     /**
-     * 是否是默认 1默认 0否
+     * 是否默认地址：1 默认 0 否
      */
     private Integer isDefault;
 
-    /**
-     * 备注
-     */
     private String notes;
 
 

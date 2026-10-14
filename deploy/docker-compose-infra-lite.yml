@@ -1,23 +1,7 @@
-# ⚠️ 本文件已废弃（2026-10-11），不要再在这里维护第二份中间件定义。
-#
-# 原因：它和 docker/docker-compose-infra-lite.yml 是同一件事的两份拷贝，而两者已经不一致——
-#   ① 容器名：这里用 infra-mysql / infra-redis / infra-nacos / infra-rabbitmq，
-#      但 deploy/.env.example 与 docker-compose-apps.yml 里填的是 mysql / redis / nacos / rabbitmq；
-#      名字对不上时应用容器会报 java.net.UnknownHostException: mysql。
-#   ② Redis 密码：这里 123456（与 VM 实测一致），docker/ 那份原本写 123（已修正为
-#      ${REDIS_PASSWORD:-123456}）。
-#   ③ 镜像版本：这里 mysql 8.0.36 / redis 7.0.15 / rabbitmq 3.12，docker/ 那份是
-#      mysql 8.0.27 / redis 7.2 / rabbitmq 3.11。
-#
-# 现在只保留一份事实来源（三份 compose 共用同一个 external 网络 local-life）：
-#   ../../docker/docker-compose-infra-lite.yml   MySQL / Redis / Nacos / RabbitMQ
-#   ../../docker/docker-compose-addon.yml        Seata / Elasticsearch / Kibana
-#   ./docker-compose-apps.yml                    11 个服务
-#
-# 起中间件的正确命令：
-#   docker network create local-life
-#   docker compose -f ../../docker/docker-compose-infra-lite.yml up -d
-#
-# 本文件故意不再定义任何服务：若按旧文档执行它，compose 会直接报 "no service selected"
-# （响亮地失败），而不是悄悄起一套和 .env.example 对不上的容器。确认无引用后可直接删除本文件。
+# 【注意】本文件已废弃（2026-10-11），不要再在这里维护第二份中间件定义。
+# 中间件只保留一份事实来源：docker/docker-compose-infra-lite.yml（MySQL/Redis/Nacos/RabbitMQ）、
+# docker/docker-compose-addon.yml（Seata/Elasticsearch/Kibana）、deploy/docker-compose-apps.yml（11 个服务），
+# 三份 compose 共用 external 网络 local-life，起中间件前先 docker network create local-life。
+# 本文件故意不定义任何服务：按旧文档执行它会直接报 no service selected，而不是悄悄起一套
+# 与 deploy/.env.example 对不上的容器（容器名不一致时应用容器会报 UnknownHostException: mysql）。
 services: {}

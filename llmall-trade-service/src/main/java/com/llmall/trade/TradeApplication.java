@@ -7,7 +7,6 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
-// 开启定时任务：本地消息重试与对账补偿（亮点 B 的兜底机制）
 @EnableScheduling
 @EnableFeignClients(basePackages = "com.llmall.api.client", defaultConfiguration = DefaultFeignConfig.class)
 @MapperScan("com.llmall.trade.mapper")

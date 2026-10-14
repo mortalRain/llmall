@@ -2,51 +2,46 @@ server:
   port: 8082
 feign:
   okhttp:
-    enabled: true # 开启OKHttp连接池支持
+    enabled: true  # 开启 OkHttp 连接池
   sentinel:
-    enabled: true # 开启feign对sentinel的支持
+    enabled: true  # 开启 Feign 对 Sentinel 的支持
 llmall:
   swagger:
     title: "同城生活电商综合服务系统接口文档"
     package: com.llmall.cart.controller
   db:
     database: llmall-cart
-  # 服务间内部调用凭证（默认值见下）。
-  # 用途：UserInfoInterceptor 只在该请求头与下面这个值完全一致时才采信 user-info 头 ——
-  # 服务监听 0.0.0.0，"能收到 user-info 头"不代表身份来自网关，直连端口可以自己伪造一个。
-  # 凭证由网关（认证通过后）与 Feign（DefaultFeignConfig）注入，网关会剥离外部自带的同名头。
-  # llmall-internal-demo-token 仅用于本地演示：生产应由网关注入/配置中心下发且不对外暴露，
-  # 并配合内网隔离；全项目所有服务必须配置成同一个值，否则会出现"请求全部未登录"。
+  # 服务间内部调用凭证：仅当请求头与该值完全一致时，UserInfoInterceptor 才采信 user-info 头
+  # （服务监听 0.0.0.0，"能收到 user-info 头"不代表身份来自网关，直连端口可以自己伪造一个）。
+  # 由网关（认证通过后）与 Feign（DefaultFeignConfig）注入，网关会剥离外部自带的同名头。
+  # 【注意】全项目所有服务必须配置成同一个值，否则会出现"请求全部未登录"。
+  # 默认值 llmall-internal-demo-token 仅用于本地演示：生产应由网关注入/配置中心下发且不对外暴露，并配合内网隔离。
   internal:
     token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
 spring:
   profiles:
-    # 显式声明 local（与其它服务一致）：local 存的是本机/虚拟机地址，
-    # 原工程不写 profile 时依赖 Nacos 共享配置里的默认值，容易在换环境时踩空
+    # 显式声明 local（与其它服务一致）：local 存的是本机/虚拟机地址
     active: local
   cloud:
     sentinel:
-      # eager=true：启动即向控制台注册。默认是惰性的（false），要等第一次请求进来才注册，
-      # 结果就是"服务已经起来了、控制台里却什么都没有"，很容易误判成控制台没连上（实测踩过）。
-      # eager=false：**不要再改成 true**。eager=true 会在启动期就去连 Sentinel 控制台，
-      # 控制台没起（开发常态）时 SentinelAutoConfiguration 初始化直接 NPE → 整个服务启动失败（实测踩过）。
-      # 代价：控制台要等第一次请求进来才看到实例，这比"服务起不来"划算得多。
+      # eager：是否在启动期就向 Sentinel 控制台注册；默认 false = 惰性注册，控制台要等第一次请求进来才看到实例。
+      # 【注意】不要改成 true：eager=true 会在启动期就去连控制台，控制台没起（开发常态）时
+      # SentinelAutoConfiguration 初始化直接 NPE，整个服务启动失败；代价是控制台要等第一次请求才能看到实例。
       eager: false
       transport:
         dashboard: ${llmall.sentinel.dashboard:localhost:8090}
-      http-method-specify: true #是否设置请求方式作为资源名称
-  # MQ 连接（host/port/vhost/账号）与消费口径（prefetch / 重试 / default-requeue-rejected / 死信）
-  # 统一来自 Nacos 的 shared-mq.yaml；地址由 application-local.yaml 的 llmall.mq.host 提供。
-  # 这里原来只有一段手写的"精简版"配置：cart 是 order.create 的消费方，消费失败口径与其它服务
-  # 不一致时，同一个故障在不同服务上的行为会分叉（一边热循环、一边静默丢弃）。
-  # ---------------------------------------------------------------------------
-# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。
-# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+
-# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：
-#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs
-# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；
-# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。
-# ---------------------------------------------------------------------------
+      http-method-specify: true  # 是否设置请求方式作为资源名称
+  # MQ 连接（host/port/vhost/账号）与消费口径（prefetch / 重试 / default-requeue-rejected / 死信）统一来自 Nacos 的 shared-mq.yaml。
+  # 地址由 application-local.yaml 的 llmall.mq.host 提供。
+  # 【注意】cart 是 order.create 的消费方，消费失败口径与其它服务不一致时，同一个故障在不同服务上会分叉（一边热循环、一边静默丢弃）。
+  # 购物车缓存 cache:cart:{userId}（Redis Hash，field = itemId，value = 条目 JSON），详见 CartServiceImpl 的类注释与 CartRedisConstants。
+  # 读写口径：读先走缓存、未命中回源 DB 并整份回填；写先落 DB、提交后整份重建缓存；权威数据在 DB，缓存读写失败一律降级为直查 DB。
+  # 【注意】必须带 TTL（30 分钟滑动续期）：现役 Redis 是 maxmemory 0 + noeviction（既不淘汰也不过期），
+  # 没有 TTL 的话，每个打开过购物车的用户都会永久留下一个 cache:cart:{userId} key。
+  # 【注意】Redis 连接的地址/口令/超时/哨兵/连接池统一来自 Nacos 的 shared-redis.yaml（地址由 application-local.yaml 的
+  # llmall.redis.host|pw 提供），本文件不再复制一份，否则会出现"看起来配了、其实被 Nacos 覆盖"的漂移。
+# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi），UI 地址 /doc.html，OpenAPI JSON /v3/api-docs
+# 注解用 swagger v3（io.swagger.v3.oas.annotations）；springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，无需 ant_path_matcher 兼容开关。
 knife4j:
   enable: true
   setting:

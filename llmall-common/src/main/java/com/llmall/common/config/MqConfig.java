@@ -16,12 +16,10 @@ import org.springframework.context.annotation.Configuration;
 public class MqConfig {
 
     /**
-     * 修复：原实现是 `new Jackson2JsonMessageConverter()`，它内部**自建**一个干净的 ObjectMapper，
-     * 因此不认 Java 8 时间类型（LocalDateTime 直接抛 "Java 8 date/time type not supported by default"），
-     * 也不带项目里 JsonConfig 配置的 Long→String 序列化。
+     * MQ 消息序列化复用容器内的 ObjectMapper（已注册 JavaTimeModule 与项目定制），与 HTTP 接口同一套规则。
      *
-     * 这里注入 Spring 容器里的 ObjectMapper（已注册 JavaTimeModule + 项目定制），
-     * 让 MQ 消息的序列化规则与 HTTP 接口保持一致 —— 否则会出现"接口返回正常、MQ 消费端报解析错"的怪问题。
+     * 【注意】不能用无参构造的 {@code Jackson2JsonMessageConverter}：它内部自建一个干净的 ObjectMapper，
+     * 不认 LocalDateTime，也不带 JsonConfig 的 Long→String，结果是接口返回正常、MQ 消费端报解析错误。
      */
     @Bean
     public MessageConverter messageConverter(ObjectMapper objectMapper) {
@@ -29,21 +27,14 @@ public class MqConfig {
     }
 
     /**
-     * 让 MQ 消息也带上 traceId：发送时把当前线程的 traceId 写进消息头。
+     * 发送 MQ 消息时把当前线程的 traceId 写进消息头，使消费端日志能与发起它的那次请求关联。
      *
-     * <p>为什么值得做：下单是"HTTP 请求 + 异步消息"混合链路 —— 订单创建（HTTP）之后，
-     * 关单/发积分/清购物车/更新热度都是 MQ 消费。如果没有这个头，消费端日志就与发起它的那次请求
-     * 彻底失联，只能靠 orderId 反查，跨服务时还要拼好几张表。
+     * 【边界】只保证生产者把 traceId 放进消息头；消费端要放进 MDC 需另配 MessageListenerContainer
+     * 的 advice 链（当前未做，消费端可先从消息头手工读取）。
      *
-     * <p>【边界】这里保证的是**生产者**把 traceId 放进消息头；消费端要把它放进 MDC
-     * 需要用 MessageListenerContainer 的 advice 链另行注入（当前未做，消费端可先从消息头手工读取）。
-     * 不把没做的事说成做了，是这份代码注释的基本要求。
-     *
-     * <p>【为什么用 BeanPostProcessor 而不是 RabbitTemplateCustomizer】
-     * 本项目的 Spring Boot 2.7.12 里 `org.springframework.boot.autoconfigure.amqp.RabbitTemplateCustomizer`
-     * 并不存在（编译期实测报"找不到符号"）。BeanPostProcessor 只依赖 Spring AMQP 自己的
-     * `RabbitTemplate#setBeforePublishPostProcessors`，不绑定 Boot 版本的定制点命名。
-     * 必须是 static 方法：BeanPostProcessor 要在其它 bean 之前实例化，非 static 会触发"过早初始化"告警。
+     * 【注意】必须是 static 方法：BeanPostProcessor 要先于其它 bean 实例化，非 static 会触发"过早初始化"告警。
+     * 不用 Boot 的 RabbitTemplateCustomizer，是因为本项目 Spring Boot 2.7.12 里没有这个类；
+     * 这里只依赖 Spring AMQP 的 {@code RabbitTemplate#setBeforePublishPostProcessors}，不绑定 Boot 版本的命名。
      */
     @Bean
     public static BeanPostProcessor rabbitTemplateTraceIdPostProcessor() {
@@ -52,13 +43,11 @@ public class MqConfig {
             public Object postProcessAfterInitialization(Object bean, String beanName) {
                 if (bean instanceof RabbitTemplate) {
                     ((RabbitTemplate) bean).setBeforePublishPostProcessors(message -> {
-                        // 只在没有 traceId 时补一个，绝不覆盖已有的：
-                        // 死信重投（DeadLetterPublisher）会把"最初那条消息的 traceId"原样带过来，
-                        // 覆盖掉它等于把死信与最初那次请求的联系切断 —— 死信反而最难查。
+                        // 只在没有 traceId 时补一个，绝不覆盖已有的：死信重投（DeadLetterPublisher）
+                        // 会把"最初那条消息的 traceId"原样带过来，覆盖掉它等于切断死信与最初那次请求的联系。
                         if (message.getMessageProperties().getHeaders().get(TraceContext.HEADER) == null) {
-                            // 这里用 generate() 而不是 currentOrGenerate()：MQ 消费线程是复用的，
-                            // currentOrGenerate() 会把新生成的 id 写进 MDC 且没人清理，
-                            // 于是**同一线程上后续无关的消息**都会顶着上一个 traceId 打日志（比没有还难查）。
+                            // 用 generate() 而不是 currentOrGenerate()：MQ 消费线程是复用的，后者会把新生成的
+                            // id 写进 MDC 且没人清理，导致同线程后续无关的消息都顶着上一个 traceId 打日志。
                             String traceId = TraceContext.current();
                             message.getMessageProperties().setHeader(TraceContext.HEADER,
                                     traceId == null ? TraceContext.generate() : traceId);

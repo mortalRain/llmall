@@ -1,10 +1,11 @@
+# 本机环境值；换环境时用环境变量覆盖
 llmall:
   db:
     host: 192.168.189.128
     pw: ${LLMALL_DB_PW:123}
   redis:
     host: 192.168.189.128
-    pw: ${LLMALL_REDIS_PW:123456}   # 实测：虚拟机 Redis 的密码是 123456（不是 123）
+    pw: ${LLMALL_REDIS_PW:123456}   # 【注意】口令为 123456，与库口令 123 不同
   mq:
     host: 192.168.189.128
   es:

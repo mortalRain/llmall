@@ -6,20 +6,17 @@ import com.llmall.common.domain.PageDTO;
 import java.util.Collection;
 
 /**
- * ES 检索网关：把「ES 怎么查/怎么写」收口在一处，业务层只关心"要不要用 ES、失败了怎么办"。
+ * ES 检索网关：把"ES 怎么查/怎么写"收口在一处，业务层只关心"要不要用 ES、失败了怎么办"。
  *
- * 为什么单独抽一层而不是把 ES 代码写进 SearchServiceImpl：
- *   1. 现有 MySQL 检索逻辑是**经过验证可用的**，必须原样保留（作为回落）；
- *   2. 两种引擎要在同一份业务代码里可切换（llmall.search.engine），抽出来才能对照压测；
- *   3. ES 的失败模式（连接不上、索引损坏、分词器缺失）都只影响这一层，
- *      不会把搜索接口变成 500 —— 网关内部把异常抛出去，由业务层决定回落。
+ * 单独抽一层是为了让现有 MySQL 检索逻辑原样保留作为回落，两种引擎能在同一份业务代码里按
+ * llmall.search.engine 切换对照；网关内部异常直接外抛，由业务层决定是否回落。
  */
 public interface EsShopSearchGateway {
 
     /** 配置层面是否启用 ES（llmall.search.engine = es / auto） */
     boolean enabled();
 
-    /** 真连一次 ES 看通不通（用于状态接口与回落判断；不做缓存，因为调用频率低） */
+    /** 真连一次 ES 探活（用于状态接口与回落判断），不做缓存 */
     boolean healthy();
 
     /** 索引文档数（与 MySQL 读模型条数对比即为"对账"） */

@@ -4,14 +4,11 @@ import lombok.Data;
 import lombok.experimental.Accessors;
 
 /**
- * 对账应答：某条事件在本域（搜索域）的消费状态（GET /search/consume-status）。
+ * 对账应答：某条事件在搜索域的消费状态（GET /search/consume-status）。
  *
- * 调用方是 llmall-shop-service 的 ShopSearchReconcileTask（对账兜底，审计 B4）：
- * 它拿本地消息表里"已投递但尚未确认"的事件逐条来问"你处理了吗"，
- * 据此决定"置为完成 / 补发 / 下轮再查"。
- *
- * consumed 用包装类型 Boolean 是**刻意**的：字段缺失时能返回 null（"结论不可信"），
- * 让调用方按"未知"处理，而不是被基本类型的默认 false 骗成"明确未处理"从而补偿风暴。
+ * 调用方是 llmall-shop-service 的 ShopSearchReconcileTask，据此决定"置为完成 / 补发 / 下轮再查"。
+ * 【注意】consumed 必须是包装类型 Boolean：字段缺失时返回 null 表示"结论不可信"，调用方按"未知"处理；
+ * 若用基本类型会默认 false，被误判成"明确未处理"而引发补偿风暴。
  */
 @Data
 @Accessors(chain = true)

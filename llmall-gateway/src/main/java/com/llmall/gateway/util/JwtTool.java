@@ -16,11 +16,9 @@ import java.time.Duration;
 import java.util.Date;
 
 /**
- * 网关侧 JWT 工具。
+ * 网关侧 JWT 工具：验签、判定令牌过期或非法，并在 access 过期时用 refresh token 换发新令牌。
  *
- * 网关职责：验签、判定"过期 / 非法"、并在 access 过期时用 refresh token 换发新令牌（无感刷新）。
- * 因此网关既需要解析能力，也需要签发能力（refresh 换新 access 由网关就地完成，
- * 不必再绕一次用户服务，少一跳网络、少一次失败点）。
+ * 无感刷新的换发由网关就地完成（少一跳网络、少一个失败点），故此处同时需要解析与签发能力。
  */
 @Component
 public class JwtTool {
@@ -31,7 +29,7 @@ public class JwtTool {
         this.jwtSigner = JWTSignerUtil.createSigner("rs256", keyPair);
     }
 
-    /** 签发令牌（网关用于无感刷新时下发新的 access token） */
+    /** 签发令牌（无感刷新时下发新的 access token） */
     public String createToken(Long userId, String jti, String type, Duration ttl) {
         return JWT.create()
                 .setPayload(AuthConstants.CLAIM_USER, userId)

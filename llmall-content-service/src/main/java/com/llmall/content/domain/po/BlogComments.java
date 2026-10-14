@@ -10,9 +10,7 @@ import lombok.experimental.Accessors;
 import java.io.Serializable;
 import java.time.LocalDateTime;
 
-/**
- * 笔记评论（来源：点评 tb_blog_comments）。
- */
+/** 笔记评论（blog_comments 表）。 */
 @Data
 @EqualsAndHashCode(callSuper = false)
 @Accessors(chain = true)

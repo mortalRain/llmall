@@ -12,10 +12,8 @@ import javax.validation.constraints.Size;
 /**
  * 新增购物车商品表单实体。
  *
- * <p>为什么这里要写长度上限：cart.name / cart.image 在库里是 varchar(256)、spec 是 varchar(1024)，
- * 而 MySQL 打开 STRICT_TRANS_TABLES 时超长写入不是"截断"而是直接报错 ——
- * 用户看到的是 500「服务器内部异常」，运维看到的是 DataTruncation。
- * 把边界写在入参上，才能变成一句前端可以直接展示的中文提示。
+ * 【注意】长度上限与库表 varchar 对齐（name/image 256、spec 1024）：MySQL 打开 STRICT_TRANS_TABLES 时
+ * 超长写入不是"截断"而是直接报错，校验写在入参上才能变成前端可展示的中文提示。
  */
 @Data
 @Schema(description = "新增购物车商品表单实体")
@@ -32,7 +30,7 @@ public class CartFormDTO {
     private String spec;
     @Schema(description = "价格,单位：分")
     @NotNull(message = "商品价格不能为空")
-    // 允许 0（赠送/兑换券场景），但不允许负数：负单价会在结算页把总价算成负数
+    // 0 元合法（赠品/兑换券）；负单价会把结算总价算成负数
     @Min(value = 0, message = "商品价格不能为负数")
     private Integer price;
     @Schema(description = "商品图片")

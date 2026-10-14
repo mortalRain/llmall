@@ -7,8 +7,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * 热词落库任务：Redis ZSet 里的热词计数定期汇总到 MySQL，供报表与离线分析使用。
- * 这样设计的原因是热词是**高频写**（每次搜索 +1），直接写库会把 MySQL 打满。
+ * 热词两段式落库：Redis ZSet 实时计数 + 定时任务汇总写 MySQL，供报表与离线分析使用。
  */
 @Slf4j
 @Component

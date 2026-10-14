@@ -13,8 +13,8 @@ import java.time.LocalDateTime;
 
 /**
  * 搜索热词统计（按天）。
- * 运行时热词计数放在 Redis ZSet（ZINCRBY 原子累加、随时取 Top N），
- * 由定时任务定期落库，避免高频写 MySQL。
+ *
+ * 计数实时写 Redis ZSet（ZINCRBY 原子累加、可随时取 Top N），由定时任务定期落库，避免高频写 MySQL。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)

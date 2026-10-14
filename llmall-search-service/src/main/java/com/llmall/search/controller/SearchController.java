@@ -26,12 +26,10 @@ public class SearchController {
     private final ISearchService searchService;
 
     /**
-     * 运维接口总开关（llmall.maintenance.enabled，默认 true）。
+     * 运维接口总开关（llmall.maintenance.enabled）。
      *
-     * 全量重建搜索视图是典型的"重活"：执行期间会大量读写 Redis 并扫描商品表，
-     * 一旦怀疑线上抖动与它有关，第一反应就是先把它停掉再排查。
-     * 做成配置开关（而不是删代码 / 改网关路由）是为了让这个动作只需改一行配置并重启，
-     * 不需要发版，也不会误伤同一控制器下的正常搜索接口。
+     * 全量重建搜索视图是重活：执行期间会大量读写 Redis 并扫描商品表，怀疑线上抖动与它有关时
+     * 改一行配置重启即可停掉，不必发版，也不会误伤同一控制器下的正常搜索接口。
      */
     @Value("${llmall.maintenance.enabled:false}")
     private boolean maintenanceEnabled;
@@ -109,13 +107,10 @@ public class SearchController {
     }
 
     /**
-     * 对账应答接口（审计 B4）：门店域拿本地消息表里"已投递但未确认"的事件来问
-     * "这条 shop.hot.changed 你处理了吗"，本接口按 consume_record 回答。
+     * 对账应答接口：门店域拿本地消息表里"已投递但未确认"的事件来问本域是否处理过，按 consume_record 回答。
      *
-     * 为什么不放在运维开关（llmall.maintenance.enabled）后面：它是**只读**查询，
-     * 不写任何数据、也不触发重建；而它一旦被关掉，门店域的对账就全部退化成"未知"，
-     * 一致性缺口会重新变成看不见的状态 —— 恰恰是这个审计项要消除的东西。
-     * 真正会改数据的对账动作（补发）发生在门店域那一侧，由那边的开关控制。
+     * 【注意】刻意不放在运维开关后面：它是只读查询，一旦被关掉，门店域对账会全部退化成"未知"；
+     * 真正改数据的补发动作发生在门店域那一侧，由那边的开关控制。
      */
     @Operation(summary = "对账应答：某条门店变更事件本域是否已消费（供 llmall-shop-service 对账任务调用）")
     @GetMapping("/consume-status")

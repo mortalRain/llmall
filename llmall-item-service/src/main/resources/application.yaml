@@ -2,20 +2,20 @@ server:
   port: 8081
 
 feign:
-  # OkHttp 连接池（配合上面 pom 里的 feign-okhttp），避免每次调用都新建 TCP 连接
+  # OkHttp 连接池（依赖 pom 中的 feign-okhttp），避免每次调用都新建 TCP 连接
   okhttp:
     enabled: true
-  # ★ 让 Feign 的 fallbackFactory 真正生效（llmall-api 里声明的 ItemClientFallback/PayClientFallback/ShopClientFallback）
+  # 【注意】必须开启，否则 llmall-api 声明的 fallbackFactory（ItemClientFallback/PayClientFallback/ShopClientFallback）不生效
   sentinel:
     enabled: true
   client:
     config:
       default:
-        # 连接 2s / 读取 5s：必须显式配 —— Feign 默认**没有读超时**，
-        # 下游 hang 住时调用方会一直等，最终把线程池和连接池一起耗尽（而不是快速失败 + 走兜底）。
+        # 连接 2s / 读取 5s。
+        # 【注意】必须显式配：Feign 默认没有读超时，下游 hang 住时调用方会一直等，最终把线程池与连接池一起耗尽（而不是快速失败 + 走兜底）。
         connectTimeout: 2000
         readTimeout: 5000
-# Seata AT：本服务是 RM（扣库存的参与方）。默认关闭，见 llmall-trade-service 里的同名字段说明。
+# Seata AT：本服务是 RM（扣库存的参与方），默认关闭。
 seata:
   enabled: false
   application-id: llmall-item-service
@@ -38,20 +38,18 @@ spring:
   application:
     name: llmall-item-service
   profiles:
-    # 必须用 local：dev 里的 llmall.db.host 是容器名 mysql，只有在 docker 网络里才解析得到，
-    # 在 IDEA / 本机 java -jar 下会报 java.net.UnknownHostException: mysql（实测踩过）
+    # 【注意】必须用 local：dev 里的 llmall.db.host 是容器名 mysql，只有在 docker 网络里才解析得到，
+    # 在 IDEA / 本机 java -jar 下会报 java.net.UnknownHostException: mysql。
     active: local
-  # 数据源（url / driver / 账号 / hikari 池参数）统一来自 Nacos 的 shared-jdbc.yaml，本文件不再复制一份：
-  # 复制出来的那份会与 Nacos 慢慢漂移，而"看起来配了、其实被 Nacos 覆盖"是最难查的一类问题。
-  # 库名由本文件下方的 llmall.db.database 提供，host/pw 在 application-local.yaml。
+  # 数据源（url / driver / 账号 / hikari 池参数）统一来自 Nacos 的 shared-jdbc.yaml，本文件不再复制一份。
+  # 【注意】复制出来的那份会与 Nacos 漂移，而"看起来配了、其实被 Nacos 覆盖"是最难查的一类问题。
+  # 库名由下方的 llmall.db.database 提供，host/pw 在 application-local.yaml。
   cloud:
     sentinel:
       transport:
-        # Sentinel 控制台地址：默认值按"控制台与应用同机（宿主 8090）"取，
-        # 换环境（控制台在 VM / 云服务器上）用启动参数 --llmall.sentinel.dashboard=ip:8090、
-        # 环境变量 LLMALL_SENTINEL_DASHBOARD，或 Nacos 配置里加 llmall.sentinel.dashboard 覆盖，均无需改代码。
-        # 控制台自身默认端口是 8080，会和网关冲突，启动时必须显式指定 8090。
-        # 控制台不在线只是连接告警，不影响 @SentinelResource 定义的限流/降级生效。
+        # Sentinel 控制台地址，默认按"控制台与应用同机（宿主 8090）"取值。
+        # 换环境（控制台在 VM / 云服务器上）可用启动参数 --llmall.sentinel.dashboard=ip:8090、环境变量 LLMALL_SENTINEL_DASHBOARD 或 Nacos 配置覆盖，无需改代码。
+        # 【注意】控制台自身默认端口是 8080，会和网关冲突，启动时必须显式指定 8090；控制台不在线只是连接告警，不影响 @SentinelResource 定义的限流/降级生效。
         dashboard: ${llmall.sentinel.dashboard:localhost:8090}
     nacos:
       discovery:
@@ -72,32 +70,21 @@ llmall:
     alias: llmall
     password: ${LLMALL_JKS_PASSWORD:llmall123}
     tokenTTL: 30m
-  # 服务间内部调用凭证（默认值见下）。
-  # 用途：UserInfoInterceptor 只在该请求头与下面这个值完全一致时才采信 user-info 头 ——
-  # 因为服务监听 0.0.0.0，"我能收到 user-info 头"并不等于"这个身份来自网关"，
-  # 直连服务端口的人可以自己写一个 user-info 冒充任意用户。凭证由网关（认证通过后）
-  # 与 Feign 调用（DefaultFeignConfig）注入，网关会剥离外部请求自带的同名头。
-  # 默认值 llmall-internal-demo-token 仅用于本地演示：生产应由网关注入/配置中心下发，
-  # 该值不对外暴露，并配合内网隔离。**全项目所有服务必须配置成同一个值**，否则会出现
-  # "网关进来的请求全部未登录"或"服务间调用被当成伪造头"。
+  # 服务间内部调用凭证：仅当请求头与该值完全一致时，UserInfoInterceptor 才采信 user-info 头
+  # （服务监听 0.0.0.0，"我能收到 user-info 头"并不等于"这个身份来自网关"，直连服务端口可以自己写一个 user-info 冒充任意用户）。
+  # 由网关（认证通过后）与 Feign 调用（DefaultFeignConfig）注入，网关会剥离外部请求自带的同名头。
+  # 【注意】全项目所有服务必须配置成同一个值，否则会出现"网关进来的请求全部未登录"或"服务间调用被当成伪造头"。
+  # 默认值 llmall-internal-demo-token 仅用于本地演示：生产应由网关注入/配置中心下发，该值不对外暴露，并配合内网隔离。
   internal:
     token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
-    # 【凭证二】llmall.internal.service-token：**只给服务间调用**用的凭证。
-    # 商品写接口（新增/改状态/更新/删除/库存扣减/库存回滚）在控制器入口校验它 ——
+    # 服务间调用专用凭证 llmall.internal.service-token：商品写接口（新增/改状态/更新/删除/库存扣减/库存回滚）在控制器入口校验它。
     # 这些接口都能直接改库存与商品状态，若能匿名调用，任何人一个请求就能把某商品库存清零。
-    # 网关照旧只剥离、不注入该头，所以外部拿不到它；Feign 调用由 DefaultFeignConfig 自动带上。
-    # 必须显式配置：不配置则这些接口一律 403（fail-closed），宁可内部调用报错也不能对外开放。
+    # 【注意】不配置则这些接口一律 403（fail-closed），宁可内部调用报错也不能对外开放；网关只剥离、不注入该头，外部拿不到它，
+    # Feign 调用由 DefaultFeignConfig 自动带上。
     service-token: ${LLMALL_SERVICE_TOKEN:llmall-service-demo-token}
-# keytool -genkeypair -alias llmall -keyalg RSA -keypass llmall123 -keystore llmall.jks -storepass llmall123
 
-# ---------------------------------------------------------------------------
-# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。
-# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+
-# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：
-#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs
-# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；
-# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。
-# ---------------------------------------------------------------------------
+# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi），UI 地址 /doc.html，OpenAPI JSON /v3/api-docs
+# 注解用 swagger v3（io.swagger.v3.oas.annotations）；springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，无需 ant_path_matcher 兼容开关。
 knife4j:
   enable: true
   setting:
@@ -112,8 +99,5 @@ springdoc:
       packages-to-scan: com.llmall
 
 
-# ---------------------------------------------------------------------------
-# 运行指标暴露（health/info/metrics/prometheus、liveness/readiness 探针、Sentinel 健康指标关闭）
-# 统一来自 Nacos 的 shared-log.yaml —— 本服务已补 bootstrap.yaml，与其余 6 个服务同源，不再各写一份。
-# prometheus 端点用于压测与容量规划（QPS/RT/连接池/JVM），/actuator/** 不进网关白名单，仅内网直连。
-# ---------------------------------------------------------------------------
+# 运行指标暴露（health/info/metrics/prometheus、liveness/readiness 探针、Sentinel 健康指标关闭）统一来自 Nacos 的 shared-log.yaml。
+# 【注意】/actuator/** 不进网关白名单，仅内网直连；prometheus 端点用于压测与容量规划（QPS/RT/连接池/JVM）。

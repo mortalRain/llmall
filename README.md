@@ -1,6 +1,6 @@
 # 同城生活电商综合服务系统
 
-> 一个按领域拆分的微服务项目：**11 个服务、一服务一库**，覆盖「逛门店 → 买套餐 → 下单支付 → 到店核销 → 写评价 → 门店热度/榜单」的完整业务闭环。
+> 一个按领域拆分的微服务项目：**10 个服务、一服务一库**，覆盖「逛门店 → 买套餐 → 下单支付 → 到店核销 → 写评价 → 门店热度/榜单」的完整业务闭环。
 > 技术栈：Spring Boot 2.7 · Spring Cloud Alibaba 2021.0.4 · Nacos · OpenFeign · Gateway · Sentinel · RabbitMQ · Redis · MySQL 8 · MyBatis-Plus · Docker · JMeter
 
 ---
@@ -51,12 +51,12 @@ graph TB
 | llmall-shop-service | 8087 | llmall-shop | 门店/类型、缓存三兄弟、热度分、ZSet 榜单、GEO、UV |
 | llmall-item-service | 8081 | llmall-item | 商品/套餐、库存扣减与流水、门店套餐查询 |
 | llmall-cart-service | 8082 | llmall-cart | 购物车 |
-| llmall-trade-service | 8085 | llmall-order | 订单（实物/团购券）、本地消息表、重试与对账 |
+| llmall-trade-service | 8085 | llmall-trade | 订单（实物/团购券）、本地消息表、重试与对账 |
 | llmall-pay-service | 8086 | llmall-pay | 支付单与回调 |
 | llmall-promotion-service | 8088 | llmall-promotion | 优惠券发放/领取/核销、秒杀券（Lua 原子预扣减 + 一人一单 + MQ 异步落库） |
 | llmall-content-service | 8089 | llmall-content | 评价/笔记、评论、点赞、关注、Feed |
-| llmall-search-service | 8093 | llmall-search | 门店检索、热词与建议、搜索历史、本地搜索视图（**不依赖 ES**） |
-| notice-service | 8091 | llmall-notice | 站内信（可选，未实现） |
+| llmall-search-service | 8093 | llmall-search | 门店检索（ES 与 MySQL 读模型双引擎，`engine=auto` 优先 ES、不可用时自动回落）、热词与建议、搜索历史 |
+| （规划中） | — | — | 站内信：**未实现**，仓库内无对应模块与配置 |
 
 > **端口 8090 留给 Sentinel 控制台**（可选部署）。注意 Sentinel Dashboard 默认端口是 **8080，会与网关冲突**，
 > 启动时必须显式指定 `-Dserver.port=8090`；10 个业务/网关服务的客户端地址已统一为
@@ -154,7 +154,7 @@ pwsh -File ../scripts/verify-auth.ps1        # 亮点 A 端到端验收
 
 | 决策 | 选择 | 理由 / 代价 |
 |---|---|---|
-| 服务拆分粒度 | 按**领域**拆 11 个服务 | 一个服务 = 一个业务能力 + 独占数据 + 可独立演进；代价是分布式事务面变大 |
+| 服务拆分粒度 | 按**领域**拆 10 个服务 | 一个服务 = 一个业务能力 + 独占数据 + 可独立演进；代价是分布式事务面变大 |
 | 鉴权位置 | **只网关验签** | 收敛重复代码、性能好；代价是内网必须可信（配合入口剥离伪造头） |
 | JWT 主动失效 | access 黑名单 + refresh 白名单 | 只对需失效部分引入状态，黑名单 TTL = 剩余寿命，不会膨胀 |
 | 一致性方案 | **分层**：强一致用事务框架，最终一致用本地消息表 | 避免把可延迟动作塞进全局事务，减少锁持有时间 |
@@ -163,7 +163,7 @@ pwsh -File ../scripts/verify-auth.ps1        # 亮点 A 端到端验收
 | Feed 流 | **推拉结合**（阈值 1000） | 写扩散成本与粉丝数成正比，大 V 必须改拉模式 |
 | 消息可靠性 | 本地消息表 + 重试 + 对账 | 不依赖 MQ 的 confirm 机制，方案自洽、可解释 |
 | 幂等 | 三层唯一键 | 生产/消费/业务各一层，绝不假设 MQ 不重复 |
-| 打包部署 | 单镜像多 jar | 11 个服务构建一次复用 11 次，省时省盘 |
+| 打包部署 | 单镜像多 jar | 10 个服务构建一次复用 10 次，省时省盘 |
 
 ---
 
@@ -191,7 +191,7 @@ llmall/
 ├── llmall-pay-service/         支付域
 ├── llmall-promotion-service/   营销域（优惠券 + 秒杀）
 ├── llmall-content-service/     内容域
-├── llmall-search-service/      搜索域（骨架）
+├── llmall-search-service/      搜索域（ES + MySQL 读模型双引擎）
 └── deploy/              Dockerfile / compose / 部署说明
 ```
 
@@ -208,11 +208,12 @@ llmall/
 ## 八、演进路线
 
 - [x] llmall-promotion-service：优惠券与秒杀（Redis Lua 预扣减 + 一人一单 + MQ 异步落库）
-- [ ] llmall-search-service 演进：用 ES 替换检索实现与视图同步（当前为 MySQL 视图 + Redis 热词方案，万级数据已足够）
+- [x] llmall-search-service 演进：ES 检索实现 + 读模型同步（`engine=auto` 优先 ES，不可用时回落 MySQL 读模型）
+- [ ] 检索双引擎对照压测（同一份代码跑 `engine=es` 与 `engine=mysql` 各一轮）
 - [ ] Seata AT 对照实现 + 双方案对比压测（TP99 / 锁等待 / undo_log）
 - [ ] 链路追踪：Micrometer Tracing / SkyWalking + traceId 贯穿日志
 - [ ] 优雅停机、灰度发布
-- [ ] Sentinel 规则持久化到 Nacos（当前规则由代码注解定义，控制台推送的规则重启即丢）
+- [ ] Sentinel 规则持久化到 Nacos（当前规则由 `SentinelRuleConfig` 代码静态注册，控制台推送的规则重启即丢）
 
 ## 九、Sentinel 控制台（可选部署）
 
@@ -222,7 +223,8 @@ llmall/
 `/app/{app}/machines.json` 返回 `"version":"1.8.5"`）——与控制台 1.8.6 同属 1.8.x，
 向下兼容，不需要为了"版本一致"去换控制台。
 
-限流/熔断规则以 `@SentinelResource` 注解写死在代码里，**控制台不在线规则照样生效**
+限流与熔断规则由 `SentinelRuleConfig` 在启动时**用代码静态注册**（`ItemController#queryItemByPage` 上有
+唯一一处 `@SentinelResource`，用于标记被保护的资源），**控制台不在线规则照样生效**
 （日志里只有 `failed to connect to dashboard` 级别的告警，不影响业务）。控制台的作用是
 **实时看 QPS/RT/拒绝数并动态改规则**。
 

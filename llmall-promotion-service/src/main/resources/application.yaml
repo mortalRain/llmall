@@ -1,6 +1,6 @@
 server:
   port: 8088
-# Seata AT：本服务是 RM（券核销的参与方）。默认关闭，见 llmall-trade-service 里的同名字段说明。
+# Seata AT：本服务是 RM（券核销的参与方）；默认关闭。
 seata:
   enabled: false
   application-id: llmall-promotion-service
@@ -27,11 +27,8 @@ feign:
 spring:
   cloud:
     sentinel:
-      # eager=true：启动即向控制台注册。默认是惰性的（false），要等第一次请求进来才注册，
-      # 结果就是"服务已经起来了、控制台里却什么都没有"，很容易误判成控制台没连上（实测踩过）。
-      # eager=false：**不要再改成 true**。eager=true 会在启动期就去连 Sentinel 控制台，
-      # 控制台没起（开发常态）时 SentinelAutoConfiguration 初始化直接 NPE → 整个服务启动失败（实测踩过）。
-      # 代价：控制台要等第一次请求进来才看到实例，这比"服务起不来"划算得多。
+      # eager 控制是否启动即向 Sentinel 控制台注册；false 为惰性注册，要等首次请求后控制台才看得到实例。
+      # 【注意】不要改成 true：启动期即连控制台，控制台未启动时会因初始化 NPE 导致整个服务启动失败。
       eager: false
       transport:
         dashboard: ${llmall.sentinel.dashboard:localhost:8090}
@@ -39,10 +36,8 @@ spring:
   rabbitmq:
     listener:
       simple:
-        # 秒杀落库必须"手动 ack"：自动 ack 在消息投递成功时就确认了，
-        # 若应用在落库事务执行中被打断（本机受内存限制、重启常见），消息已被 broker 删除，
-        # 结果是"Redis 名额已扣、用户永远拿不到券"且无迹可查。
-        # 手动 ack 把确认推迟到事务提交之后，配合 consume_record 唯一键做幂等，重投才是安全的。
+        # 秒杀落库必须手动 ack：自动 ack 在消息投递成功时即确认，落库事务执行中被打断则消息已被 broker 删除，
+        # 表现为"Redis 名额已扣、用户永远拿不到券"且无迹可查；手动 ack 把确认推迟到事务提交之后，配合 consume_record 唯一键做幂等。
         acknowledge-mode: manual
         prefetch: 1
 llmall:
@@ -51,26 +46,15 @@ llmall:
     package: com.llmall.promotion.controller
   db:
     database: llmall-promotion
-  # 服务间内部调用凭证（默认值见下）。
-  # 用途：UserInfoInterceptor 只在该请求头与下面这个值完全一致时才采信 user-info 头 ——
-  # 服务监听 0.0.0.0，"能收到 user-info 头"不代表身份来自网关，直连端口可以自己伪造一个。
-  # 凭证由网关（认证通过后）与 Feign（DefaultFeignConfig，如 llmall-trade-service 查/退券）注入，
-  # 网关会剥离外部自带的同名头。llmall-internal-demo-token 仅用于本地演示：
-  # 生产应由网关注入/配置中心下发且不对外暴露，并配合内网隔离；全项目必须配成同一个值。
+  # 服务间内部调用凭证：UserInfoInterceptor 仅在该请求头与本值完全一致时才采信 user-info 头。
+  # 【注意】全项目所有服务必须配成同一个值，否则表现为"请求全部未登录"；生产应由网关注入或配置中心下发。
   internal:
     token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
-    # 服务间调用凭证：本服务会调用 llmall-user-service 的扣款/退款内部接口（券的先收款后发券与失败退款），
-    # 那些接口要求携带它；值必须与 llmall-user-service / llmall-pay-service / llmall-trade-service 一致。
+    # 服务间调用凭证：本服务调用 llmall-user-service 的扣款/退款内部接口时需要携带该头。
+    # 【注意】值必须与 llmall-user-service / llmall-pay-service / llmall-trade-service 一致。
     service-token: ${LLMALL_SERVICE_TOKEN:llmall-service-demo-token}
 
-# ---------------------------------------------------------------------------
-# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。
-# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+
-# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：
-#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs
-# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；
-# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。
-# ---------------------------------------------------------------------------
+# 接口文档：knife4j 4.x（openapi3），UI 地址 /doc.html，OpenAPI JSON /v3/api-docs。
 knife4j:
   enable: true
   setting:
@@ -78,7 +62,7 @@ knife4j:
 springdoc:
   api-docs:
     path: /v3/api-docs
-  # 每个服务是一个独立限界上下文，直接扫本应用全部 controller，不必按包名逐个列举
+  # 扫描范围：本应用全部 controller，不必按包名逐个列举。
   group-configs:
     - group: default
       paths-to-match: '/**'

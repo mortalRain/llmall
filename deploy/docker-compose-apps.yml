@@ -1,19 +1,5 @@
-# ============================================================================
-# 本地生活到店服务平台 · 应用编排（11 个服务 + 网关）
-#
-# 前置：
-#   1. 中间件已就绪（本文件 assumes 同一 docker 网络内有 mysql / redis / nacos / rabbitmq）
-#      中间件可用 ../docker/docker-compose-infra-lite.yml 起
-#   2. 镜像已构建：docker build -f deploy/Dockerfile -t local-life/llmall:1.0.0 ..
-#   3. Nacos 里已导入共享配置（见 ../nacos-config/README.md）
-#
-# 启动：
-#   docker compose -f deploy/docker-compose-apps.yml --profile core up -d     # 最小集（开发/演示够用）
-#   docker compose -f deploy/docker-compose-apps.yml --profile full up -d     # 全量 11 个服务
-#
-# 内存提示：每个服务限 256M（JVM 堆 192M），11 个服务约 2.2G。
-#          若服务器只有 4G，请用 core profile 或按需挑选服务。
-# ============================================================================
+# 应用编排：11 个业务服务 + 网关，要求同一 docker 网络内已有 mysql / redis / nacos / rabbitmq。
+# 【注意】每个服务限 256M（JVM 堆 192M），全量 11 个服务约 2.2G；内存不足时只用 core profile。
 
 x-app: &app
   image: local-life/llmall:1.0.0
@@ -27,15 +13,11 @@ x-app: &app
     LLMALL_DB_PW: ${LLMALL_DB_PW:-123}
     LLMALL_REDIS_HOST: ${LLMALL_REDIS_HOST:-redis}
     LLMALL_REDIS_PW: ${LLMALL_REDIS_PW:-123}
-    LLMALL_MQ_HOST: ${LLMALL_MQ_HOST:-mq}   # VM 上的 RabbitMQ 容器名是 mq（不是 rabbitmq）
+    LLMALL_MQ_HOST: ${LLMALL_MQ_HOST:-mq}   # 【注意】MQ 容器名是 mq，不是 rabbitmq
     LLMALL_ES_HOST: ${LLMALL_ES_HOST:-elasticsearch}
-    # ⚠️ 默认值对应"用 docker/docker-compose-infra-lite.yml 从零起的一整套"（redis/rabbitmq 都是容器）。
-    #    VM 现役环境不一样：RabbitMQ 容器叫 **mq**、Redis 是**原生安装**（要填宿主 IP），
-    #    照默认值起会 UnknownHostException —— 具体值见 .env.example 顶部说明。
-    # Sentinel 控制台：控制台跑在宿主（Windows）8090，容器经 VMnet8 网关回连宿主，
-    # 需要 Windows 放行 8090 入站；控制台若也搬进容器，改成 sentinel-dashboard:8090 即可。
-    # 注意规则是「控制台 → 客户端 8719」反向推送：只配了地址但控制台回不到容器时，
-    # 表现为"机器列表看得到、规则推不下去"（详见 deploy/部署说明.md 的 Sentinel 一节）。
+    # 【注意】上述默认值对应 docker-compose-infra-lite.yml 从零起的一整套容器环境；VM 现役环境 RabbitMQ 容器叫 mq、Redis 是原生安装（要填宿主 IP），照默认值起会 UnknownHostException。
+    # Sentinel 控制台：控制台跑在宿主（Windows）8090，容器经 VMnet8 网关回连宿主，需要放行 8090 入站；控制台也搬进容器后改成 sentinel-dashboard:8090。
+    # 【注意】规则推送是「控制台 → 客户端 8719」的反向联接：只配了地址但控制台回不到容器时，表现为"机器列表看得到、规则推不下去"。
     LLMALL_SENTINEL_DASHBOARD: ${LLMALL_SENTINEL_DASHBOARD:-192.168.189.1:8090}
     JAVA_OPTS: "-Xms64m -Xmx192m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dspring.jmx.enabled=false -Dfile.encoding=UTF-8 -Dserver.shutdown=graceful -Dspring.lifecycle.timeout-per-shutdown-phase=30s"
   networks:
@@ -43,8 +25,7 @@ x-app: &app
   mem_limit: 256m
   # 停机时给在途请求与定时任务 40 秒收尾：默认只有 10 秒，JVM 被 SIGKILL 会截断正在处理的下单/核销
   stop_grace_period: 40s
-  # 健康探针：容器里没有 curl，用 wget；服务端口各不相同（8080/8081/8082/8084~8089/8093），
-  # 所以逐个探测已知端口，任一返回 status:UP 即视为健康。start_period 覆盖 Spring 冷启动。
+  # 健康探针：容器里没有 curl，用 wget；服务端口各不相同，逐个探测已知端口，任一返回 status:UP 即视为健康（start_period 覆盖 Spring 冷启动）。
   healthcheck:
     test: ["CMD-SHELL", "for p in 8080 8081 8082 8084 8085 8086 8087 8088 8089 8093; do wget -q -O- http://127.0.0.1:$$p/actuator/health 2>/dev/null | grep -q '\"status\":\"UP\"' && exit 0; done; exit 1"]
     interval: 30s
@@ -54,7 +35,6 @@ x-app: &app
 
 services:
 
-  # ---------------- 网关 ----------------
   gateway:
     <<: *app
     container_name: gateway
@@ -63,7 +43,6 @@ services:
       - "8080:8080"
     profiles: [ "core", "full" ]
 
-  # ---------------- 核心业务服务 ----------------
   llmall-user-service:
     <<: *app
     container_name: llmall-user-service
@@ -94,7 +73,6 @@ services:
     command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-trade-service.jar" ]
     profiles: [ "full" ]
 
-  # ---------------- 其余服务（full profile） ----------------
   llmall-cart-service:
     <<: *app
     container_name: llmall-cart-service

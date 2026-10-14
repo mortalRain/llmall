@@ -12,10 +12,10 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 /**
- * 消费"订单支付成功"事件 → 发放积分。
+ * 消费"订单支付成功"事件，发放积分。
  *
- * 消息可靠性不在消费者这一侧保证（那是生产者的本地消息表 + 重试 + 对账的职责），
- * 消费者只需做到两件事：**幂等**（重复投递不出错）与**失败可见**（抛异常触发重试/死信）。
+ * 【注意】消费者只负责幂等（重复投递不出错）与失败可见（抛异常触发重试/死信）；
+ * 消息不丢由生产者的本地消息表 + 重试 + 对账保证。
  */
 @Slf4j
 @Component

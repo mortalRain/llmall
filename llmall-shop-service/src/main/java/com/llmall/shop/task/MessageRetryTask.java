@@ -7,17 +7,12 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * 本地消息重试任务（门店域，审计 B4）。
+ * 本地消息重试任务（门店域）。
  *
- * 兜住的是这种场景：事务提交后进程崩溃 / MQ 短暂不可用 / 网络抖动，
- * 导致"消息已落库但没投递出去"。没有这个任务，消息就永远躺在表里 ——
- * 表现就是"评价成功、门店热度/搜索索引不更新"，而且没有任何信号。
- * 退避策略在 MessageLogServiceImpl 里：5s → 10s → 20s …… 上限 10 分钟。
- *
- * 与 {@link ShopSearchReconcileTask} 的分工：
- *  - 本任务兜"**消息没发出去**"（发送侧失败）；
- *  - 对账任务兜"消息发出去了但**下游没处理成功**"（消费侧丢失）。
- * 两者覆盖的场景不同，缺一个都会漏。
+ * 兜住"消息已落库但没投递出去"：事务提交后进程崩溃 / MQ 短暂不可用 / 网络抖动都会造成这种缺口，
+ * 没有它消息会永远躺在表里，表现为"评价成功、门店热度与搜索索引不更新"且无任何信号。
+ * 退避策略在 MessageLogServiceImpl：5s → 10s → 20s …… 上限 10 分钟。
+ * 与 {@link ShopSearchReconcileTask} 的分工：本任务兜发送侧失败，对账任务兜"发出去了但下游没处理成功"。
  */
 @Slf4j
 @Component

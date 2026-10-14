@@ -35,22 +35,16 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * ES 网关实现（Elasticsearch 7.17.x + spring-data-elasticsearch 4.4）。
+ * ES 检索网关实现（Elasticsearch 7.17.x + spring-data-elasticsearch 4.4）。
  *
- * 排序设计（**这是搜索质量的核心，也是与 MySQL 版最大的差别**）：
- *   基础相关性：multiMatch（name^3 / typeName^2 / area^2 / address），IK 分词，BEST_FIELDS 策略；
- *   综合打分（function_score，scoreMode=SUM，boostMode=SUM）：
- *     ① hotScore 用 fieldValueFactor + LOG1P —— 直接线性用热度会让头部门店永远霸榜，
- *        取对数后"热度 1000 与 100"的差距被压缩，长尾优质门店仍有曝光机会；
- *     ② eventTime 用 gauss 衰减（origin=now, scale=30d）—— 新近被评价的门店加权，
- *        抑制"老店吃老本"，这也是设计文档里说的"时间衰减抑制刷量"；
- *     ③ score（评分）×0.5、comments（评价数）LOG1P×0.3 —— 质量信号，权重低于热度与新鲜度。
- *   距离场景：给了 x/y 就按 geo_distance 升序（"附近"语义优先于综合排序），
- *             并把距离回填到 ShopDTO.distance（前端要显示"距您 1.2km"）。
+ * 排序：multiMatch（name^3 / typeName^2 / area^2 / address，IK 分词 + BEST_FIELDS）打底相关度，
+ * 再叠 function_score（scoreMode/boostMode 均为 SUM）：hotScore 取 LOG1P（直接线性会让头部门店永远霸榜）、
+ * eventTimestamp 走 gauss 衰减（origin=now, scale 可配，抑制老店吃老本与刷量）、
+ * score 与 comments(LOG1P) 作质量信号，权重低于热度与新鲜度。
+ * 给了 x/y 则改用 geo_distance 升序（"附近"语义优先于综合排序），并把距离回填到 ShopDTO.distance。
  *
- * 注意：无关键词时 bool 只剩 filter 子句，Lucene 打分为 0；
- *      若不加 matchAllQuery 兜底，boostMode(SUM) 之前的老写法（MULTIPLY）会把总分乘成 0，
- *      排序会退化成"随机顺序" —— 这是 function_score 最常踩的坑。
+ * 【注意】无关键词时 bool 只剩 filter 子句、Lucene 打分为 0，必须加 matchAllQuery 兜底：
+ * 否则 boostMode(MULTIPLY) 会把总分乘成 0，排序退化成随机顺序。
  */
 @Slf4j
 @Component
@@ -110,9 +104,8 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
         }
         String kw = StrUtil.trimToNull(keyword);
         if (kw != null) {
-            // 字段权重必须用 field(field, boost) 显式给，**不能**写成 "name^3" 这种字符串：
-            // HLRC 会把它当成"字段名里带 ^"，序列化后服务端解析出 "2^1.0" 这类非法数字，
-            // 报 number_format_exception（实测踩过，日志里是 x_content_parse_exception: failed to parse field [must]）。
+            // 字段权重只能用 field(field, boost) 显式给，不能写成 "name^3" 这种字符串：
+            // HLRC 会把它当成"字段名里带 ^"，服务端解析出 "2^1.0" 这类非法数字，报 number_format_exception。
             bool.must(QueryBuilders.multiMatchQuery(kw)
                     .field("name", 3f)
                     .field("typeName", 2f)
@@ -130,7 +123,7 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
                                 .modifier(FieldValueFactorFunction.Modifier.LOG1P)
                                 .missing(0D)),
                 new FunctionScoreQueryBuilder.FilterFunctionBuilder(
-                        // 时间衰减的字段是 epoch 毫秒（eventTimestamp），不是 LocalDateTime —— 见 ShopSearchDocument 注释
+                        // 时间衰减作用于 epoch 毫秒字段 eventTimestamp，不是 LocalDateTime —— 见 ShopSearchDocument 注释
                         ScoreFunctionBuilders.gaussDecayFunction("eventTimestamp", "now",
                                 properties.getEs().getTimeDecayScale())),
                 new FunctionScoreQueryBuilder.FilterFunctionBuilder(
@@ -152,11 +145,11 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
         NativeSearchQueryBuilder builder = new NativeSearchQueryBuilder()
                 .withQuery(query)
                 .withPageable(PageRequest.of(Math.max(0, page - 1), size))
-                // 默认 ES 只精确统计到 1 万条，分页总数会失真；搜索页要显示总数，必须打开
+                // ES 默认只精确统计到 1 万条、分页总数会失真，搜索页要显示总数必须打开
                 .withTrackTotalHits(true);
         if (nearby) {
-            // 注意参数顺序：ES 的 GeoPoint 是 (纬度 lat, 经度 lon)，
-            // 而库里 x=经度、y=纬度，别写反（写反的后果是"附近的店"跑到几千公里外）
+            // 【注意】参数顺序：ES 的 GeoPoint 是 (纬度 lat, 经度 lon)，而库里 x=经度、y=纬度，
+            // 写反的后果是"附近的店"跑到几千公里外
             builder.withSort(SortBuilders.geoDistanceSort("location", y, x)
                     .unit(DistanceUnit.KILOMETERS)
                     .order(SortOrder.ASC));
@@ -216,9 +209,8 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
             }
             page++;
         }
-        // 强制刷新：ES 默认 1s 才刷新一次，不刷新的话"刚调完重建就查"会读到 0 条。
-        // 实测踩过：POST /search/index/rebuild 写入 30 条后立刻 GET /search/engine，读到 esDocs=0。
-        // 这里只刷新一次（重建是低频运维动作），不影响热点事件同步的性能。
+        // 重建后必须 refresh：ES 默认 1s 才刷新一次，不刷新则"刚重建完就查"会读到 0 条。
+        // 只刷一次（重建是低频运维动作），不影响热点事件同步的性能。
         try {
             operations.indexOps(ShopSearchDocument.class).refresh();
         } catch (Exception e) {
@@ -228,9 +220,7 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
         return total;
     }
 
-    // ==================== 模型转换 ====================
-
-    /** MySQL 读模型 → ES 文档。x/y 拼成 geo_point（"纬度,经度"） */
+    /** MySQL 读模型 → ES 文档。x/y 拼成 geo_point 的"纬度,经度" */
     public static ShopSearchDocument toDocument(ShopSearchDoc doc) {
         ShopSearchDocument target = new ShopSearchDocument()
                 .setShopId(doc.getShopId())
@@ -245,8 +235,8 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
                 .setSold(doc.getSold())
                 .setHotScore(doc.getHotScore() == null ? 0D : doc.getHotScore())
                 .setStatus(doc.getStatus())
-                // 时间统一写 epoch 毫秒（mapping format=epoch_millis）：
-                // 用 LocalDateTime 会被 SDE 4.4 截断成 yyyy-MM-dd，且读回时转换报错 —— 见 ShopSearchDocument 注释
+                // 时间统一写 epoch 毫秒（mapping format=epoch_millis）：用 LocalDateTime 会被 SDE 4.4
+                // 截断成 yyyy-MM-dd，且读回时转换报错 —— 见 ShopSearchDocument 注释
                 .setEventTimestamp(doc.getEventTime() == null ? null
                         : doc.getEventTime().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli());
         if (doc.getX() != null && doc.getY() != null) {

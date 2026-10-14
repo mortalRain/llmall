@@ -11,9 +11,7 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * <p>
- * 订单详情表
- * </p>
+ * 订单详情：订单内的商品明细行，含 sku、数量、单价与规格。
  *
  * @author 同城生活
  * @since 2023-05-05
@@ -26,55 +24,30 @@ public class OrderDetail implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
-    /**
-     * 订单详情id 
-     */
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
-    /**
-     * 订单id
-     */
     private Long orderId;
 
-    /**
-     * sku商品id
-     */
+    /** sku商品id */
     private Long itemId;
 
-    /**
-     * 购买数量
-     */
     private Integer num;
 
-    /**
-     * 商品标题
-     */
+    /** 商品标题 */
     private String name;
 
-    /**
-     * 商品动态属性键值集
-     */
+    /** 商品动态属性键值集 */
     private String spec;
 
-    /**
-     * 价格,单位：分
-     */
+    /** 价格，单位分 */
     private Integer price;
 
-    /**
-     * 商品图片
-     */
+    /** 商品图片 */
     private String image;
 
-    /**
-     * 创建时间
-     */
     private LocalDateTime createTime;
 
-    /**
-     * 更新时间
-     */
     private LocalDateTime updateTime;
 
 

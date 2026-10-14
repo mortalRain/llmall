@@ -5,12 +5,7 @@ import com.llmall.user.domain.po.Address;
 
 
 /**
- * <p>
- *  服务类
- * </p>
- *
- * @author 同城生活
- * @since 2023-05-05
+ * 收货地址服务，CRUD 契约全部继承自 IService。
  */
 public interface IAddressService extends IService<Address> {
 

@@ -8,15 +8,12 @@ feign:
 spring:
   cloud:
     sentinel:
-      # eager=true：启动即向控制台注册。默认是惰性的（false），要等第一次请求进来才注册，
-      # 结果就是"服务已经起来了、控制台里却什么都没有"，很容易误判成控制台没连上（实测踩过）。
-      # eager=false：**不要再改成 true**。eager=true 会在启动期就去连 Sentinel 控制台，
-      # 控制台没起（开发常态）时 SentinelAutoConfiguration 初始化直接 NPE → 整个服务启动失败（实测踩过）。
-      # 代价：控制台要等第一次请求进来才看到实例，这比"服务起不来"划算得多。
+      # 【注意】保持 false：eager=true 会在启动期就去连 Sentinel 控制台，控制台没起（开发常态）时
+      # 初始化直接 NPE，整个服务启动失败；代价是控制台要等第一次请求进来才看到实例。
       eager: false
       transport:
-        # 注意：# 之前必须有空格，否则后面整段说明会被当成 dashboard 值的一部分（实测踩过）
-        dashboard: ${llmall.sentinel.dashboard:localhost:8090} # Sentinel 控制台（默认本机 8090）
+        # 【注意】# 之前必须有空格，否则后面的说明会被并入 dashboard 值
+        dashboard: ${llmall.sentinel.dashboard:localhost:8090} # Sentinel 控制台地址（默认本机 8090）
       http-method-specify: true # 以请求方式作为资源名称
 llmall:
   swagger:
@@ -25,30 +22,30 @@ llmall:
   db:
     database: llmall-shop
   # 运维接口总开关：false 时 /shops/cache/** 与 /shops/{id}/hot/recompute 一律 403。
-  # 默认 true（演示环境需要能直接调），线上怀疑重建类接口引发抖动时改这里一键关闭。
+  # 默认 true（演示环境需直接调用），线上怀疑重建类接口引发抖动时改此处一键关闭。
   maintenance:
     enabled: true
-  # 服务间内部调用凭证（默认值见下）。
-  # 用途：UserInfoInterceptor 只在该请求头与下面这个值完全一致时才采信 user-info 头 ——
-  # 服务监听 0.0.0.0，"能收到 user-info 头"不代表身份来自网关，直连端口可以自己伪造一个。
-  # 凭证由网关（认证通过后）与 Feign（DefaultFeignConfig）注入，网关会剥离外部自带的同名头。
-  # llmall-internal-demo-token 仅用于本地演示：生产应由网关注入/配置中心下发且不对外暴露，
-  # 并配合内网隔离；全项目所有服务必须配置成同一个值，否则会出现"请求全部未登录"。
+  # 服务间内部调用凭证：UserInfoInterceptor 仅在该请求头与下面的值完全一致时才采信 user-info 头
+  # （服务监听 0.0.0.0，直连端口可以自己伪造 user-info，必须靠这个凭证区分是不是"自己人"）。
+  # 【注意】全项目所有服务必须配成同一个值，否则表现为"请求全部未登录"；
+  # 生产应由网关/配置中心下发并配合内网隔离，不对外暴露。
   internal:
     token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
 
-  # ---------------------------------------------------------------------------
-  # 门店缓存策略（B6）。这些值在代码里都有同值默认值（见 ShopServiceImpl 的 @Value 与
-  # ShopRedisConstants），这里显式写出来是为了让"要调缓存策略"的人不用翻代码。
-  # 口径：
-  #  - ttl-minutes：正常数据的**逻辑过期**时长（只写在缓存 JSON 的 expireTime 里，不决定 Redis 上的 TTL）
-  #  - physical-extra-minutes：Redis 物理 TTL = 逻辑过期时长 + 本值。
-  #    必须 > 0：物理 TTL 若等于逻辑过期时间，key 会在逻辑过期的同一刻被物理删除，
-  #    "逻辑过期后先返回旧值、再由一个线程异步重建"这条路径就直接失效了。
-  #  - null-ttl-minutes：查不到的门店也要写空值哨兵（防缓存穿透）。
-  #    必须带 TTL，否则匿名刷 GET /shops/{随机id} 会让 Redis 内存单调增长。
-  #  - lock-ttl-seconds：缓存重建互斥锁的时长；lock-wait-*：未命中时抢不到锁的请求最多等多久。
-  # ---------------------------------------------------------------------------
+  # 门店缓存策略：这些值在代码里都有同值默认值（见 ShopServiceImpl 的 @Value 与 ShopRedisConstants），
+  # 此处显式写出是为了调缓存策略时不必翻代码。
+  # ttl-minutes：正常数据的逻辑过期时长（只写进缓存 JSON 的 expireTime，不决定 Redis 上的物理 TTL）。
+  # physical-extra-minutes：Redis 物理 TTL = 逻辑过期时长 + 本值。
+  # 【注意】本值必须 > 0：若物理 TTL 等于逻辑过期时间，key 会在逻辑过期的同一刻被物理删除，
+  # "逻辑过期后先返回旧值、再由一个线程异步重建"这条路径就直接失效。
+  # null-ttl-minutes / null-ttl-jitter-minutes：查不到的门店也写空值哨兵（防缓存穿透）。
+  # 【注意】哨兵必须带 TTL，否则匿名刷 GET /shops/{随机id} 会让 Redis 内存单调增长。
+  # lock-ttl-seconds / lock-wait-millis / lock-wait-interval-millis：缓存重建互斥锁时长，
+  # 以及未命中时抢不到锁的请求最多等多久。
+  # rank-ttl-minutes / rank-write-min-interval-millis：榜单 ZSet 与 GEO 索引的滑动 TTL 与写入节流。
+  # 【注意】榜单 TTL 只负责回收、不负责修正：已下线门店的成员由 queryHotList 的读路径剪枝清掉。
+  # uv-ttl-days：UV 计数器（HyperLogLog）保留天数；它是按天新建 key 的，
+  # 本值直接决定 Redis 里同时存在多少个 UV key，是内存治理旋钮。
   shop:
     cache:
       ttl-minutes: 30
@@ -59,37 +56,29 @@ llmall:
       lock-ttl-seconds: 10
       lock-wait-millis: 500
       lock-wait-interval-millis: 20
-    # ── 可靠投递对账节拍（B4）─────────────────────────────────────────────
-    # 【为什么写在这里而不是另起一段 shop:】YAML 里同一个父键不能出现两次：
-    # Spring Boot 的 YamlProcessor 关闭了 allowDuplicateKeys，重复的 shop: 会直接
-    # 抛 "Duplicate key" 让服务起不来。所以 B4 的 reconcile 必须并进这个 shop: 块里。
-    # 口径：
-    #  - reconcile.interval-ms：对账轮询间隔。对账要请求下游（Feign），调太小会给
-    #    llmall-search-service 带来无谓压力；默认 5 分钟。
-    #  - reconcile.initial-delay-ms：首次对账延迟。留 1 分钟是为了错开启动期
-    #    （下游可能还没就绪，一启动就问只会得到一片"状态未知"）。
+      # 榜单/GEO 的滑动 TTL（分钟）：10080 = 7 天
+      rank-ttl-minutes: 10080
+      # 同一门店两次榜单成员写入的最小间隔（毫秒），0 表示关闭节流
+      rank-write-min-interval-millis: 60000
+      # UV 计数器保留天数
+      uv-ttl-days: 2
+    # 可靠投递对账节拍。
+    # 【注意】必须并进这个 shop: 块：YAML 同一父键不能出现两次，重复的 shop: 会抛 Duplicate key 让服务起不来。
+    # interval-ms：对账轮询间隔，默认 5 分钟；对账要请求下游（Feign），调太小会给 llmall-search-service 带来无谓压力。
+    # initial-delay-ms：首次对账延迟，留 1 分钟是为了错开启动期（下游未就绪时只会得到一片"状态未知"）。
     reconcile:
       initial-delay-ms: 60000
       interval-ms: 300000
 
-  # ---------------------------------------------------------------------------
-  # 本地消息重试节拍（B4）。MessageRetryTask 是"MQ 抖动不丢事件"的另一道防线，
-  # 节拍同样要能一行配置调，而不是埋在 @Scheduled 注解里的魔法数字
-  # （代码里已有同值默认值 ${llmall.message.retry-interval-ms:15000}）。
-  # 口径：本值只决定"多久扫一次待重试的表"，**不决定某条消息何时重发** ——
-  #      单条消息的间隔由 MessageLogServiceImpl 的指数退避写进 next_retry_time（5s→10s→…上限 10 分钟）。
-  # ---------------------------------------------------------------------------
+  # 本地消息重试节拍：MessageRetryTask 是"MQ 抖动不丢事件"的另一道防线（代码默认值 ${llmall.message.retry-interval-ms:15000}）。
+  # 本值只决定多久扫一次待重试的表，不决定某条消息何时重发：单条消息的间隔由 MessageLogServiceImpl
+  # 的指数退避写进 next_retry_time（5s→10s→…上限 10 分钟）。
   message:
     retry-interval-ms: 15000
 
-# ---------------------------------------------------------------------------
-# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi，仍在维护）。
-# 旧方案 knife4j 2.x/openapi2 底层是 springfox 2.10.5（2020 年后停更），与 Spring Boot 2.6+
-# 有启动期 NPE 的已知不兼容，只能靠"关掉接口文档"绕过。现已整体换到 openapi3：
-#   UI 地址 /doc.html      OpenAPI JSON /v3/api-docs
-# 注解同步迁到 swagger v3（io.swagger.v3.oas.annotations）；
-# springdoc 直接吃 Boot 2.6+ 默认的 PathPatternParser，不再需要 ant_path_matcher 兼容开关。
-# ---------------------------------------------------------------------------
+# 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi）；UI 地址 /doc.html，OpenAPI JSON /v3/api-docs。
+# 【注意】旧方案 knife4j 2.x/openapi2 底层 springfox 2.10.5 已停更，与 Spring Boot 2.6+ 有启动期 NPE 的
+# 已知不兼容；注解须用 swagger v3（io.swagger.v3.oas.annotations），也无需 ant_path_matcher 兼容开关。
 knife4j:
   enable: true
   setting:

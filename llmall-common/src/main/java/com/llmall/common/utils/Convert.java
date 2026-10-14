@@ -1,8 +1,6 @@
 package com.llmall.common.utils;
 
-/**
- * 对原对象进行计算，设置到目标对象中
- **/
+/** 对 origin 计算后设置到 target */
 public interface Convert<R,T>{
     void convert(R origin, T target);
 }

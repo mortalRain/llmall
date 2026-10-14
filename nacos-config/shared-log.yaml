@@ -1,29 +1,16 @@
-# ============================================================================
-# shared-log.yaml · 集中日志与运行时口径（Nacos 共享配置）
-#
-# 为什么要有这个文件：6 个服务的 bootstrap.yaml 都声明了 `dataId: shared-log.yaml`，
-# 但仓库里一直没有它（只有服务器上的 Nacos 里有）→ 换机器重建环境时集中日志配置**静默失效**，
-# 各服务只能各自重复写 logging.level.*。此文件补齐这个缺口，请导入到 Nacos：
-#   group = DEFAULT_GROUP，dataId = shared-log.yaml，格式 = YAML，然后刷新各服务。
-#
-# 导入步骤（控制台或 API 均可，API 示例）：
-#   curl -X POST "http://192.168.189.128:8848/nacos/v1/cs/configs" \
-#        -d "dataId=shared-log.yaml&group=DEFAULT_GROUP&type=yaml" \
-#        --data-urlencode "content@shared-log.yaml"
-# ============================================================================
+# shared-log.yaml · 集中日志与运行时口径（Nacos 共享配置，导入口径：group=DEFAULT_GROUP，dataId=shared-log.yaml，格式 YAML）。
+# 【注意】各服务 bootstrap.yaml 均已声明该 dataId，未导入 Nacos 时集中日志配置静默失效，只能各服务重复写 logging.level.*。
 
 logging:
   level:
     root: info
-    # 业务代码统一 info：debug 会连带打印大量 SQL 与参数（Feign 的 FULL 日志曾把支付密码打进日志）
+    # 业务代码统一 info：debug 会连带打印大量 SQL 与参数，Feign 的 FULL 日志会带出支付密码
     com.llmall: info
     # 框架噪音压到 warn，避免启动/心跳刷屏
     com.alibaba.nacos: warn
     org.springframework.amqp: warn
   pattern:
-    # 带服务名 + traceId，便于多服务日志混在一起时区分来源，也便于按 traceId 捞整条链路：
-    #   findstr "<traceId>" logs\*\spring.log
-    # traceId 由网关生成（TraceGlobalFilter）、经请求头/Feign/MQ 逐跳透传（common 的 TraceContext/TraceIdFilter）。
+    # 带服务名 + traceId，便于多服务日志混在一起时区分来源，也便于按 traceId 捞整条链路。
     # %X{traceId:-} 里的 "-" 是默认值：没有 traceId 的线程（定时任务、启动日志）打印 "-" 而不是报错。
     console: "%d{HH:mm:ss.SSS} %-5level [${spring.application.name}] [%X{traceId:-}] %logger{36} - %msg%n"
     file: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [${spring.application.name}] [%X{traceId:-}] [%thread] %logger{36} - %msg%n"
@@ -36,17 +23,13 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus   # 暴露这四类；/actuator/** 不进网关白名单，仅内网直连。
-                                                   # prometheus：QPS/RT/连接池/JVM 指标出口，压测与容量规划要用
+        include: health,info,metrics,prometheus   # 暴露这四类；prometheus 是 QPS/RT/连接池/JVM 指标出口；/actuator/** 不进网关白名单，仅内网直连
   endpoint:
     health:
       probes:
         enabled: true                  # 提供 /actuator/health/liveness 与 /readiness，供编排判断
       show-details: never              # 不外泄数据库/中间件连接细节
   health:
-    # 必须关掉 Sentinel 的健康指标：SCA 的 SentinelHealthIndicator 在 Sentinel 控制台/传输客户端
-    # 未就绪时会在 doHealthCheck 里抛 ExceptionInInitializerError（NPE），
-    # 导致聚合 /actuator/health 直接 500/400 —— 只要引了 sentinel 依赖的服务都会中招（实测）。
-    # 关掉它不影响限流/熔断本身，只影响健康端点里那一项。
+    # 【注意】必须关掉 Sentinel 健康指标：SentinelHealthIndicator 在控制台/传输客户端未就绪时会抛 ExceptionInInitializerError，导致聚合 /actuator/health 报错；关闭不影响限流/熔断本身。
     sentinel:
       enabled: false

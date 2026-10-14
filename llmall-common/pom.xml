@@ -21,6 +21,20 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-pool2</artifactId>
         </dependency>
+        <!--
+            spring-data-redis：只为编译 RedisScripts 里的 DefaultRedisScript 常量。
+            用 provided 而不是 compile，理由与下面的 sentinel / spring-webmvc 一致：
+              ① 真正的运行期依赖由**各服务**自己引入 spring-boot-starter-data-redis
+                 （"哪个服务用 Redis"应该是显式的，而不是被 common 悄悄传染给所有模块）；
+              ② 不把 Redis 客户端带进网关之外根本不需要它的模块（例如 item-service 目前不用缓存）。
+            注意：provided 不传递，所以下面引用的 spring-data-redis 也不会进任何服务的运行期类路径 ——
+            它们本来就有自己的 starter。
+        -->
+        <dependency>
+            <groupId>org.springframework.data</groupId>
+            <artifactId>spring-data-redis</artifactId>
+            <scope>provided</scope>
+        </dependency>
         <!--hutool工具包-->
         <dependency>
             <groupId>cn.hutool</groupId>

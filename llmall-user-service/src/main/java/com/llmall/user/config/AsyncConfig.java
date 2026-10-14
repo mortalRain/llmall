@@ -10,11 +10,10 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
- * 异步线程池：让 @Async 任务也能拿到当前登录用户。
+ * 异步线程池。
  *
- * 为什么必须配：UserContext 基于 ThreadLocal，异步任务在新线程里执行，
- * 如果不做传递，异步逻辑里 UserContext.getUser() 恒为 null，
- * 表现为"异步扣积分/写日志时 user_id 为空"——一个非常隐蔽的 bug。
+ * 【注意】必须自定义线程池并挂 UserContextTaskDecorator：UserContext 基于 ThreadLocal，
+ * 不做传递时异步逻辑里 UserContext.getUser() 恒为 null（异步扣积分/写日志 user_id 为空）。
  */
 @Configuration
 @EnableAsync

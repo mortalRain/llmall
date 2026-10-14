@@ -1,25 +1,23 @@
+# bootstrap 阶段就要知道应用名与配置中心地址，所以这些必须写在这里（不能只写在 application.yaml）。
 spring:
   application:
-    name: llmall-gateway # 核心标识，Nacos、日志配置都依赖它
+    name: llmall-gateway   # 核心标识：Nacos 注册与配置、日志都依赖它
   profiles:
-    active: local
+    active: local          # local：本机/虚拟机地址（VM 里的容器名只有在 docker 网络内才解析得到）
   cloud:
     nacos:
-      # 支持环境变量覆盖：本地 192.168.189.128，容器/云服务器 NACOS_ADDR=nacos:8848
-      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
-      # 服务发现配置
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}   # 本地默认 192.168.189.128，容器/云服务器用 NACOS_ADDR 覆盖
+      # 服务发现
       discovery:
         namespace: ${NACOS_NAMESPACE:public}
-      # 配置中心配置
+      # 配置中心：shared-*.yaml 是跨服务的同一份口径，在 Nacos 上发布即对所有服务生效
       config:
         server-addr: ${NACOS_ADDR:192.168.189.128:8848}
         file-extension: yaml
         shared-configs:
           - dataId: shared-log.yaml
             refresh: true
-        # 注意：路由表**不在这里**导入。
-        # 网关用自定义的 DynamicRouteLoader（cn.hutool JSONUtil + Nacos Listener）直接读
-        # dataId=gateway-routes.json，自己反序列化成 RouteDefinition 写进 RouteDefinitionWriter。
-        # 如果这里再按属性源方式导入同一个 dataId，反而会因为"根节点是数组的 JSON 无法展开成键值对"
-        # 而报 "parse data from Nacos error"（实测踩过），属于多余且有害的配置。
+        # 【注意】路由表不在这里导入：DynamicRouteLoader 直接读 dataId=gateway-routes.json，
+        # 反序列化成 RouteDefinition 写入 RouteDefinitionWriter；再按属性源导入同一 dataId 会因
+        # 根节点是数组的 JSON 无法展开成键值对而报 parse data from Nacos error。
 

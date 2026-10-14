@@ -1,0 +1,122 @@
+##############################################################################
+# llmall Redis HA —— 哨兵（Sentinel）配置模板
+#
+# 部署位置：/etc/redis/sentinel-26379.conf、sentinel-26380.conf、sentinel-26381.conf
+# 三个哨兵只有 port / pidfile / logfile / dir 不同，其余完全一致 —— **这一点很重要**：
+# 哨兵之间靠相互发现组成集群，配置不一致会导致它们对"谁是主"长期无法达成一致（脑裂）。
+#
+# 【为什么要 3 个哨兵】
+# 判定"主库真的挂了"需要**多数派**（majority = 3/2+1 = 2 票），
+# 而"选举出执行故障转移的领导者"需要 quorum（本配置为 2）。
+#   - 只起 2 个：挂 1 个就没有多数派，永远不切换（等于没用）；
+#   - 起 3 个：容错 1 个。
+#
+# 【本方案的已知局限（必须写清楚，别当成高可用）】
+#   3 个哨兵和主从**都在同一台 VM 上**（192.168.189.128）。
+#   所以它能防的是"Redis 进程崩溃/被 OOM 杀掉"，防不了"VM 宕机/网络中断" ——
+#   那种情况下 3 个哨兵一起死，什么都不会发生。
+#   真正的高可用需要 3 台独立机器，成本与本项目规模不成比例。
+#
+# 【另一个必须知道的事实：异步复制会丢写】
+#   Redis 主从复制是异步的。主库确认写入后、数据还没传到从库时主库挂掉，
+#   故障转移后**这部分写入会丢**。本项目里表现为：
+#     · 刚被轮换掉的 refresh token 可能"复活"（它是在 Redis 里被删除的）；
+#     · 刚写入的黑名单条目可能丢失（登出后令牌短暂可用）；
+#     · 秒杀预扣的库存/已发放计数回退。
+#   也就是说：**哨兵把"整站不可用"降级成"极少数写入可能丢"，但没有消除
+#   "故障时鉴权判断不可靠"这件事** —— 那需要应用层的多级降级（本地已注销缓存）来兜。
+##############################################################################
+
+# 哨兵默认端口；每个实例改这一行 + 下面三个路径
+port 26379
+
+# 哨兵不需要后台化，由 systemd 托管
+daemonize no
+supervised systemd
+pidfile /run/redis/sentinel-26379.pid
+logfile /var/log/redis/sentinel-26379.log
+dir /var/lib/redis-sentinel
+
+# 【关键】必须绑定 0.0.0.0，不能只绑 127.0.0.1。
+# 原因：哨兵故障转移时会把"新主"的地址下发给客户端，而这个地址取自
+# `sentinel get-master-addr-by-name`。若哨兵只监听回环，它发现的地址就是 127.0.0.1，
+# 应用（跑在 Windows 宿主上）会被引导去连自己的 6379 —— 直接连错机器。
+bind 0.0.0.0
+
+# ---------------------------------------------------------------------------
+# 【必须关掉 protected-mode，这是实测踩到的坑，会导致故障转移永远失败】
+#
+# protected-mode yes 且**未设置密码**时，Redis 只接受来自回环地址的连接
+# （实测报错：DENIED Redis is running in protected mode because protected mode is enabled
+#   and no password is set for the default user. In this mode connections are only accepted
+#   from the loopback interface.）
+#
+# 而本方案为了让哨兵把**可路由的地址**下发给应用，是把哨兵绑在 0.0.0.0、
+# 并让它们用 VM 真实 IP（192.168.189.128）互相发现的（见下面 monitor 行的说明）。
+# 两者直接冲突：哨兵 A 用 192.168.189.128:26380 连哨兵 B 会被 protected-mode 拒绝，
+# 于是三个哨兵互相标记 s_down,disconnected，永远凑不齐多数派授权，
+# 故障转移走到一半就 -failover-abort-not-elected，**主库真的挂了也不会切换**。
+# 这个失败很隐蔽：哨兵自身能起来、能监控主库、日志里也看不到"配置错误"，
+# 只有在真正杀主库演练时才会暴露 —— 所以务必用 failover-drill.sh 实测，别只看 status。
+#
+# 为什么关掉是安全的：
+#   1. 哨兵只监听 VM 内网地址，VM 未做端口映射到公网；
+#   2. 数据节点（6379/6380）仍然有 requirepass，真正的数据面没有裸奔；
+#   3. 另一条路是给哨兵也设密码，但 Spring Boot 2.7 只有一个 spring.redis.sentinel.password，
+#      无法同时表达"哨兵口令"与"数据节点口令"，设成不同值必然配错（见 nacos-config/shared-redis.yaml）。
+# ---------------------------------------------------------------------------
+protected-mode no
+tcp-keepalive 60
+# 哨兵日志与运行时目录都需要可写（由安装脚本 chown 给 redis 用户）
+
+# 时区：Redis 没有 timezone 配置指令（实测 7.0.15 会拒绝启动），
+# 日志时间戳的时区由进程 TZ 环境变量决定 —— 由 systemd 单元注入 TZ=Asia/Shanghai。
+
+# ---------------------------------------------------------------------------
+# 监控的主库
+#   · 1 = quorum：至少 1 个哨兵主观认为主库失联，才会开始走客观下线判定，
+#     再由多数派（3 个里的 2 个）确认。这里给 1 而不是 2，
+#     是为了让"单个哨兵网络抖动"不会拖慢判定；最终确认仍然需要多数派，安全性不打折。
+#
+#   · 地址必须写 VM 的真实 IP（__VM_IP__），**不能写 127.0.0.1**。
+#     这是实测踩到的坑：哨兵把"主库地址"下发给客户端时，用的就是它自己记录的这个地址。
+#     写成回环地址的话，故障转移后应用（跑在 Windows 宿主上）会被引导去连
+#     **自己机器的** 6379 —— 连的不是 VM，表现为"切换后服务依然连不上/连到了错误的 Redis"，
+#     而且完全不报"配置错"，只是连错对象。
+#     （另一条路是在哨兵里配 announce-ip，但哨兵不接受回环地址作为 announce-ip，
+#       且要改 3 份配置；直接用可路由 IP 监控更简单、只有一个替换点。）
+#   · 若以后 VM 的 IP 变了：改这里并**重建**哨兵配置（哨兵会自己重写配置文件，
+#     所以不能只 sed 一行，要让安装脚本重新生成）。
+# ---------------------------------------------------------------------------
+sentinel monitor llmall-master __VM_IP__ 6379 1
+
+# 主库口令。主库开了 requirepass 就必须配，否则哨兵连不上、
+# 会一直认为主库是 down 的（表现为哨兵日志里反复 sdown master）。
+sentinel auth-pass llmall-master 123456
+
+# 主观下线判定：主库 3 秒无响应即认为"可能挂了"。
+# 本项目的 Redis 是本机回环通信，正常 PING 是微秒级，3 秒已经非常宽松；
+# 取更小会更灵敏，但会把"一次长 GC/大 key 阻塞"误判成宕机并触发无谓切换。
+sentinel down-after-milliseconds llmall-master 3000
+
+# 故障转移超时：3 分钟还没完成就放弃，让其它哨兵重试
+#
+# 【注意：这一行必须留在配置文件里】哨兵会按内存状态**重写**自己的配置文件，
+# 而重写时只会写它"认得"的指令。实测踩过的坑：手工把 known-replica 等行删掉做"重置"时，
+# 这两条 `sentinel failover-timeout` / `sentinel parallel-syncs` 一起消失了
+# （它们在运行时被哨兵以 master 参数的形式持有，重写时不一定回写），
+# 于是重启后静默回落到默认值 180000 —— 看配置文件以为配了，其实没生效。
+# 排障时要用运行时口径核对：redis-cli -p 26379 SENTINEL master llmall-master | grep -A1 failover-timeout
+sentinel failover-timeout llmall-master 180000
+
+# 故障转移后，允许几个从库同时向新主做全量同步。
+# 设为 1：从库逐个同步，避免所有从库同时全量拉取把新主 IO 打满。
+sentinel parallel-syncs llmall-master 1
+
+# 是否允许在故障转移时执行脚本（本项目不用，留空防止误配）
+# sentinel notification-script llmall-master /var/redis/notify.sh
+# sentinel client-reconfig-script llmall-master /var/redis/reconfig.sh
+
+# 哨兵自身不设密码：见 nacos-config/shared-redis.yaml 的说明 ——
+# Spring Boot 2.7 只有一个 spring.redis.sentinel.password，无法同时表达
+# "哨兵口令"与"数据节点口令"，设成不同值必然配错。哨兵只在内网监听，风险可接受。

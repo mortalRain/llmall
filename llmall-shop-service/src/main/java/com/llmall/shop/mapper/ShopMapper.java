@@ -8,12 +8,10 @@ import org.apache.ibatis.annotations.Update;
 public interface ShopMapper extends BaseMapper<Shop> {
 
     /**
-     * 评价到达后原子更新门店统计：评价数 +1、评分按新评价重算平均分、刷新最近评价时间。
+     * 评价到达后原子更新门店统计：评价数 +1、按新评价重算平均分、刷新最近评价时间。
      *
-     * ⚠️ 赋值顺序很重要：MySQL 的单表 UPDATE 中，后面的赋值会看到**前面刚被赋的新值**。
-     * 所以必须"先算 score（此时 comments 还是旧值），再自增 comments"；
-     * 若写反了（先 comments+1 再算 score），分母会多 1，平均分被系统性算低。
-     * 这里刻意用一条 SQL 完成"读-算-写"，避免"先查出来再算再写回"在并发评价下丢更新。
+     * 【注意】必须"先算 score、再自增 comments"：MySQL 单表 UPDATE 中后面的赋值会看到前面刚赋的新值，
+     * 顺序写反会让分母多 1、平均分被系统性算低；一条 SQL 完成"读-算-写"，避免并发评价下丢更新。
      */
     @Update("UPDATE shop SET " +
             "score = ROUND((score * comments + #{score} * 10) / (comments + 1)), " +

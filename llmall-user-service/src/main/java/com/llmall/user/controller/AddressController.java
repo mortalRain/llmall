@@ -26,9 +26,7 @@ import javax.validation.Valid;
 import java.util.List;
 
 /**
- * <p>
- *  前端控制器
- * </p>
+ * 收货地址接口：当前登录用户地址的增删改查与默认地址维护。
  *
  * @author 同城生活
  */
@@ -43,9 +41,7 @@ public class AddressController {
     @Operation(summary = "根据id查询地址")
     @GetMapping("{addressId}")
     public AddressDTO findAddressById(@Parameter(name = "addressId", description = "地址id") @PathVariable("addressId") Long id) {
-        // 1.根据id查询
         Address address = addressService.getById(id);
-        // 2.判断当前用户
         Long userId = UserContext.getUser();
         if (address == null) {
             throw new BadRequestException("地址不存在");
@@ -59,20 +55,16 @@ public class AddressController {
     @Operation(summary = "查询当前用户地址列表")
     @GetMapping
     public List<AddressDTO> findMyAddresses() {
-        // 1.查询列表
         List<Address> list = addressService.query().eq("user_id", UserContext.getUser()).list();
-        // 2.判空
         if (CollUtils.isEmpty(list)) {
             return CollUtils.emptyList();
         }
-        // 3.转vo
         return BeanUtils.copyList(list, AddressDTO.class);
     }
 
     @Operation(summary = "新增收货地址")
     @PostMapping
-    // AddressDTO 上的 @NotBlank/@Pattern 只有在加 @Valid 时才真正参与校验；
-    // 否则"手机号格式"这类约束形同虚设，脏数据直接落库，之后再也分不清哪个号码是对的。
+    // 【注意】@Valid 是 AddressDTO 上 @NotBlank/@Pattern 生效的前提，去掉后手机号等约束形同虚设
     public Long saveAddress(@Valid @RequestBody AddressDTO addressDTO) {
         Long userId = requireLogin();
         Address address = BeanUtils.copyBean(addressDTO, Address.class);

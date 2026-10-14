@@ -14,23 +14,11 @@ import java.io.StringWriter;
 /**
  * 死信投递：把"重试耗尽"的消息从原队列搬到死信交换机，并带上排查所需的信息。
  *
- * <p>【它解决的两个真实问题】（改前实测：往 {@code user.points.order.paid.queue} 发一条非法 JSON，
- * 消费端转换失败后消息**当场消失**，队列深度回到 0，只在服务日志里留一段栈 —— 消息就这么没了。）
- * <ol>
- *   <li><b>静默丢弃</b>：没有死信路由时，重试耗尽的消息被 reject 后就永久消失，业务侧表现为
- *       "积分没发、销量没加、搜索索引没更新"，而且没有任何信号；</li>
- *   <li><b>满速热循环</b>：{@code default-requeue-rejected} 为 true（Spring Boot 默认）时，
- *       失败消息会被立刻 requeue 回队列，消费者马上又拿到它 —— CPU 打满、日志刷屏，
- *       真正的新消息排在后面进不来。</li>
- * </ol>
+ * 不用现成的 RepublishMessageRecoverer：它按原消息的路由键（如 order.paid）路由，而多个服务可能订阅同一
+ * 路由键，死信会串到别人的队列；改按 原队列名 + .dead 路由（consumerQueue 是消费端才有的最精确来源）。
  *
- * <p>【为什么不用现成的 RepublishMessageRecoverer】它的路由键取"原消息的路由键"（如 {@code order.paid}），
- * 而多个服务可能订阅同一个路由键，死信会串到别人的队列里；这里改成按 **原队列名 + .dead**
- * 路由（{@code messageProperties.consumerQueue} 是消费端才有的、最精确的来源），
- * 于是"谁的消息进谁的死信队列"，排查时不用在 6 个队列里找同一条消息。
- *
- * <p>【防循环】被搬过一次的消息会带上 {@code x-dead-lettered=true}：再次失败时只告警不再搬运，
- * 否则死信队列自己的消费失败又会产生新的死信，形成新的循环。
+ * 【注意】没有死信路由时，重试耗尽的消息被 reject 后就永久消失，业务侧"积分没发、销量没加、搜索索引没
+ * 更新"且无任何信号；default-requeue-rejected 为 true 时又会立刻 requeue 回原队列形成满速热循环。
  */
 public final class DeadLetterPublisher {
 
@@ -55,7 +43,7 @@ public final class DeadLetterPublisher {
      * 把一条消费失败的消息搬到死信队列。
      *
      * @param rabbitTemplate 发送用模板（复用容器里那一个，连接池与序列化口径都一致）
-     * @param message        原始消息（RabbitMQ 传来的那一条）
+     * @param message        原始消息
      * @param originalQueue  原队列名；取不到时用 "unknown"（消息仍会被保留，不至于丢）
      * @param cause          最后一次失败的原因
      * @return true 表示已成功搬运
@@ -66,7 +54,7 @@ public final class DeadLetterPublisher {
         String routingKey = queue + DEAD_LETTER_ROUTING_KEY_SUFFIX;
 
         MessageProperties out = new MessageProperties();
-        // 只保留"业务相关"的属性：contentType 决定下游能否反序列化，messageId/timestamp 用于对账，
+        // 只保留"业务相关"的属性：contentType 决定下游能否反序列化，messageId/timestamp 用于对账；
         // 其余（deliveryTag / consumerQueue / redelivered / receivedXxx）都是上一个消费者的会话信息，
         // 原样带回去会让死信消息看起来像"已经被投递过好几手"，干扰后续排查。
         out.setContentType(original.getContentType());

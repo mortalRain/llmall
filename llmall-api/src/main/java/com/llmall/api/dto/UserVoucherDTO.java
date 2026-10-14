@@ -10,11 +10,8 @@ import java.time.LocalDateTime;
 /**
  * 用户持有的券（券实例）的跨服务视图。
  *
- * 为什么放在 llmall-api 而不是让交易域直接用 promotion 的 UserVoucherVO：
- * llmall-api 不能反向依赖 llmall-promotion-service，而 llmall-trade-service 只编译期依赖 llmall-api。
- * 交易域下单时需要判断"这张券能不能抵这个门店的订单"，用到的只有下面这几个字段，
- * 于是这里放一个**只含判定所需字段**的轻量 DTO —— 契约最小化，promotion 侧多返回
- * 字段（title/rules 等）不影响调用方，也不会把营销域的展示模型泄进交易域。
+ * llmall-api 不能反向依赖 llmall-promotion-service，交易域下单只需判断券的适用性，
+ * 因此只放判定所需字段，避免把营销域的展示模型泄进交易域。
  */
 @Data
 @Schema(description = "我的券（券实例）跨服务视图")

@@ -8,9 +8,7 @@ import com.llmall.trade.service.IOrderLogisticsService;
 import org.springframework.stereotype.Service;
 
 /**
- * <p>
- *  服务实现类
- * </p>
+ * 订单物流服务实现：无自定义方法，基础 CRUD 由 MyBatis-Plus ServiceImpl 提供。
  *
  * @author 同城生活
  * @since 2023-05-05

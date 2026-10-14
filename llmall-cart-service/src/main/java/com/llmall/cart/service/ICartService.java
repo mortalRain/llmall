@@ -7,9 +7,7 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * <p>
- * 订单详情表 服务类
- * </p>
+ * 购物车服务接口（表 cart）：加购、查询、修改数量、删除条目。
  *
  * @author 同城生活
  * @since 2023-05-05
@@ -23,9 +21,9 @@ public interface ICartService extends IService<Cart> {
     /**
      * 修改购物车条目的购买数量。
      *
-     * 为什么不直接暴露 {@code updateById(Cart)}：那样前端传来的 userId / itemId / price
-     * 都会参与 UPDATE，改一下 id 就能改别人的购物车、改一下 price 就能改"结算单价"。
-     * 数量修改必须收敛成"按 id 找自己的条目，只改 num"这一件事。
+     * 【注意】禁止直接暴露 {@code updateById(Cart)}：那样前端传入的 userId/itemId/price 都会参与 UPDATE，
+     * 改 id 就能改别人的购物车，改 price 就能改结算单价。数量修改必须收敛成
+     * "按 id 找自己的条目，只改 num"。
      */
     void updateCartNum(Cart cart);
 
@@ -37,8 +35,9 @@ public interface ICartService extends IService<Cart> {
     void removeByItemIds(Collection<Long> itemIds);
 
     /**
-     * 按 userId + 商品 id 清理购物车（供 MQ 消费端使用）。
-     * MQ 监听线程没有登录上下文，身份必须由消息显式传入，不能依赖 UserContext。
+     * 按 userId + 商品 id 清理购物车。
+     *
+     * 供 MQ 消费端使用：监听线程没有登录上下文，身份只能由消息显式传入，不能依赖 UserContext。
      */
     void removeByItemIds(Long userId, Collection<Long> itemIds);
 }

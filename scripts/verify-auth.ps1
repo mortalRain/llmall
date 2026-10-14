@@ -1,15 +1,16 @@
-# 亮点 A 端到端验收脚本（PowerShell）
+# 统一账号链路端到端验收脚本
 #
 # 用途：一条命令验证"统一账号 + 身份透传 + 防伪造 + 双令牌无感刷新"整条链路。
-# 前置：Nacos / MySQL / Redis 已启动；llmall-gateway 与 llmall-user-service 已启动并注册到 Nacos。
+# 前置：Nacos / MySQL / Redis 已就绪；llmall-gateway(8080) 与 llmall-user-service(8084) 已启动并注册到 Nacos。
 #
-# 用法（⚠️ Windows 默认禁止脚本执行，直接运行会报 "running scripts is disabled"，必须加 -ExecutionPolicy Bypass）：
-#   powershell -ExecutionPolicy Bypass -File D:\dsh\scripts\verify-auth.ps1
-#   powershell -ExecutionPolicy Bypass -File D:\dsh\scripts\verify-auth.ps1 -Gateway http://localhost:8080 -Phone 13800001234
-# 若装了 PowerShell 7 也可用：pwsh -ExecutionPolicy Bypass -File .\scripts\verify-auth.ps1
+# 用法（Windows 默认禁止脚本执行，不加 -ExecutionPolicy Bypass 会报 running scripts is disabled）：
+#   powershell -ExecutionPolicy Bypass -File .\scripts\verify-auth.ps1
+#   powershell -ExecutionPolicy Bypass -File .\scripts\verify-auth.ps1 -Gateway http://localhost:8080 -Phone 13800001234
+# PowerShell 7 亦可：pwsh -File .\scripts\verify-auth.ps1
 #
-# 前置：gateway(8080) 与 llmall-user-service(8084) 已启动；Nacos/MySQL/Redis 已就绪
-# 账号：脚本默认用 Jack / 123456（我已把 llmall-user.user 的密码重置为 123456）
+# 【注意】第 1 节（防伪造）依赖越权自测端点 /users/_debug/**，该端点要求 llmall.debug.enabled=true，
+#         默认关闭时返回 404，此时该节判为 SKIP 而非 FAIL；要完整验收请临时开启后重跑。
+# 账号：默认 Jack / 123456
 
 param(
     [string]$Gateway = "http://localhost:8080",
@@ -56,8 +57,11 @@ if ($forged.status -eq 200) {
     $json = $forged.body | ConvertFrom-Json
     Check "伪造 user-info 头已被网关剥离" ($null -eq $json.userInfoHeader) ("下游仍收到 userInfoHeader=" + $json.userInfoHeader)
     Check "下游身份上下文未被污染"       ($null -eq $json.userIdInContext) ("userIdInContext=" + $json.userIdInContext)
+} elseif ($forged.status -eq 404) {
+    # 自测端点是越权探针，默认关闭；关闭时无法验证防伪造，属预期而非失败，避免把"没开探针"误报成"防伪造失效"
+    Skip "防伪造校验（需 llmall-user-service 开启 llmall.debug.enabled=true）" "自测端点未启用，返回 404"
 } else {
-    Check "自测接口可访问（llmall.debug.enabled=true 且网关未拦截）" $false "状态码 $($forged.status)"
+    Check "防伪造校验前置：自测端点可达" $false "状态码 $($forged.status)"
 }
 
 Write-Host "`n=== 2. 受保护路径必须带令牌 ===" -ForegroundColor Cyan
@@ -65,7 +69,7 @@ $noToken = Try-Get "$Gateway/users/me" @{}
 Check "无令牌访问 /users/me 返回 401" ($noToken.status -eq 401) "实际状态码 $($noToken.status)"
 
 Write-Host "`n=== 3. 短信验证码接口（验证 Redis 链路）===" -ForegroundColor Cyan
-# 注意：/users/code 是 POST 接口（原脚本误用 GET，会返回 405）
+# /users/code 是 POST 接口，用 GET 会返回 405
 try {
     $codeResp = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$Gateway/users/code?phone=$Phone" -TimeoutSec 10
     Check "发送验证码接口可调用" ($codeResp.StatusCode -eq 200) "状态码 $($codeResp.StatusCode)"

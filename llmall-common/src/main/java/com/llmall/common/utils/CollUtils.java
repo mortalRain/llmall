@@ -8,7 +8,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 继承自 hutool 的集合工具类
+ * 集合工具类，在 hutool CollectionUtil 基础上补充不可变集合与元素拼接。
  */
 public class CollUtils extends CollectionUtil {
 
@@ -41,12 +41,7 @@ public class CollUtils extends CollectionUtil {
     }
 
     /**
-     * 以 conjunction 为分隔符将集合转换为字符串 如果集合元素为数组、Iterable或Iterator，则递归组合其为字符串
-     * @param collection 集合
-     * @param conjunction 分隔符
-     * @param <T> 集合元素类型
-     * @return 连接后的字符串
-     * See Also: IterUtil.join(Iterator, CharSequence)
+     * 以 conjunction 为分隔符将集合转换为字符串。
      */
     public static <T> String join(Collection<T> collection, CharSequence conjunction) {
         if (null == collection || collection.isEmpty()) {

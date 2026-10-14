@@ -5,9 +5,7 @@ import com.llmall.trade.domain.po.OrderLogistics;
 
 
 /**
- * <p>
- *  Mapper 接口
- * </p>
+ * 订单物流 Mapper 接口。
  *
  * @author 同城生活
  * @since 2023-05-05

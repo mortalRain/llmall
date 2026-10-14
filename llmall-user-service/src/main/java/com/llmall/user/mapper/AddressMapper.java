@@ -5,12 +5,7 @@ import com.llmall.user.domain.po.Address;
 
 
 /**
- * <p>
- *  Mapper 接口
- * </p>
- *
- * @author 同城生活
- * @since 2023-05-05
+ * 收货地址 Mapper，SQL 全部继承自 BaseMapper。
  */
 public interface AddressMapper extends BaseMapper<Address> {
 

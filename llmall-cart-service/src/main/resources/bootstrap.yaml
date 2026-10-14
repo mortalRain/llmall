@@ -1,24 +1,32 @@
+# bootstrap 阶段就要知道应用名与配置中心地址，所以这些必须写在这里（不能只写在 application.yaml）。
 spring:
   application:
-    name: llmall-cart-service # 核心标识，Nacos、日志配置都依赖它
+    name: llmall-cart-service   # 核心标识：Nacos 注册与配置、日志都依赖它
   profiles:
-    active: local
+    active: local               # local：本机/虚拟机地址（VM 里的容器名只有在 docker 网络内才解析得到）
   cloud:
     nacos:
-      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
-      # 服务发现配置
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}   # 本地默认 192.168.189.128，容器/云服务器用 NACOS_ADDR 覆盖
+      # 服务发现
       discovery:
         namespace: ${NACOS_NAMESPACE:public}
-      # 配置中心配置
+      # 配置中心：shared-*.yaml 是跨服务的同一份口径，在 Nacos 上发布即对所有服务生效
       config:
         server-addr: ${NACOS_ADDR:192.168.189.128:8848}
         file-extension: yaml
         shared-configs:
           - dataId: shared-jdbc.yaml
             refresh: true
-          # MQ 连接与消费口径（prefetch / 重试次数 / default-requeue-rejected / 死信）
-          # —— cart 是 order.create 的消费方，消费失败口径必须与其它服务一致，
-          # 原来它只在本地 application.yaml 里手写了一小段 rabbitmq 配置，容易与 shared-mq 漂移。
+          # 【注意】MyBatis-Plus 全局配置：缺失不会报错，但 update-strategy: not_null 等全局口径不生效，
+          # 表现为 cart 把 null 字段一起写库，这类"配置没加载但功能看起来正常"的漂移最难查。
+          - dataId: shared-mybatis.yaml
+            refresh: true
+          # 【注意】Redis 连接（地址/口令/超时/哨兵/连接池）：缺失时按默认值连 localhost:6379，
+          # 启动不报错、首次读写才以 Connection refused 暴露（日志报 Unable to connect to localhost:6379）。
+          - dataId: shared-redis.yaml
+            refresh: true
+          # MQ 连接与消费口径（prefetch / 重试次数 / default-requeue-rejected / 死信）：
+          # cart 是 order.create 的消费方，口径必须与其它服务同源，避免与 shared-mq 漂移。
           - dataId: shared-mq.yaml
             refresh: true
           - dataId: shared-log.yaml

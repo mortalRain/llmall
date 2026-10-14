@@ -1,42 +1,30 @@
-# 基础设施编排（低内存版 · 16G 机器可用）
-#
-# 相比 docker-compose-addon.yml（那版带 ES + Kibana，约 3G），本文件把常驻组件压到 **约 1.6G**：
-#   MySQL 512M + Redis 160M + Nacos 640M + RabbitMQ 320M
-# Seata 与 Elasticsearch 放进 profile=full，**只在需要时再起**：
+# 基础设施编排（低内存版）：MySQL 512M + Redis 160M + Nacos 640M + RabbitMQ 320M 常驻，合计约 1.6G。
+# Seata 与 Elasticsearch 归入 profile=full，按需再起：
 #   docker compose -f docker-compose-infra-lite.yml --profile full up -d seata
 #   docker compose -f docker-compose-infra-lite.yml --profile full up -d elasticsearch
-#
-# 首次初始化：请按 ../sql/merged/README.md 的顺序手动导入 SQL
-# （顺序要求严格：原商城脚本 → 建库 → 改造脚本 → undo_log → 基础设施表）
-#
-# 前置 1：先建共用网络（名字必须与 llmall/deploy 下两份 compose 的 APP_NETWORK 一致）：
-#           docker network create local-life
-#         本文件末尾把 compose 的「默认网络」整体改名为这个 external 网络，
-#         所以这里的 mysql / redis / nacos / rabbitmq 才能被应用容器按**容器名**解析到；
-#         不建网络的后果是应用容器报 java.net.UnknownHostException: mysql。
-# 前置 2：VM 内存建议 4G（够），别给 8G；宿主 16G 下这是关键取舍。
-#
-# ⚠️ 本文件是给「全新机器 / 云服务器」用的：它会新建名为 mysql / redis / nacos / rabbitmq 的容器，
-#    并占用 3306 / 6379 / 8848 / 5672 等端口。
-#    VM（192.168.189.128）上**已经有现役容器**（mysql、nacos、mq，另有原生安装的 Redis），
-#    在这里直接 up 会因为"容器名已存在 / 端口已分配"起不来，而且新容器会用新数据卷（库表全空）。
-#    VM 场景请改用「接现役容器」：
-#        docker network connect local-life mysql && docker network connect local-life nacos && docker network connect local-life mq
-#    注意 VM 上 RabbitMQ 的容器名是 **mq**（不是 rabbitmq），Redis 不在容器里（用宿主 IP 访问）。
+# 首次初始化：按 ../sql/merged/README.md 的顺序手动导入 SQL（原商城脚本 → 建库 → 改造脚本 → undo_log → 基础设施表）。
+# 【注意】必须先建共用网络再 up，网络名须与 llmall/deploy 下两份 compose 的 APP_NETWORK 一致：
+#   docker network create local-life
+#   不建网络的表现为应用容器报 java.net.UnknownHostException: mysql。
+# 【注意】本文件面向全新机器：会新建 mysql / redis / nacos / rabbitmq 容器并占用 3306 / 6379 / 8848 / 5672。
+#   VM 上已有现役容器（mysql、nacos、mq，另有原生安装的 Redis），直接 up 会因容器名已存在 / 端口已分配起不来，
+#   且新容器使用新数据卷（库表全空）；VM 场景改为接入现役容器：
+#   docker network connect local-life mysql && docker network connect local-life nacos && docker network connect local-life mq
+# 【注意】VM 上 RabbitMQ 容器名是 mq（不是 rabbitmq），Redis 不在容器里，须用宿主 IP 访问。
 
 services:
   mysql:
     image: mysql:8.0.27
     container_name: mysql
     command:
-      - --innodb-buffer-pool-size=128M     # 关键：默认 128M-256M 就够开发用，别让它吃掉 1G+
-      - --performance-schema=OFF           # 关键：关掉可省 200-400M
+      - --innodb-buffer-pool-size=128M     # InnoDB 缓冲池上限：128M-256M 够开发用，不设会占用 1G+
+      - --performance-schema=OFF           # 关闭 performance_schema，可省 200-400M 内存
       - --max-connections=100
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_general_ci
       - --default-time-zone=+08:00
     environment:
-      MYSQL_ROOT_PASSWORD: "123"           # 与各服务 llmall.db.pw 一致
+      MYSQL_ROOT_PASSWORD: "123"           # 【注意】须与各服务 llmall.db.pw 一致
       TZ: Asia/Shanghai
     ports:
       - "3306:3306"
@@ -50,12 +38,12 @@ services:
     container_name: redis
     command:
       - redis-server
-      # 密码必须与各服务 application-local.yaml / Nacos 里的 llmall.redis.pw 一致：
-      # VM 实测是 123456（不是 123）——写错的表现是启动即 Redis 连接失败。
+      # 【注意】口令须与各服务 application-local.yaml / Nacos 的 llmall.redis.pw 一致：
+      # VM 上为 123456（不是 123），写错表现为启动即 Redis 连接失败。
       - --requirepass ${REDIS_PASSWORD:-123456}
-      - --maxmemory 96mb                   # 关键：给个上限，避免无界增长
+      - --maxmemory 96mb                   # 内存上限，避免无界增长
       - --maxmemory-policy allkeys-lru
-      - --save ""                          # 开发环境不做 RDB 持久化，省内存与 IO
+      - --save ""                          # 开发环境关闭 RDB 持久化，省内存与 IO
       - --appendonly no
     ports:
       - "6379:6379"
@@ -66,7 +54,7 @@ services:
     image: nacos/nacos-server:v2.2.3
     container_name: nacos
     environment:
-      MODE: standalone                    # 单机 + 内嵌 derby，不需要额外数据库
+      MODE: standalone                    # 单机模式 + 内嵌 derby，无需外部数据库
       JVM_XMS: 256m
       JVM_XMX: 384m
       JVM_XMN: 128m
@@ -74,37 +62,34 @@ services:
       TZ: Asia/Shanghai
     ports:
       - "8848:8848"
-      - "9848:9848"                       # Nacos 2.x 客户端 gRPC 端口，少一个就连不上
+      - "9848:9848"                       # Nacos 2.x 客户端 gRPC 端口，缺一则客户端连不上
     mem_limit: 640m
     restart: unless-stopped
 
   rabbitmq:
     image: rabbitmq:3.11-management
-    container_name: mq                         # 与 VM 现役容器名一致（历史原因叫 mq，别改成 rabbitmq）
-    # ★ hostname 必须显式固定：RabbitMQ 的节点名是 rabbit@<hostname>，而 docker 默认用**容器 ID** 当 hostname。
-    #   容器一重建（升级镜像、改配置、VM 迁移）节点名就变，mnesia 里旧节点的数据会全部变成孤儿目录 ——
-    #   表现为"数据卷明明还在，但 vhost/队列/交换机全没了，只有 env 里那个默认用户"（实测踩过）。
-    #   固定成 mq 之后，重建容器仍然复用同一份节点数据。
+    container_name: mq                         # 【注意】须与 VM 现役容器名一致，历史上叫 mq，不要改成 rabbitmq
+    # 【注意】必须显式固定 hostname：RabbitMQ 节点名是 rabbit@<hostname>，docker 默认取容器 ID，
+    # 容器重建后节点名变化会让 mnesia 旧数据成为孤儿目录，表现为数据卷还在但 vhost/队列/交换机全丢。
     hostname: mq
     environment:
       RABBITMQ_DEFAULT_USER: llmall
       RABBITMQ_DEFAULT_PASS: "123"
       RABBITMQ_DEFAULT_VHOST: /llmall
-      # ★ 延迟消息插件：trade 的"超时未支付自动关单"依赖 x-delayed-message 交换机。
-      #   镜像里预装了插件但**默认不启用**，且启用状态写在 /etc/rabbitmq/enabled_plugins（容器层，不在数据卷里）——
-      #   容器一重建就回到未启用状态，症状是 trade-service 启动即失败：
-      #   "Failed to declare queue(s):[trade.delay.order.queue] / NOT_FOUND"（实测踩过）。
-      #   把启用文件放进数据卷，并在初始化后执行一次：
-      #     docker exec mq sh -c "rabbitmq-plugins enable rabbitmq_delayed_message_exchange && \
-      #                           cp /etc/rabbitmq/enabled_plugins /var/lib/rabbitmq/enabled_plugins"
+      # 【注意】延迟消息插件：trade 的超时未支付自动关单依赖 x-delayed-message 交换机，
+      # 镜像内已预装但默认不启用，启用状态写在容器层的 /etc/rabbitmq/enabled_plugins（不在数据卷里），
+      # 容器一重建即失效，症状是 trade-service 启动即报 NOT_FOUND / Failed to declare queue(s):[trade.delay.order.queue]。
+      # 故把启用文件放进数据卷，并在初始化后执行一次：
+      #   docker exec mq sh -c "rabbitmq-plugins enable rabbitmq_delayed_message_exchange && \
+      #                         cp /etc/rabbitmq/enabled_plugins /var/lib/rabbitmq/enabled_plugins"
       RABBITMQ_ENABLED_PLUGINS_FILE: /var/lib/rabbitmq/enabled_plugins
-      # 内存水位：到 40% 就阻塞生产者而不是被 OOM 杀掉
+      # 内存水位：达 40% 时阻塞生产者，避免被 OOM 杀掉
       RABBITMQ_VM_MEMORY_HIGH_WATERMARK: "0.4"
-      TZ: Asia/Shanghai                    # 时区口径统一 CST（VM 实测：光有 TZ 不够，还要挂时区文件，见下）
+      TZ: Asia/Shanghai                    # 时区统一 CST；仅设 TZ 不够，还需挂载宿主时区文件（见下）
     volumes:
-      # rabbitmq 镜像不带 tzdata，只设 TZ 时日志仍是 UTC —— 必须把宿主的时区文件挂进去
+      # 镜像不带 tzdata：只设 TZ 时日志仍为 UTC，必须挂载宿主时区文件
       - /etc/localtime:/etc/localtime:ro
-      # 数据（mnesia：vhost/用户/队列/交换机/消息）必须落卷，否则容器一删全没
+      # mnesia 数据（vhost/用户/队列/交换机/消息）须落卷，否则容器一删全丢
       - mq-data:/var/lib/rabbitmq
     ports:
       - "5672:5672"
@@ -112,20 +97,19 @@ services:
     mem_limit: 320m
     restart: unless-stopped
 
-  # ---------------- 按需启动（profile=full）----------------
+  # 按需启动（profile=full）
   seata:
     image: seataio/seata-server:1.5.2
     container_name: seata-server
     profiles: ["full"]
     ports:
       - "8091:8091"
-      - "7091:7091"                         # 用户控制台（1.5.1 起才有）
+      - "7091:7091"                         # 用户控制台端口（1.5.1 起提供）
     environment:
-      # 注册 IP 必须显式指定，否则会把容器内网 IP（172.x）注册进 Nacos，宿主上的服务连不上
+      # 【注意】注册 IP 必须显式指定，否则会把容器内网 IP（172.x）注册进 Nacos，宿主上的服务连不上
       SEATA_IP: ${VM_IP:-192.168.189.128}
-      # 时区口径统一 CST：1.4.2/1.5.2 都是 Alpine 镜像，**连 jre/lib/zi 时区库都没有**，
-      # 只挂 /etc/localtime 时 JVM 仍按 UTC 打日志（VM 实测踩过）；
-      # 所以要连宿主整个 zoneinfo 一起挂，JDK 才能在 /usr/share/zoneinfo 里解析到 Asia/Shanghai。
+      # 【注意】时区统一 CST：镜像为 Alpine，内部无时区库，只挂 /etc/localtime 时 JVM 仍按 UTC 打日志，
+      # 故需连宿主 /usr/share/zoneinfo 一起挂载，JDK 才能解析到 Asia/Shanghai。
       TZ: Asia/Shanghai
     volumes:
       - ./seata/application.yml:/seata-server/resources/application.yml:ro
@@ -140,9 +124,9 @@ services:
     profiles: ["full"]
     environment:
       - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms256m -Xmx256m   # 小数据量单节点够用；不要用默认 1G
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m   # 单节点小数据量够用；不要用默认 1G
       - xpack.security.enabled=false
-      - bootstrap.memory_lock=false      # 关掉 memlock，容器更容易起来
+      - bootstrap.memory_lock=false      # 关闭 memlock，容器更易启动
       - TZ=Asia/Shanghai
     volumes:
       - es-data:/usr/share/elasticsearch/data
@@ -151,20 +135,18 @@ services:
       - "9200:9200"
     mem_limit: 1g
     restart: unless-stopped
-    # 注意：KiBana 不再编排（省 1G），调试索引直接用 curl 或浏览器 _cat API
+    # Kibana 不再编排（省 1G），调试索引直接用 curl 或浏览器 _cat API
 
 volumes:
   mysql-data:
   es-data:
-  # RabbitMQ 的 mnesia 数据（vhost/用户/队列/交换机/未被消费的消息）。
-  # 不落卷时容器一删全清，配合 hostname 固定才能真正做到"重建容器不丢 MQ 状态"。
+  # 【注意】RabbitMQ 的 mnesia 数据（vhost/用户/队列/交换机/消息）必须落卷，否则容器一删全清；
+  # 与上面的固定 hostname 配合，才能做到重建容器不丢 MQ 状态。
   mq-data:
 
-# 把 compose 的「默认网络」改名成共用的 external 网络：
-#   ① 本文件里所有服务（含以后新增的）自动接入，不必逐个写 networks:；
-#   ② 与 docker-compose-addon.yml、llmall/deploy/docker-compose-apps.yml 用的是同一个网络名，
-#      三份文件里的容器才能互相按名字解析（mysql / redis / nacos / rabbitmq / elasticsearch）。
-# 所以顺序必须是：docker network create local-life  →  再 up。
+# 【注意】把 compose 默认网络改名为共用的 external 网络：本文件所有服务自动接入，无需逐个写 networks:；
+# 网络名须与 docker-compose-addon.yml、llmall/deploy/docker-compose-apps.yml 一致，否则容器之间无法按名字解析，
+# 顺序必须是先 docker network create local-life，再 up。
 networks:
   default:
     name: ${APP_NETWORK:-local-life}

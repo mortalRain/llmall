@@ -1,31 +1,16 @@
-# 基础设施补充编排：Seata + Elasticsearch + Kibana
-#
-# 背景：你的 VM（192.168.189.128）里 Docker 已经在跑 MySQL / Nacos / RabbitMQ / Redis，
-#       本文件【只补充】Seata 与 ES 栈，并接入与它们**同一个**容器网络，避免端口与数据卷冲突。
-#
-# 用法：
-#   1) 网络名已统一为 local-life（与 docker-compose-infra-lite.yml、llmall/deploy 下两份 compose 一致），
-#      若还没建过：`docker network create local-life`（三份 compose 共用，只需建一次）
-#   2) `docker compose -f docker-compose-addon.yml up -d`
-#   3) `docker compose -f docker-compose-addon.yml ps` 确认三个容器都 Up
-#
-# 注意：ES 需要宿主（VM）内核参数 vm.max_map_count >= 262144，见 M0-环境搭建说明.md
+# 基础设施补充编排：只补充 Seata 与 Elasticsearch / Kibana 栈，并接入同一容器网络（local-life），避免端口与数据卷冲突。
 
 services:
-  # ---------------- Seata Server 1.5.2（与 SCA 2021.0.4.0 带的客户端 1.5.2 对齐）----------------
-  # 为什么是 1.5.2：SCA 2021.0.4.0 的 BOM 里 seata 客户端就是 1.5.2，而 Seata 官方要求
-  #   **服务端 ≥ 客户端**；1.4.2 服务端属于反方向错配（实测能用，但不受支持）。
-  # 为什么配置是 application.yml：1.5.0 起服务端改为 Spring Boot 应用，1.4.2 的
-  #   registry.conf/file.conf 在 1.5.2 镜像里**已不存在**；旧文件保留在 ./seata/ 仅供 1.4.2 参考。
+  # Seata Server 1.5.2：与 SCA 2021.0.4.0 带的 seata 客户端 1.5.2 对齐（服务端版本需 ≥ 客户端）。
+  # 【注意】1.5.2 起服务端为 Spring Boot 应用，只认 application.yml；1.4.2 的 registry.conf/file.conf 在该镜像里已不存在。
   seata-server:
     image: seataio/seata-server:1.5.2
     container_name: seata-server
     ports:
       - "8091:8091"   # Seata 服务端口（客户端连接用）
-      - "7091:7091"   # 用户控制台（1.5.1 起才有，账号见 ./seata/application.yml 的 console.user）
+      - "7091:7091"   # 用户控制台（1.5.1 起才有，账号见 ./seata/application.yml）
     environment:
-      # 必须显式指定注册 IP：容器默认会把 172.x 容器内网 IP 注册进 Nacos，Windows/其它机器连不上。
-      # 1.5.2 的 ContainerHelper 认这个变量（实测：不设时注册 172.19.0.2，设了即注册 192.168.189.128）。
+      # 【注意】必须显式指定注册 IP：容器默认会把 172.x 容器内网 IP 注册进 Nacos，Windows/其它机器连不上。
       - SEATA_IP=${VM_IP:-192.168.189.128}
       - TZ=Asia/Shanghai              # 时区口径统一 CST
     volumes:
@@ -37,7 +22,8 @@ services:
       - infra-net
     restart: unless-stopped
 
-  # ---------------- Elasticsearch 7.17.x（与 Spring Boot 2.7 的 spring-data-elasticsearch 4.4 对齐）----------------
+  # Elasticsearch 7.17.x：与 Spring Boot 2.7 的 spring-data-elasticsearch 4.4 对齐。
+  # 【注意】需要宿主（VM）内核参数 vm.max_map_count >= 262144。
   elasticsearch:
     image: elasticsearch:7.17.10
     container_name: es
@@ -61,7 +47,7 @@ services:
       - infra-net
     restart: unless-stopped
 
-  # ---------------- Kibana（可选，用来调索引、演示搜索效果）----------------
+  # Kibana：可选，用来调索引、演示搜索效果
   kibana:
     image: kibana:7.17.10
     container_name: kibana
@@ -78,8 +64,7 @@ services:
     restart: unless-stopped
 
 networks:
-  # 网络名统一到 local-life（与另外两份 compose 相同），Seata / ES 才能被应用容器按名字访问
-  # （应用侧容器里 LLMALL_ES_HOST=elasticsearch 就是靠这个网络解析的）。
+  # 【注意】网络名统一到 local-life（与另外两份 compose 相同），Seata / ES 才能被应用容器按名字访问（应用侧 LLMALL_ES_HOST=elasticsearch 就靠它解析）。
   infra-net:
     external: true
     name: ${APP_NETWORK:-local-life}

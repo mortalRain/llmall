@@ -13,13 +13,9 @@ import org.springframework.stereotype.Component;
 /**
  * 下单成功后清理购物车。
  *
- * 【两个修复】
- * 1. 字段必须是 final：类上用了 @RequiredArgsConstructor，而 Lombok 只把 final 字段写进构造器。
- *    原来写成 `private ICartService cartService;`（非 final、也没 @Autowired），
- *    这个字段永远是 null —— 消息一到就 NPE，而且只在消费时才会暴露。
- * 2. userId 从消息体里取，不能依赖 UserContext：
- *    MQ 监听线程没有登录上下文（ThreadLocal 由网关请求线程写入），
- *    用 UserContext.getUser() 过滤会恒等于 eq(user_id, null)，购物车静默清不掉。
+ * 【注意】依赖字段必须声明为 final：类上用了 @RequiredArgsConstructor，Lombok 只把 final 字段写进构造器，
+ * 非 final 字段永远是 null，消息一到就 NPE。
+ * userId 只能从消息体取，MQ 监听线程没有登录上下文，用 UserContext 过滤会恒等于 eq(user_id, null)。
  */
 @Slf4j
 @Component

@@ -8,9 +8,7 @@ import java.util.List;
 public interface IPointsService {
 
     /**
-     * 订单支付后发放积分（幂等）：
-     *  - 消息级幂等：consume_record 挡住重复投递；
-     *  - 业务级幂等：points_flow 的 (biz_type, biz_id, type) 唯一键是对账判据。
+     * 订单支付后发放积分（幂等，重复投递与重复发放都必须挡住）。
      *
      * @return true 表示本次真正发放了积分，false 表示幂等跳过
      */

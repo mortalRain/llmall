@@ -11,12 +11,9 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * 门店表（来源：点评 tb_shop）。
+ * 门店（含热度分、营业状态等本域扩展字段）。
  *
- * 合并改造点：
- * 1. 新增 hotScore / hotUpdateTime —— 亮点 C 的"热度分"落点；
- * 2. 新增 lastReviewTime —— 热度时间衰减的锚点，避免每次重算都把衰减重置掉；
- * 3. 新增 status —— 营业状态（点评原表没有，而门店必然要能"打烊/下线"）。
+ * 【注意】status 与 hotScore / hotUpdateTime / lastReviewTime 为本域扩展字段。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
@@ -29,19 +26,15 @@ public class Shop implements Serializable {
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
-    /** 门店名称 */
     private String name;
 
-    /** 门店类型 id */
     private Long typeId;
 
     /** 门店图片，多张以逗号分隔 */
     private String images;
 
-    /** 商圈 */
     private String area;
 
-    /** 地址 */
     private String address;
 
     /** 经度 */
@@ -53,7 +46,6 @@ public class Shop implements Serializable {
     /** 人均价格（分） */
     private Long avgPrice;
 
-    /** 销量 */
     private Integer sold;
 
     /** 评价数 */
@@ -68,10 +60,9 @@ public class Shop implements Serializable {
     /** 热度最近计算时间 */
     private LocalDateTime hotUpdateTime;
 
-    /** 最近一次收到评价的时间（时间衰减锚点） */
+    /** 最近一次收到评价的时间（时间衰减锚点，重算时不推进，避免衰减被重置） */
     private LocalDateTime lastReviewTime;
 
-    /** 营业时间 */
     private String openHours;
 
     /** 1 营业中 2 休息中 3 已下线 */

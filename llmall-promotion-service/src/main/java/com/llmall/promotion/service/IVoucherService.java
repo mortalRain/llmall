@@ -10,10 +10,7 @@ import com.llmall.promotion.mq.SeckillMessage;
 import java.util.List;
 
 /**
- * 营销域券服务。
- *
- * 继承 IService&lt;Voucher&gt; 与本项目其它服务保持一致（trade/user 都这么做），
- * 可以直接用 lambdaQuery/lambdaUpdate，条件更新不必写 XML。
+ * 营销域券服务：券查询、领取（含付费券收款）、秒杀、我的券与核销退款。
  */
 public interface IVoucherService extends IService<Voucher> {
 
@@ -30,20 +27,20 @@ public interface IVoucherService extends IService<Voucher> {
     String seckill(Long voucherId);
 
     /**
-     * 领取普通券（Z3：付费券需要支付密码）。
+     * 领取普通券（付费券需校验支付密码），返回 user_voucher.id。
      *
-     * @param pw 支付密码：仅当券的 payValue &gt; 0（"X 元买 Y 元代金券"）时必填，
-     *           免费券传 null 即可。付费券走"先收款、再发券"，收款失败绝不发券，
-     *           收款成功但发券失败则显式退款。
+     * 付费券走"先收款、再发券"：收款失败不发券，收款成功但发券失败则显式退款。
+     *
+     * @param pw 支付密码：仅当券的 payValue &gt; 0 时必填，免费券传 null 即可
      */
     Long receive(Long voucherId, String pw);
 
     /**
-     * 秒杀抢券（Z3：付费券需要支付密码）。
+     * 秒杀抢券（付费券需校验支付密码）：返回秒杀凭证 token。
      *
-     * <p>顺序是"先收款 → 再抢名额"：钱是最贵、最容易失败的一步，
-     * 放在最前面可以让"余额不足"根本走不到 Redis 预扣，天然不会占用名额；
-     * 万一收款成功后抢名额失败（已抢完/已持有/系统繁忙），立即退款并回补名额。
+     * 顺序固定为"先收款 → 再抢名额"；抢名额失败（已抢完/已持有/系统繁忙）立即退款并回补名额。
+     *
+     * @param pw 支付密码：仅当券的 payValue &gt; 0 时必填，免费券传 null 即可
      */
     String seckill(Long voucherId, String pw);
 
@@ -71,16 +68,13 @@ public interface IVoucherService extends IService<Voucher> {
     /**
      * 核销我的券，返回是否核销成功（重复提交同一订单视为成功，幂等）。
      *
-     * <p>【Z4】只允许由订单链路调用（HTTP 入口在 /internal/vouchers 下，且校验内部凭证），
-     * 并且 orderId 必传：本方法会拿它回查交易订单（存在、属于本人、门店一致、状态允许、
-     * 订单上的 voucher_id 就是这张券），不再接受"用户自己传一个订单号"。
+     * 【注意】只允许订单链路调用（HTTP 入口在 /internal/vouchers 下，校验内部凭证），
+     * orderId 必传：本方法会回查交易订单的存在、归属、门店、状态与 voucher_id 一致性。
      */
     boolean useMyVoucher(Long userVoucherId, Long orderId);
 
     /** 订单取消/退款时退回券（状态 2 → 1，幂等）；同样只允许订单链路调用且 orderId 必传 */
     boolean refundMyVoucher(Long userVoucherId, Long orderId);
-
-    // ==================== 以下方法供 MQ 消费端调用 ====================
 
     /**
      * 处理秒杀落库消息（MQ 消费端唯一入口）。

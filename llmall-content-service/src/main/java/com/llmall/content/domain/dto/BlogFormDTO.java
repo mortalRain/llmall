@@ -11,8 +11,7 @@ import javax.validation.constraints.NotNull;
 import javax.validation.constraints.Size;
 
 /**
- * 发布探店笔记/评价表单。
- * score 是"评价 → 门店热度"闭环的输入，必须校验范围，否则热度公式会被脏数据带偏。
+ * 发布探店笔记/评价表单；score 是"评价 → 门店热度"闭环的输入，必须校验范围，否则热度公式会被脏数据带偏。
  */
 @Data
 @Schema(description = "发布探店笔记表单")

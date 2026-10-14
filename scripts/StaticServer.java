@@ -5,7 +5,7 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-/** 临时：把 frontend 目录用 HTTP 提供出来（避免 file:// 的 CORS 限制），用于真实渲染测量。 */
+/** 把 frontend 目录用 HTTP 提供出来（避免 file:// 的 CORS 限制）。 */
 public class StaticServer {
     public static void main(String[] args) throws Exception {
         Path root = Path.of("D:/dsh/frontend");

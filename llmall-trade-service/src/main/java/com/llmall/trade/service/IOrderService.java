@@ -10,9 +10,7 @@ import com.llmall.trade.domain.vo.OrderVO;
 
 
 /**
- * <p>
- *  服务类
- * </p>
+ * 订单交易服务：下单、标记支付成功、关单、到店核销与退款。
  *
  * @author 同城生活
  * @since 2023-05-05
@@ -37,20 +35,19 @@ public interface IOrderService extends IService<Order> {
     /**
      * 到店核销（门店侧）：把"已付款待使用"（status=2）的订单置为"已核销"（status=7）。
      *
-     * 这是订单终态 7 的唯一入口 —— 在此之前，status=7 只能靠手工改库，
-     * 意味着"履约完成"这件事在系统里没有任何痕迹，门店结算、评价解锁都无从谈起。
+     * 【注意】订单终态 status=7 只由本方法写入，是唯一的入口。
      *
      * @param verifyDTO 核销码 + 核销门店 id
-     * @return 被核销的订单 id（前端核销成功后可跳转到订单详情，门店端也可据此展示）
+     * @return 被核销的订单 id
      */
     Long verifyOrder(OrderVerifyDTO verifyDTO);
 
     /**
      * 已支付订单退款（用户发起）。
      *
-     * 与 cancelOrder 的区别：取消只处理"未付款"的单子（回滚库存即可，钱没动过），
-     * 退款处理的是"钱已经付了、但还没到店核销"的单子，因此要退余额、回滚库存、
-     * 退回优惠券，并把支付单关闭 —— 四件事都要落地，缺一件就是一笔对不上的账。
+     * 与 cancelOrder 的边界：取消只处理"未付款"的单子（钱没动过，回滚库存即可），
+     * 退款处理"钱已经付了、但还没到店核销"的单子，要退余额、回滚库存、退回优惠券、
+     * 关闭支付单，四件事都要落地，缺一件就是一笔对不上的账。
      */
     void refundMyOrder(Long orderId);
 }

@@ -11,8 +11,7 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * 笔记点赞。
- * (blog_id, user_id) 唯一索引 = 天然的点赞幂等：重复点赞只会撞唯一键，不会重复计数。
+ * 笔记点赞（blog_like 表）；(blog_id, user_id) 唯一索引天然保证幂等：重复点赞只会撞唯一键，不会重复计数。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)

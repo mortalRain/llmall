@@ -5,9 +5,7 @@ import com.llmall.trade.domain.po.OrderDetail;
 
 
 /**
- * <p>
- * 订单详情表 Mapper 接口
- * </p>
+ * 订单详情表 Mapper 接口。
  *
  * @author 同城生活
  * @since 2023-05-05

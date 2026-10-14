@@ -38,12 +38,9 @@ public class ShopClientFallback implements FallbackFactory<ShopClient> {
             @Override
             public boolean isOrderConsumed(Long orderId) {
                 log.warn("远程调用 ShopClient#isOrderConsumed 失败, orderId={}", orderId, cause);
-                // 【重要】对账类查询绝不能"猜一个答案"返回。
-                // 原实现返回 true（本意是"别误判成缺失、别重复补偿"），但调用方拿到 true
-                // 就认为"门店已处理"，于是 llmall-shop-service 挂掉时对账会打印"下游均已处理" ——
-                // 一致性缺口被伪装成正常，"可重试的未知"变成了"确定的已处理"。
-                // 抛异常让调用方自己区分三态（已消费/未消费/未知）：未知不计入"均已处理"，
-                // 保留待下轮重试，必要时告警人工介入。
+                // 对账类查询禁止返回猜测的答案：调用方拿到 true 会认为门店已处理，
+                // 降级期间的一致性缺口将被伪装成正常。抛异常让调用方区分已消费/未消费/未知三态，
+                // 未知不计入"均已处理"，保留待下轮重试。
                 throw new BizIllegalException("门店服务不可用，无法确认订单是否已被消费，orderId=" + orderId);
             }
 

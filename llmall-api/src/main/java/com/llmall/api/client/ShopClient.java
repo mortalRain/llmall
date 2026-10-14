@@ -13,10 +13,8 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * 门店服务 Feign 客户端。
- *
- * 使用方：llmall-content-service（校验门店是否存在、展示笔记所属门店）、
- *        llmall-search-service（构建门店索引）、llmall-trade-service（团购券订单需要门店信息）。
+ * 门店服务 Feign 客户端；使用方：内容域（校验门店、展示笔记所属门店）、搜索域（构建门店索引）、
+ * 交易域（团购券订单需要门店信息）。
  */
 @FeignClient(value = "llmall-shop-service", fallbackFactory = ShopClientFallback.class)
 public interface ShopClient {

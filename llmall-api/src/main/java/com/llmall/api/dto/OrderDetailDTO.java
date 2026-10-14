@@ -11,25 +11,17 @@ import javax.validation.constraints.NotNull;
 /**
  * 订单明细条目（库存扣减请求体）。
  *
- * 新增 bizType / bizId 两个字段（可选、向后兼容）：
- * 库存服务要写"库存流水"才能做对账与幂等，(bizType, bizId, itemId) 唯一索引即是幂等闸门；
- * 不传这两个字段时按原有逻辑扣减，不影响既有调用方。
+ * bizType / bizId 可选，用于写入库存流水；(bizType, bizId, itemId) 唯一索引即幂等闸门。
  */
 @Schema(description = "订单明细条目")
 @Data
 @Accessors(chain = true)
 public class OrderDetailDTO {
     /**
-     * 【安全】数量必须 >= 1。
+     * 【注意】数量必须 >= 1：扣库存的 SQL 为 stock = stock - #{num}，num 为负时减号会把语句
+     * 反转成加库存，守卫 stock >= num（num 为负时恒真）也同时失效。
      *
-     * 为什么这个下界是安全底线而不是业务偏好：扣库存的 SQL 是 `stock = stock - #{num}`，
-     * 一旦 num 为负数，减号会把语句**反转成加库存**，而守卫 `stock >= num`（num 为负时恒真）
-     * 也同时失效 —— 一个负号就能把"防超卖"变成"无限刷库存"。
-     * 回滚接口 `stock = stock + #{num}` 更糟：负数量会把库存扣成负数并把 sold 抬高。
-     *
-     * 但只加注解**不够**：这两个方法也走 Feign 内部调用（ItemClient），
-     * 而 Feign 消费端不会触发 Bean Validation，注解在调用链上是"没有读者"的。
-     * 因此 ItemServiceImpl 里必须再做一次显式校验（见该处注释），注解只是给 HTTP/文档入口的第一道拦网。
+     * 注解只在 HTTP/文档入口生效，Feign 内部调用不触发 Bean Validation，服务端必须再显式校验。
      */
     @Schema(description = "商品id")
     @NotNull(message = "商品id不能为空")

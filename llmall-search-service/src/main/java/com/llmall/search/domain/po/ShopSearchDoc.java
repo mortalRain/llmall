@@ -13,13 +13,8 @@ import java.time.LocalDateTime;
 /**
  * 门店搜索视图（本地读模型）。
  *
- * 为什么需要它：搜索域不允许直接查 llmall-shop 库（数据所有权），也不应该每次检索都跨服务调用
- * （N+1 与延迟问题）。所以用「**事件驱动构建本地视图**」：
- *   - 门店热度变更时由 MQ 事件增量更新（热点数据）；
- *   - 首次部署或视图损坏时可通过 ShopClient 全量重建。
- * 这就是 CQRS 里"写模型（门店域）/ 读模型（搜索域）分离"的最小落地。
- *
- * 若日后引入 ES，本表结构可直接作为索引映射使用，业务代码只需替换检索实现。
+ * 搜索域不直接查 llmall-shop 库（数据所有权），也不在每次检索时跨服务调用（N+1 与延迟），
+ * 改为事件驱动构建本地视图：门店热度变更由 MQ 事件增量更新，首次部署或视图损坏时通过 ShopClient 全量重建。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
@@ -43,7 +38,7 @@ public class ShopSearchDoc implements Serializable {
 
     private String address;
 
-    /** 经度（ES 索引里拼成 geo_point 做"附近"排序；MySQL 检索不参与排序，见 sql/merged/41-search-geo.sql） */
+    /** 经度（ES 侧拼成 geo_point 做"附近"排序；MySQL 检索不参与排序，见 sql/merged/41-search-geo.sql） */
     private Double x;
 
     /** 纬度 */

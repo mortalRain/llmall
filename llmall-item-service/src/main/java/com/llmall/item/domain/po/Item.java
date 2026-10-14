@@ -11,11 +11,7 @@ import lombok.experimental.Accessors;
 import java.io.Serializable;
 import java.time.LocalDateTime;
 
-/**
- * 商品表
- *
- * @since 2023-05-05
- */
+/** 商品表（实物商品 / 门店套餐、团购券）。 */
 @Data
 @EqualsAndHashCode(callSuper = false)
 @Accessors(chain = true)
@@ -27,13 +23,12 @@ public class Item implements Serializable {
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
-    /** 所属门店 id（本地生活场景：门店卖套餐，原商城无此概念） */
+    /** 所属门店 id（本地生活场景：门店卖套餐） */
     private Long shopId;
 
     /** 1 实物商品 2 门店套餐/团购券 */
     private Integer type;
 
-    /** SKU 名称 */
     private String name;
 
     /** 价格，单位：分 */

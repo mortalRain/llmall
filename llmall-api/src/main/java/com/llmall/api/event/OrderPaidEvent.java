@@ -10,11 +10,11 @@ import java.util.List;
 /**
  * 事件：订单支付成功。
  *
- * 生产者：llmall-trade-service（**在本地事务内写入本地消息表**，提交后投递）
- * 消费者：llmall-user-service（加积分 + 记积分流水）、llmall-shop-service（累加门店销量 + 重算热度）
+ * 生产者：llmall-trade-service（在本地事务内写入本地消息表，提交后投递）；
+ * 消费者：llmall-user-service（加积分 + 记积分流水）、llmall-shop-service（累加门店销量 + 重算热度）。
  *
- * 这是亮点 B 的载体：一次支付要触发多个下游动作，这些动作允许延迟、但**不能丢**，
- * 因此用"本地消息表 + MQ 最终一致性 + 消费幂等 + 定时对账补偿"来保证。
+ * 【注意】一次支付要触发多个下游动作，允许延迟但不能丢：靠本地消息表 + MQ 最终一致性 +
+ * 消费幂等 + 定时对账补偿来保证。
  */
 @Data
 @Accessors(chain = true)

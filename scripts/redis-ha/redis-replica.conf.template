@@ -1,0 +1,116 @@
+##############################################################################
+# llmall Redis HA —— 从库（replica）配置
+#
+# 部署位置：/etc/redis/redis-replica.conf       监听 0.0.0.0:6380
+# 数据目录：/var/lib/redis-replica
+# 日志文件：/var/log/redis/redis-replica.log
+#
+# 【设计口径】
+#  1. 主库（/etc/redis/redis.conf，6379）**不改动** —— 它承载着现役数据，
+#     本方案只新增实例，任何一步出问题都能直接停掉新实例回到原状。
+#  2. 密码必须显式给：requirepass 是本实例的口令，masterauth 是**连主库时**要用的口令。
+#     两者不同的话从库会一直卡在 "MASTER <-> REPLICA sync started" 然后超时。
+#  3. 从库持久化比主库保守：VM 根分区实测只剩 3.4G（已用 81%），
+#     主库的 `save 3600 1 300 100 60 10000` 在从库上会多写一份 RDB。
+#     从库的角色是"故障时的接管者"，数据可以从主库重新全量同步，
+#     所以这里只在负载很低时才落盘，把磁盘让给主库。
+#  4. 必须给 replica-announce-ip。哨兵在故障转移时会把"新主"的地址下发给客户端，
+#     如果 announce 的是 127.0.0.1，应用就会去连**自己机器的** 6379 —— 直接连错。
+##############################################################################
+
+bind 0.0.0.0
+protected-mode yes
+port 6380
+tcp-backlog 511
+timeout 0
+tcp-keepalive 300
+
+# 以守护进程方式前台运行会由 systemd 托管，所以这里 no（由 systemd 负责后台化）
+daemonize no
+supervised systemd
+pidfile /run/redis/redis-replica.pid
+
+loglevel notice
+logfile /var/log/redis/redis-replica.log
+
+# 时区：【注意】Redis **没有** timezone 配置指令（实测 7.0.15 会报
+# "Bad directive or wrong number of arguments" 并拒绝启动）。
+# 日志时间戳的时区由进程的 TZ 环境变量决定，所以这里不改配置，
+# 而是在 systemd 单元里注入 Environment="TZ=Asia/Shanghai"（见 install-redis-ha.sh）。
+
+databases 16
+always-show-logo no
+
+# ---- 持久化：见文件头第 3 条，比主库保守 ----
+# 只在"15 分钟内至少 100 个键变动"时落盘；正常演示负载下几乎不会触发。
+save 900 100
+stop-writes-on-bgsave-error no
+rdbcompression yes
+rdbchecksum yes
+dbfilename dump-replica.rdb
+dir /var/lib/redis-replica
+
+# 从库默认只读，防止误写（哨兵故障转移时 Redis 会自动解除只读，无需人工干预）
+replica-read-only yes
+repl-diskless-sync yes
+repl-diskless-sync-delay 5
+repl-diskless-load disabled
+repl-disable-tcp-nodelay no
+replica-priority 100
+
+# ---- 复制：指向本机主库，口令用 masterauth ----
+# 【必须写 VM 的真实 IP，不能写 127.0.0.1 —— 这是实测踩到的最深的一个坑】
+# 写 127.0.0.1 时，主库在 INFO 里把从库报成 "127.0.0.1:6380"，而哨兵的 monitor 地址是
+# 192.168.189.128:6379。哨兵据此认为"这个从库跟随的主库地址不对"，于是**每 10 秒重发一次
+# REPLICAOF**去纠正（日志里刷 +fix-slave-config），而 Redis 的回答是
+# "REPLICAOF would result into synchronization with the master we are already connected with.
+#  No operation performed." —— 纠正永远"无效"，哨兵就永远认为从库配置没改对。
+# 后果最要命的一点在故障转移时：哨兵下发 REPLICAOF NO ONE 后进入 +failover-state-wait-promotion，
+# 而从库的**配置文件里仍写着 replicaof 127.0.0.1 6379**，一旦发生 CONFIG REWRITE
+# （哨兵纠正配置、或任何写入配置文件的操作都会触发）就会把这个从属关系写回去，
+# 提升静默失效 → 哨兵一直等到 failover-timeout（180s）超时才放弃，故障转移表现为"永远不成功"。
+# 实测：把这里改成 VM IP 后，+fix-slave-config 立刻停止刷屏（40 秒内 0 条）。
+replicaof __VM_IP__ 6379
+masterauth 123456
+
+# 【关键】告诉哨兵"我这个实例对外应该报哪个地址"。
+# 不配的话哨兵会用它连接进来时看到的地址（可能是 127.0.0.1 或容器网段），
+# 故障转移后应用会被引导到错误的地址上。
+replica-announce-ip __VM_IP__
+replica-announce-port 6380
+
+# ---- 安全 ----
+# 本实例的口令（应用直连它时用）。与主库保持一致，切主前后应用不用改配置。
+requirepass 123456
+# 危险命令治理：清库入口收掉。
+rename-command FLUSHALL ""
+rename-command FLUSHDB ""
+rename-command SHUTDOWN "SHUTDOWN_9f3a1c"
+#
+# 【绝对不要 rename-command CONFIG —— 会让哨兵自动故障转移静默失效】
+#
+# 这是本次排查的最终根因，用最小复现做了逐项二分，证据链完整：
+#   · 最简集群（无 rename）                        → 故障转移 t+4s 成功
+#   · 只加 rename-command CONFIG "CONFIG_9f3a1c"   → 故障转移**永远失败**（240s 未切换）
+#   · 只加 rename-command SHUTDOWN                 → t+4s 成功
+#   · 只加 rename-command FLUSHALL/FLUSHDB         → t+4s 成功
+#   · 全部加上但**去掉 CONFIG 这一条**              → t+4s 成功
+#
+# 机制：哨兵在故障转移的"提升"阶段需要对数据节点执行 CONFIG 命令
+# （读取/下发节点参数，例如解除只读）。CONFIG 被改名后这一步静默失败 ——
+# 哨兵只在日志里留一行，不进错误通道，于是流程卡在
+# `+failover-state-wait-promotion` 直到 failover-timeout（默认 180s）超时才放弃，
+# 表现为"主库挂了但永远不会自动切换"，而且看起来完全不像是配置问题。
+#
+# 安全上也不亏：数据节点已有 requirepass，且只监听内网；用 requirepass + 网络隔离
+# 防护比"藏起 CONFIG 命令名"更可靠，而后者换来的是一套不可用的高可用。
+
+# ---- 内存：VM 只有约 1.3G 可用，给从库设一个硬上限，绝不能让它把 VM 吃满 ----
+maxmemory 96mb
+# noeviction 与主库一致：宁可写失败也不要静默丢数据（本项目所有 key 都有 TTL，正常不会撞上限）
+maxmemory-policy noeviction
+
+# ---- 慢查询与客户端 ----
+slowlog-log-slower-than 10000
+slowlog-max-len 128
+maxclients 1000

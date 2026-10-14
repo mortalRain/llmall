@@ -23,10 +23,8 @@ import org.springframework.web.bind.annotation.*;
 import javax.validation.constraints.Pattern;
 
 /**
- * 统一账号入口。
- *
- * 两条登录通道（用户名密码 / 手机验证码）+ 令牌刷新 + 注销，
- * 全部走同一个账号体系与同一套令牌逻辑。
+ * 统一账号入口：用户名密码登录与手机验证码登录共用同一账号体系与同一套令牌逻辑，
+ * 并提供令牌刷新（轮换）与注销。
  */
 @Tag(name = "用户相关接口")
 @RestController
@@ -45,9 +43,8 @@ public class UserController {
     /**
      * 资金内部接口的入口守卫（fail-closed）：只认 x-service-token。
      *
-     * <p>为什么不能用 x-internal-token 代替：那个头网关会给**每个已登录用户**注入，
-     * 拿它判"内部调用"等于没判；x-service-token 网关只剥离、不注入，外部拿不到。
-     * 配置缺失时同样拒绝 —— "运维忘了配"不该等于"接口对外开放"。
+     * 【注意】不能用 x-internal-token 代替：那个头网关会给每个已登录用户注入，拿它判"内部调用"
+     * 等于没判；x-service-token 网关只剥离、不注入，外部拿不到。服务间凭证未配置时同样拒绝。
      */
     private void assertInternalCall(String requestToken) {
         if (!StringUtils.hasText(serviceToken) || !StringUtils.hasText(requestToken)
@@ -109,13 +106,9 @@ public class UserController {
     }
 
     /**
-     * 扣减余额（llmall-pay-service → 本接口，内部调用）。
+     * 扣减余额（llmall-pay-service → 本接口，内部调用，必须携带服务间凭证 x-service-token）。
      *
-     * <p>【安全修复：密码不再走 URL】原实现是
-     * {@code PUT /users/money/deduct?pw=123456&amount=25600}，密码出现在请求行里，
-     * 结果是被 Feign 的 FULL 日志、access log、链路追踪反复记录下来（实测日志可 grep 到明文）。
-     * 现在改成 POST + 请求体：密码只存在于 body，不进 URL、不进 access log，
-     * 也能随着日志级别调整整体关闭。HTTP 语义上也更正确 —— 这是"创建一笔扣款"的写操作。
+     * 【注意】密码只走请求体、不进 URL：URL 会被 Feign 的 FULL 日志、access log 与链路追踪记录。
      */
     @Operation(summary = "扣减余额（内部接口：仅服务间可调，密码走请求体）")
     @PostMapping("/money/deduct")
@@ -126,14 +119,10 @@ public class UserController {
     }
 
     /**
-     * 退款入账（内部接口）。
+     * 退款入账（内部接口，必须携带服务间凭证 x-service-token，见 {@link #assertInternalCall}）。
      *
-     * <p>调用方是交易/营销/支付域的退款闭环，userId 由调用方按自己库里的订单归属人传入，
-     * 而不是从登录态取 —— 这些域在 MQ/后台线程里退款时没有登录态。
-     *
-     * <p><b>越权防线在入口</b>：必须携带服务间凭证 x-service-token（{@link #assertInternalCall}）。
-     * 只靠"退给上下文用户本人"是不够的 —— 用户请求带的是**自己**的上下文，
-     * 于是任意登录用户都能给自己加钱（实测：登录后一条 POST 即可增加余额）。
+     * userId 由调用方按自己库里的订单归属人传入，而不是从登录态取：交易/营销/支付域的退款闭环
+     * 在 MQ 或后台线程里退款时没有登录态，且按登录态取 userId 会让任意登录用户给自己加钱。
      */
     @Operation(summary = "退款入账（内部接口：仅服务间可调，把余额加回指定用户）")
     @Parameters({

@@ -7,10 +7,8 @@ import lombok.experimental.Accessors;
 import java.io.Serializable;
 
 /**
- * 秒杀异步处理结果。
- *
- * 为什么不直接返回字符串：客户端要能区分"还在处理"和"失败原因"，
- * 用固定状态码 + 文案字段，前端不必解析中文字符串。
+ * 秒杀异步处理结果：用固定状态码 + 文案字段，客户端才能区分"还在处理"和"失败原因"，
+ * 不必解析中文字符串。
  */
 @Data
 @NoArgsConstructor
@@ -29,16 +27,13 @@ public class SeckillResultVO implements Serializable {
     /** 秒杀凭证（抢购时返回给客户端的 UUID） */
     private String token;
 
-    /** 券 id */
     private Long voucherId;
 
-    /** PENDING / SUCCESS / FAILED */
     private String status;
 
     /** 成功后返回的券实例 id，可直接用于 /vouchers/my/{id}/use */
     private Long userVoucherId;
 
-    /** 提示文案 */
     private String message;
 
     public static SeckillResultVO pending(String token, Long voucherId, String message) {

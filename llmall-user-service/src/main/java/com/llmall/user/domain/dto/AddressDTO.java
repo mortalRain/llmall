@@ -9,15 +9,11 @@ import javax.validation.constraints.Pattern;
 import javax.validation.constraints.Size;
 
 /**
- * 收货地址实体。
+ * 收货地址传输对象。
  *
- * <p>为什么手机号要用正则而不是只判空：地址是下单页唯一的联系方式来源，
- * 一个手误的号码（10 位、带空格、写成座机）会在配送环节才暴露，而那时已经无法联系用户；
- * 正则把这类错误挡在表单提交的第一时间。
- *
- * <p>长度上限对着 information_schema 里的真实列宽写（province/city/town varchar(10)、
- * mobile/street/contact varchar(255)）：MySQL 严格模式下超长是**报错**而不是截断，
- * 不写上限就会把"用户输入太长"表现成 500。
+ * 手机号用正则而非只判空：地址是下单页唯一的联系方式来源，错误号码到配送环节才暴露。
+ * 【注意】长度上限对齐真实列宽（province/city/town varchar(10)、mobile/street/contact varchar(255)），
+ * MySQL 严格模式下超长是报错而非截断，不设上限会把用户输入过长表现成 500。
  */
 @Data
 @Schema(description = "收货地址实体")

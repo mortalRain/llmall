@@ -1,3 +1,4 @@
+# 本机环境值；换环境时用环境变量覆盖
 llmall:
   db:
     host: 192.168.189.128
@@ -5,4 +6,4 @@ llmall:
   redis:
     # 支付并发闸门（pay:lock:{payOrderId}）用的 Redis，与网关同一实例
     host: 192.168.189.128
-    pw: ${LLMALL_REDIS_PW:123456}
+    pw: ${LLMALL_REDIS_PW:123456}   # 【注意】口令为 123456，与库口令 123 不同

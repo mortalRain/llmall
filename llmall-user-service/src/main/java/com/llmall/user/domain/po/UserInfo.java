@@ -14,8 +14,7 @@ import java.time.LocalDateTime;
 /**
  * 用户详细资料（与 user 表 1:1）。
  *
- * 合并来源：点评 tb_user_info —— 积分层级属于"用户画像"而非"账号凭证"，
- * 因此不塞进 user 表，避免账号表越来越宽（这也是实战里常见的表设计取舍）。
+ * 积分、层级属于用户画像而非账号凭证，因此不塞进 user 表，避免账号表越来越宽。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)

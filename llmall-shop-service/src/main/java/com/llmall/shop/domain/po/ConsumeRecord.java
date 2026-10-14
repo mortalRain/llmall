@@ -13,9 +13,8 @@ import java.time.LocalDateTime;
 /**
  * 消息消费幂等记录。
  *
- * MQ 只保证 at-least-once：网络抖动、消费者重启、ack 丢失都会导致同一条消息被投递多次。
- * 靠 (biz_type, biz_id, consumer) 唯一索引做闸门，是消费端幂等最省事也最可靠的做法
- * （比"在业务表上加状态字段"更通用，业务表不用为了幂等而变形）。
+ * 【注意】MQ 只保证 at-least-once，重复投递由 (biz_type, biz_id, consumer) 唯一索引拦截，
+ * 业务表不为此加状态字段。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)

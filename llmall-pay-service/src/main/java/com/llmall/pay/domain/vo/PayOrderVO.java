@@ -6,11 +6,6 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 
-/**
- * <p>
- * 支付订单
- * </p>
- */
 @Data
 @Schema(description = "支付单vo实体")
 public class PayOrderVO {

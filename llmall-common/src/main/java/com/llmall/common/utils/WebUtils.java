@@ -17,11 +17,7 @@ import java.util.Map;
 @Slf4j
 public class WebUtils {
 
-    /**
-     * 获取ServletRequestAttributes
-     *
-     * @return ServletRequestAttributes
-     */
+    /** 当前请求的 ServletRequestAttributes；非 Web 线程（无请求上下文）返回 null。 */
     public static ServletRequestAttributes getServletRequestAttributes() {
         RequestAttributes ra = RequestContextHolder.getRequestAttributes();
         if (ra == null) {
@@ -30,32 +26,19 @@ public class WebUtils {
         return (ServletRequestAttributes) ra;
     }
 
-    /**
-     * 获取request
-     *
-     * @return HttpServletRequest
-     */
+    /** 当前请求；无请求上下文时返回 null。 */
     public static HttpServletRequest getRequest() {
         ServletRequestAttributes servletRequestAttributes = getServletRequestAttributes();
         return servletRequestAttributes == null ? null : servletRequestAttributes.getRequest();
     }
 
-    /**
-     * 获取response
-     *
-     * @return HttpServletResponse
-     */
+    /** 当前响应；无请求上下文时返回 null。 */
     public static HttpServletResponse getResponse() {
         ServletRequestAttributes servletRequestAttributes = getServletRequestAttributes();
         return servletRequestAttributes == null ? null : servletRequestAttributes.getResponse();
     }
 
-    /**
-     * 获取request header中的内容
-     *
-     * @param headerName 请求头名称
-     * @return 请求头的值
-     */
+    /** 请求头的值；无请求上下文时返回 null。 */
     public static String getHeader(String headerName) {
         HttpServletRequest request = getRequest();
         if (request == null) {
@@ -77,24 +60,15 @@ public class WebUtils {
         return response != null && response.getStatus() < 300;
     }
 
-    /**
-     * 获取请求地址中的请求参数组装成 key1=value1&key2=value2
-     * 如果key对应多个值，中间使用逗号隔开例如 key1对应value1，key2对应value2，value3， key1=value1&key2=value2,value3
-     *
-     * @param request
-     * @return 返回拼接字符串
-     */
     public static String getParameters(HttpServletRequest request) {
         Map<String, String[]> parameterMap = request.getParameterMap();
         return getParameters(parameterMap);
     }
 
     /**
-     * 获取请求地址中的请求参数组装成 key1=value1&key2=value2
-     * 如果key对应多个值，中间使用逗号隔开例如 key1对应value1，key2对应value2，value3， key1=value1&key2=value2,value3
+     * 把请求参数拼成 key1=value1&key2=value2；同一个 key 有多个值时用逗号连接（如 key2=value2,value3）。
      *
-     * @param queries
-     * @return
+     * @return 拼接后的字符串
      */
     public  static <T> String getParameters(final Map<String, T> queries) {
         StringBuilder buffer = new StringBuilder();
@@ -111,26 +85,20 @@ public class WebUtils {
         return buffer.length() > 0 ? buffer.substring(0, buffer.length() - 1) : StrUtil.EMPTY;
     }
 
-    /**
-     * 获取请求url中的uri
-     *
-     * @param url
-     * @return
-     */
+    /** 从 url 中取出 uri：去掉 http:// 或 https:// 前缀，并截掉 ? 之后的查询串。 */
     public static String getUri(String url){
         if(StringUtils.isEmpty(url)) {
             return null;
         }
 
         String uri = url;
-        //uri中去掉 http:// 或者https
         if(uri.contains("http://") ){
             uri = uri.replace("http://", StrUtil.EMPTY);
         }else if(uri.contains("https://")){
             uri = uri.replace("https://", StrUtil.EMPTY);
         }
 
-        int endIndex = uri.length(); //uri 在url中的最后一个字符的序号+1
+        int endIndex = uri.length();
         if(uri.contains("?")){
             endIndex = uri.indexOf("?");
         }

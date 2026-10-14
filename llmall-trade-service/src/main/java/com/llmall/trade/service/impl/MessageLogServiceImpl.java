@@ -26,10 +26,9 @@ import java.util.Map;
 /**
  * 本地消息表实现：把"发消息"变成"先落库、再投递、失败重试、对账兜底"。
  *
- * 时序上分三段，各自解决一个问题：
- *  1. record()  —— 与业务同事务：保证"业务成功 ⇒ 消息一定存在"（不丢）
- *  2. dispatchAfterCommit() —— 提交后立刻投递：保证低延迟（大多数情况下毫秒级送达）
- *  3. retryPending()/compensate() —— 定时重试 + 对账补偿：保证"即使当时投不出去，最终也能到"
+ * 时序约束：record() 必须与业务写在同一事务（保证"业务成功 ⇒ 消息一定存在"）；
+ * dispatchAfterCommit() 只在事务提交后投递，保证低延迟（多数情况毫秒级送达）；
+ * retryPending()/compensate() 负责定时退避重试与对账补偿，保证当时投不出去的消息最终也能到。
  */
 @Slf4j
 @Service
@@ -41,14 +40,11 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
     private static final long RETRY_MAX_SECONDS = 600L;
 
     /**
-     * bizType → 消息体目标类型。
-     * 为什么要这个映射：本地消息表存的是 JSON 字符串，投递时需要还原成原本的事件对象，
-     * 才能让下游的消息转换器按类型正确反序列化。
+     * bizType → 消息体目标类型：本地消息表存的是 JSON 字符串，投递时需要还原成原本的事件对象，
+     * 下游的消息转换器才能按类型正确反序列化。
      *
-     * 【新增消息类型时必须在这里登记】漏登记的后果是**静默失败**：record 写库成功、业务也成功，
-     * 但投递时抛"未注册的消息类型"，消息在表里反复重试到失败上限 —— 实测踩过：
-     * 清购物车事件（CART_CLEAR）就是漏了这一步，日志里只有一行 `未注册的消息类型: CART_CLEAR`，
-     * 业务侧表现只是"下单成功但购物车没清掉"。
+     * 【注意】新增消息类型必须在这里登记，漏登记的后果是静默失败：record 写库成功、业务也成功，
+     * 但投递时抛"未注册的消息类型"，消息在表里反复重试到失败上限。
      */
     private static final Map<String, Class<?>> PAYLOAD_TYPES = new HashMap<>();
 

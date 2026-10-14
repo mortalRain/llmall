@@ -13,10 +13,9 @@ import java.time.LocalDateTime;
 /**
  * 用户持有的券（券实例），对应 `llmall-promotion`.`user_voucher`。
  *
- * 表上的唯一键 uk_user_voucher(user_id, voucher_id) 是本模块"一人一张"的**数据库兜底闸门**：
- * 无论普通领券还是秒杀落库，最终都要在这里插一行，重复请求必然撞唯一键。
- * 业务层再把 {@code DuplicateKeyException} 翻译成友好提示 —— 靠"捕获唯一键冲突"而不是靠"先查再插"来保证正确性，
- * 因为并发下"先查后插"必然有窗口，只有唯一约束是硬的。
+ * 【注意】唯一键 uk_user_voucher(user_id, voucher_id) 是"一人一张"的数据库兜底闸门：
+ * 普通领券与秒杀落库最终都在这里插行，重复请求必然撞唯一键，业务层再把
+ * {@code DuplicateKeyException} 翻译成友好提示。正确性靠唯一约束而不是"先查再插" —— 并发下先查后插必有窗口。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
@@ -37,10 +36,8 @@ public class UserVoucher implements Serializable {
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
-    /** 持有人 */
     private Long userId;
 
-    /** 券模板 id */
     private Long voucherId;
 
     /** 冗余门店 id：核销/按门店统计时不必回表查 voucher */
@@ -52,10 +49,8 @@ public class UserVoucher implements Serializable {
     /** 1 未使用 2 已使用 3 已过期 */
     private Integer status;
 
-    /** 领取时间 */
     private LocalDateTime receiveTime;
 
-    /** 核销时间 */
     private LocalDateTime useTime;
 
     /** 过期时间（领取时按券规则的有效天数算出并落库，避免每次查询都解析 JSON） */

@@ -33,13 +33,10 @@ public class Order implements Serializable {
     /** 1 实物订单 2 门店套餐/团购券订单 */
     private Integer orderType;
 
-    /** 门店 id（团购券订单必填） */
     private Long shopId;
 
-    /** 券 id（团购券订单） */
     private Long voucherId;
 
-    /** 核销码（到店出示） */
     private String verifyCode;
 
     private LocalDateTime verifyTime;

@@ -16,47 +16,32 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 对账补偿任务（最终一致性的最后一道防线）。
+ * 对账补偿任务：问下游"你到底处理了没有"，而不是假设自己发成功了 —— 用户域回答
+ * 积分流水是否存在，门店域回答消费记录是否存在，任一为"未处理"就补偿重发（下游消费幂等，重复投递安全）。
+ * 与重试任务的分工：重试兜"消息没发出去"，本任务兜"消息发出去了但下游没消费成功"，缺一个都会漏。
  *
- * 思路：**问下游"你到底处理了没有"**，而不是假设自己发成功了。
- *  - llmall-user-service 回答：这笔订单的积分流水是否存在（唯一键就是判据）；
- *  - llmall-shop-service 回答：这笔订单的消费记录是否存在。
- * 任一为"未处理"→ 触发补偿重发。下游消费幂等，所以重复投递是安全的。
- *
- * 与"重试任务"的区别：
- *  - 重试任务兜的是"消息没发出去"（发送侧失败）；
- *  - 对账任务兜的是"消息发出去了但下游没处理成功"（消费侧丢失）——
- *    例如消费者消费到一半宕机、ack 丢失、消息被误丢弃。
- *  两者覆盖的场景不同，缺一个都会漏。
- *
- * <h3>为什么对账结果必须是三态（已消费 / 未消费 / 未知）</h3>
- * "查询失败"与"查到了、结果是没有"在数据上长得很像，业务含义却相反：
- * 前者只能说明"我还不知道"，后者才是"确实没处理"。
- * 原实现把查询失败当成"已处理"（返回 true），于是 llmall-shop-service 没有实例时，
- * 6 笔订单的检查全部失败，日志却打印"下游均已处理" —— 一致性缺口被伪装成正常。
- * 现在的规则：
- *  - 未知**不计入**"均已处理"，保留待下轮重试（下游恢复后自然能查出结论）；
- *  - 统计口径分开打印，未知数 > 0 时用 WARN，连续多轮未知升级为 ERROR 提醒人工介入。
+ * 【注意】下游状态必须按三态判定（已消费 / 未消费 / 未知）："查询失败"与"查到了、结果是没有"业务含义相反，
+ * 未知既不计入"均已处理"（否则一致性缺口被伪装成正常），也不触发补偿（避免补偿风暴），
+ * 只保留待下轮重试；连续多轮未知升级为 ERROR 提醒人工介入。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class OrderReconcileTask {
 
-    /** 只对账最近 24 小时的订单：更早的订单由人工/离线对账处理，避免任务无限膨胀 */
+    /** 只对账最近 24 小时：更早的订单由人工/离线对账处理，避免任务无限膨胀 */
     private static final int RECONCILE_WINDOW_HOURS = 24;
     private static final int BATCH_SIZE = 100;
 
-    /** 连续多少轮出现"状态未知"就升级为 ERROR（下游长时间不可用需要人看一眼，而不是一直 WARN） */
+    /** 连续出现"状态未知"达到该轮数就升级为 ERROR（下游长时间不可用需人工介入） */
     private static final int UNKNOWN_ALERT_ROUNDS = 3;
 
-    /** 下游处理状态：三态，未知与"未处理"必须严格区分 */
+    /** 下游处理状态：三态，"未知"与"未处理"必须严格区分 */
     private enum DownstreamState {
-        /** 已处理 */
         CONSUMED,
-        /** 明确未处理 → 需要补偿 */
+        /** 明确未处理 → 需要补偿重发 */
         NOT_CONSUMED,
-        /** 查询失败/降级 → 不知道，既不算已处理，也不触发补偿（下轮再看） */
+        /** 查询失败/降级 → 不知道，既不算已处理也不触发补偿（下轮再查） */
         UNKNOWN
     }
 
@@ -65,7 +50,7 @@ public class OrderReconcileTask {
     private final UserClient userClient;
     private final ShopClient shopClient;
 
-    /** 连续出现"未知"的轮数：用于把"下游一直不可用"从 WARN 升级成需要人工介入的 ERROR */
+    /** 连续"未知"轮数：把"下游一直不可用"从 WARN 升级成需人工介入的 ERROR */
     private final AtomicInteger consecutiveUnknownRounds = new AtomicInteger(0);
 
     @Scheduled(
@@ -88,8 +73,7 @@ public class OrderReconcileTask {
                 DownstreamState points = safePointsApplied(order.getId());
                 DownstreamState shop = safeShopConsumed(order.getId());
                 if (points == DownstreamState.UNKNOWN || shop == DownstreamState.UNKNOWN) {
-                    // 只要有一项未知，这一笔就**不下结论**：不补发（避免补偿风暴）、
-                    // 也不算作"已处理"（避免掩盖缺口），留到下一轮再查
+                    // 只要有一项未知这一笔就不下结论：不补发（避免补偿风暴）、也不算作已处理（避免掩盖缺口）
                     unknown++;
                     continue;
                 }
@@ -107,11 +91,7 @@ public class OrderReconcileTask {
         }
     }
 
-    /**
-     * 打印本轮结果。
-     * 口径必须分开：把未知混进"均已处理"正是原缺陷的核心，
-     * 所以文案里"已消费 A / 未消费 B / 状态未知 C"三个数字都要出现。
-     */
+    /** 打印本轮结果：三个口径必须分开，"未知"不能混进"均已处理" */
     private void report(int total, int consumed, int missing, int unknown) {
         if (unknown == 0) {
             consecutiveUnknownRounds.set(0);
@@ -134,11 +114,8 @@ public class OrderReconcileTask {
     }
 
     /**
-     * 查询积分发放状态。
-     *
-     * <p>查询失败 = 未知，**不是**"已处理"：返回 UNKNOWN 让调用方保留待下轮确认。
-     * 这里不再触发补偿，是因为补偿的前提是"确认下游没处理"，
-     * 在不知道的情况下重发，既可能做无用功，也可能在下游已经过载时雪上加霜。
+     * 查询积分发放状态；查询失败 = 未知，不是"已处理"：返回 UNKNOWN 让调用方保留待下轮确认。
+     * 此处不触发补偿：补偿的前提是"确认下游没处理"，在不知道的情况下重发可能做无用功，也可能压垮已过载的下游。
      */
     private DownstreamState safePointsApplied(Long orderId) {
         try {

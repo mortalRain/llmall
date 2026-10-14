@@ -12,8 +12,8 @@ import java.util.List;
 /**
  * 搜索域服务。
  *
- * 数据所有权：只有本服务读写 llmall-search；门店数据通过「事件构建的本地视图 + 全量重建」获得，
- * 不在检索路径上跨服务调用。
+ * 【注意】数据所有权：只有本服务读写 llmall-search，门店数据由本服务按事件构建本地视图 +
+ * 全量重建获得，检索路径上不跨服务调用。
  */
 public interface ISearchService {
 
@@ -23,9 +23,8 @@ public interface ISearchService {
     /**
      * 附近检索：给定坐标时按距离升序（"距您最近的店"）。
      *
-     * 只有 ES 引擎支持按距离排序（geo_point + geo_distance）；MySQL 回落时退化为普通检索
-     * （结果里的 distance 为空）—— 这是**有意为之**：宁愿给"没有距离的搜索结果"，
-     * 也不要因为 ES 挂了就让附近门店接口整体 500。
+     * 【注意】只有 ES 引擎支持按距离排序（geo_point + geo_distance）；MySQL 回落时退化为普通检索，
+     * 结果里的 distance 为空 —— 有意为之，不因 ES 不可用就让附近门店接口整体 500。
      */
     default PageDTO<ShopDTO> searchNearby(String keyword, Long typeId, Integer page, Integer size,
                                           Double x, Double y, Long userId) {
@@ -48,20 +47,18 @@ public interface ISearchService {
     /**
      * 消费 shop.hot.changed：增量维护搜索视图。
      *
-     * 事件体是**整行门店快照**（含 sold/status），所以这里做的是**整行 upsert** +
-     * 事件时间防乱序（审计 B4：原来只更新 hotScore/comments/score 三列，
-     * 导致 shop_search_doc.sold 只在全量重建时才更新，销量被永久冻结）。
+     * 事件体是整行门店快照（含 sold/status），因此这里做整行 upsert，并用事件时间防乱序。
      *
-     * 幂等闸门（consume_record）由调用方 ShopHotChangedListener 在同一个事务里先落，
-     * 保证"这条事件处理过没有"这个判据与视图更新同生共死。
+     * 【注意】幂等闸门（consume_record）由调用方 ShopHotChangedListener 在同一个事务里先落，
+     * 保证"这条事件处理过没有"的判据与视图更新同生共死。
      */
     void applyShopHotChanged(ShopDocChangedEvent event);
 
     /**
      * 对账判据：这条门店变更事件在本域是否已处理（供 llmall-shop-service 的对账任务查询）。
      *
-     * 判据就是本域 consume_record 里有没有 (SHOP_HOT_CHANGED, bizId, llmall-search-service) 这一行 ——
-     * 它与视图更新同事务写入，所以"有行 ⇒ 一定处理成功"。
+     * 判据为本域 consume_record 里是否存在 (SHOP_HOT_CHANGED, bizId, llmall-search-service) 这一行；
+     * 它与视图更新同事务写入，所以"有行"即代表已处理成功。
      */
     boolean isShopHotChangedConsumed(String bizId);
 

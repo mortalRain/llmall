@@ -20,17 +20,19 @@ import org.springframework.web.util.NestedServletException;
 import java.util.stream.Collectors;
 
 /**
- * 统一异常处理：把业务异常翻译成统一的响应体（R），HTTP 状态码沿用异常自带的 code。
+ * 统一异常处理：把各类异常翻译成统一响应体（R），HTTP 状态码直接取异常自带的 code，
+ * 参数校验类异常为 400，未预期异常兜底 500。
  *
- * 【重要】必须限定 SERVLET 应用：
- *   llmall-common 通过 spring.factories 被所有服务自动装配，而网关是 WebFlux（Reactive）应用，
- *   类路径上没有 javax.servlet。不加这个条件，网关启动时会因为
- *   NoClassDefFoundError: javax/servlet/ServletException 直接起不来（本项目实测踩过）。
+ * 【注意】必须限定 SERVLET 应用：本类经 spring.factories 装配到所有服务，而网关是 WebFlux 应用、
+ * 类路径上没有 javax.servlet，去掉该条件网关会以 NoClassDefFoundError 启动失败。
  */
 @RestControllerAdvice
 @Slf4j
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class CommonExceptionAdvice {
+
+    /** 回给前端的根因消息最大长度，超出部分截断 */
+    private static final int MAX_ROOT_MESSAGE_LENGTH = 300;
 
     @ExceptionHandler(DbException.class)
     public Object handleDbException(DbException e) {
@@ -40,8 +42,8 @@ public class CommonExceptionAdvice {
 
     @ExceptionHandler(CommonException.class)
     public Object handleCommonException(CommonException e) {
-        // 分级：4xx 是"预期内的业务拒绝"（库存不足、请勿重复提交、无权访问…），用 warn 且不打堆栈；
-        // 5xx 才是真故障，保留 error + 堆栈。混在一起打 ERROR 会让正常拒绝刷满日志与告警。
+        // 4xx 属预期内的业务拒绝，用 warn 且不打堆栈；5xx 才是真故障，保留 error + 堆栈，
+        // 混在一起打 ERROR 会让正常拒绝刷满日志与告警
         if (e.getCode() >= 500) {
             log.error("业务异常 -> {}，原因：{}", e.getClass().getName(), e.getMessage(), e);
         } else {
@@ -60,14 +62,10 @@ public class CommonExceptionAdvice {
         return processResponse(new BadRequestException(msg));
     }
     /**
-     * 参数绑定异常：{@code org.springframework.validation.BindException}。
+     * 参数绑定异常（表单/查询参数）：{@code org.springframework.validation.BindException}。
      *
-     * 【为什么必须盯紧这个 import】这里原先写的是 {@code java.net.BindException}
-     * （网络编程里"端口被占用"的异常），与 spring 的参数绑定异常同名但毫无关系。
-     * 后果是：表单/查询参数绑定失败时没有任何处理器命中，直接落到下面的
-     * {@code Exception} 兜底 → 500「服务器内部异常」，用户明明只是参数写错了格式，
-     * 却看到"服务挂了"，前端也无从提示。异常处理器导入错的类不会编译报错，
-     * 只有在真跑一次非法请求时才会暴露 —— 属于必须靠实测才能发现的缺陷。
+     * 【注意】同名类 {@code java.net.BindException} 与参数绑定无关，且导入错类不会编译报错：
+     * 届时没有任何处理器命中，直接落到 {@code Exception} 兜底变成 500。
      */
     @ExceptionHandler(BindException.class)
     public Object handleBindException(BindException e) {
@@ -83,9 +81,8 @@ public class CommonExceptionAdvice {
     }
 
     /**
-     * 请求体不是合法 JSON / 无法反序列化（少括号、类型不符、body 缺失……）。
-     * 同样的问题：没有这个处理器时会退化成 500，把"客户端传错了"说成"服务端坏了"。
-     * msg 里带上最具体的原因，前端才能把"哪个字段什么格式不对"直接展示给用户。
+     * 请求体不是合法 JSON / 无法反序列化（少括号、类型不符、body 缺失……）：按 400 返回并带上
+     * 最具体的原因，否则会退化成 500，把"客户端传错了"说成"服务端坏了"。
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public Object handleHttpMessageNotReadableException(HttpMessageNotReadableException e) {
@@ -96,8 +93,8 @@ public class CommonExceptionAdvice {
     }
 
     /**
-     * 路径/查询参数类型不匹配（例如把 {@code /orders/abc} 传给 Long 类型的 orderId）。
-     * 不处理同样会变成 500；这里明确指出是哪个参数、期望什么类型、实际传了什么。
+     * 路径/查询参数类型不匹配（如把 {@code /orders/abc} 传给 Long 型 orderId）：按 400 返回并
+     * 指明参数名、期望类型与实际值；不处理同样会变成 500。
      */
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public Object handleMethodArgumentTypeMismatchException(MethodArgumentTypeMismatchException e) {
@@ -134,6 +131,8 @@ public class CommonExceptionAdvice {
             root = root.getCause();
         }
         String msg = root.getMessage() == null ? e.getClass().getSimpleName() : root.getMessage();
-        return msg.length() > 300 ? msg.substring(0, 300) + "..." : msg;
+        return msg.length() > MAX_ROOT_MESSAGE_LENGTH
+                ? msg.substring(0, MAX_ROOT_MESSAGE_LENGTH) + "..."
+                : msg;
     }
 }

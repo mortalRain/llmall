@@ -8,19 +8,15 @@ spring:
     listener:
       simple:
         prefetch: 1
-        # Keep auto-ack globally; a service needing manual ack overrides it locally.
-        #
-        # 【必须是 false】Spring Boot 默认 true：消费失败（重试也耗尽之后）消息会被**立刻 requeue 回原队列**，
-        # 消费者马上又拿到同一条消息 → 满速热循环（CPU 打满、日志刷屏，后面的新消息进不来）。
-        # 设为 false 后消息不再回原队列，由 llmall-common 的 MessageRecoverer 搬到死信交换机 llmall.dlx
-        # → <服务名>.dead.letter.queue，并由 DeadLetterAlertListener 打 ERROR 告警。
-        # 注意：只影响自动 ack 的监听器；手动 ack 的监听器（如 promotion 秒杀）自己决定 ack/nack。
+        # 【注意】必须为 false：Spring Boot 默认为 true，消费失败（重试也耗尽之后）的消息会被立刻 requeue 回原队列，
+        # 消费者马上又拿到同一条 → 满速热循环（CPU 打满、日志刷屏，后面的新消息进不来）。设为 false 后消息
+        # 改由 llmall-common 的 MessageRecoverer 转投死信交换机 llmall.dlx → <服务名>.dead.letter.queue 并打 ERROR 告警。
+        # 只影响自动 ack 的监听器；手动 ack 的监听器（如 promotion 秒杀）自己决定 ack/nack。
         default-requeue-rejected: false
         retry:
           enabled: true
           max-attempts: 3
-          # 重试间隔：1s 起、指数退避到 10s。原来只有 max-attempts，间隔取默认的固定 1s ——
-          # DB 抖动、下游刚重启这类"等一会儿就好"的失败，固定 1s 连打三次往往还没恢复。
+          # 重试间隔：1s 起、指数退避到 10s。固定 1s 连打三次时，DB 抖动、下游刚重启这类失败往往还没恢复。
           initial-interval: 1s
           multiplier: 2
           max-interval: 10s

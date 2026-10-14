@@ -23,31 +23,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 本地消息表实现（内容域，审计 B4 生产端）：把"发消息"变成"先落库、再投递、失败重试"。
+ * 本地消息表实现（内容域生产端）：把"发消息"变成"先落库、再投递、失败重试"。
  *
- * 时序分三段，各自解决一个问题（与门店域 MessageLogServiceImpl 同一套设计）：
- *  1. record()              —— 与业务同事务：保证"业务成功 ⇒ 消息一定存在"（不丢）
- *  2. dispatchAfterCommit() —— 提交后立刻投递：保证低延迟，且**回滚了就不发**
- *  3. retryPending()        —— 定时按指数退避重发：保证"当时投不出去，最终也能到"
+ * 时序三段缺一不可：record() 与业务同事务落库（业务成功 ⇒ 消息一定存在）；
+ * dispatchAfterCommit() 在事务提交之后才投递（回滚了就不发）；retryPending() 按指数退避重发。
  *
- * <h3>⚠️ 本轮刻意的语义变更（登记失败 = 业务回滚）</h3>
- * 改造前 {@code ContentEventPublisher} 的 {@code catch (Exception e) { log.error(...) }} 表达的是
- * "投递失败不影响用户发布"：评价已经落库，发不出去只记日志。
- * 现在这个 catch 被去掉了 —— 因为 record() 与业务写处在**同一个本地事务**里，
- * 登记失败（表不存在、连接被打断、字段超长……）会连同业务写一起回滚，接口向用户返回 500。
- * 这是**更正确**的行为，理由：登记失败意味着"业务与消息无法作为一个原子单位提交"，
- * 此时若只记日志继续提交，就精确地复现了审计 B4 要修的缺陷 ——
- * "评价存在、门店热度永不更新"，而且是静默的，事后无法从任何信号里恢复。
- * 宁可让用户看到失败并重试（重试是幂等的业务动作：只是再发一条评价），
- * 也不要产生一条永远无人感知的断裂。真正的"投递失败不阻断业务"发生在**提交之后**：
- * afterCommit 里的 convertAndSend 异常一律被 dispatch() 吞成 FAILED + 退避重试。
- *
- * <h3>与本域原有的 TxAfterCommit 的关系</h3>
- * 原来 {@code BlogServiceImpl.publishBlog} 用 {@code TxAfterCommit.run} 把"投递"挪到提交后。
- * 改造后**不能再套那层**：TxAfterCommit 会让 record() 也跑到提交之后（脱离业务事务，
- * 就又变回"业务成功但消息可能没落库"），而且会在 afterCommit 回调里再注册一次 afterCommit
- * （嵌套注册的同步器不会被执行）。现在"提交后才真正发出去"这件事由 dispatchAfterCommit 负责，
- * 语义不变，反而把"登记"拉回了事务内。
+ * 【注意】record() 与业务写同事务，登记失败会连业务写一起回滚、接口返回 500 —— 这是刻意的，
+ * 只记日志继续提交就会静默产生"评价存在、门店热度永不更新"；投递发生在提交之后，失败只记
+ * FAILED + 退避时间，不阻断业务。
+ * 调用方也不能再套 {@code TxAfterCommit}：那会把 record() 挪到提交后脱离业务事务，
+ * 且在 afterCommit 回调里嵌套注册的同步器不会被执行。
  */
 @Slf4j
 @Service
@@ -59,12 +44,9 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
     private static final long RETRY_MAX_SECONDS = 600L;
 
     /**
-     * bizType → 消息体目标类型。
-     * 为什么需要这个映射：本地消息表里存的是 JSON 字符串，投递时要**还原成原本的事件对象**，
-     * 下游（门店域 ReviewCreatedListener 的 @RabbitListener 方法签名）才能按类型反序列化。
-     * 直接把 payload 当 Map 发出去，消费端拿到的是 LinkedHashMap，字段语义全靠猜，且
-     * __TypeId__ 头会指向 LinkedHashMap —— 表现为消费端反序列化/参数绑定失败。
-     * 新增事件类型时必须在这里登记，否则投递阶段抛"未注册的消息类型"，被 catch 成失败重试。
+     * bizType → 消息体目标类型：库里存的是 JSON 字符串，投递时必须还原成原本的事件对象，
+     * 否则消费端拿到的是 LinkedHashMap、{@code __TypeId__} 也指向 LinkedHashMap 而绑定失败。
+     * 新增事件类型必须在这里登记，否则投递阶段抛"未注册的消息类型"并被计为失败重试。
      */
     private static final Map<String, Class<?>> PAYLOAD_TYPES = new HashMap<>();
 
@@ -91,21 +73,16 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
             save(messageLog);
         } catch (DuplicateKeyException e) {
             // (biz_type, biz_id) 唯一索引：同一业务重复登记直接忽略，天然幂等。
-            // 注意这里**捕获的是 DuplicateKeyException**：save() 是同类内部调用、不经过事务代理，
-            // 不会被标记 rollback-only，所以吞掉它不会把外层业务事务弄脏。
+            // save() 是同类内部调用、不经事务代理，捕获 DuplicateKeyException 不会把外层事务标记 rollback-only。
             log.info("消息已登记过，忽略: bizType={}, bizId={}", bizType, bizId);
         }
     }
 
     /**
-     * 事务提交后再投递。
-     *
-     * 为什么不能就地发（这是本方法存在的全部理由）：调用方（BlogServiceImpl.publishBlog）
-     * 是在业务事务里登记消息的，如果顺手就地 convertAndSend，会出现两种都很难查的错：
-     *  ① 事务随后回滚 → 事件已经发出去，门店域按"没发生过的评价"改了热度/评分；
-     *  ② 提交之后进程崩溃 → 事件永远发不出去，业务却已经生效（"评价存在、热度不变"）。
+     * 事务提交后再投递，这是本方法存在的全部理由：就地发会出现两种都很难查的错 ——
+     * ① 事务随后回滚，事件却已经发出去；② 提交之后进程崩溃，事件永远发不出去而业务已经生效。
      * 注册到 afterCommit 后，注册时点与提交时点之间的窗口由"消息已经和业务同事务落库"兜住：
-     * 提交成功 ⇒ 消息一定在表里 ⇒ 即使这段窗口断电，MessageRetryTask 也会把它发出去。
+     * 提交成功 ⇒ 消息一定在表里 ⇒ 即使这段窗口断电，重试任务也会把它发出去。
      */
     @Override
     public void dispatchAfterCommit(String bizType, String bizId) {
@@ -120,8 +97,7 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
                 @Override
                 public void afterCommit() {
                     // afterCommit 里抛异常会传播给"提交事务的调用方"，让一个已经提交成功的事务
-                    // 在调用方看来是失败的（接口会返回 500，而 blog 行其实已经落库）。
-                    // dispatch 内部把所有异常吞成日志 + FAILED 状态，这里不会抛。
+                    // 在调用方看来是失败的；dispatch 内部把异常全部吞成日志 + FAILED，这里不会抛。
                     action.run();
                 }
             });
@@ -136,9 +112,8 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
         try {
             Object payload = readPayload(messageLog);
             rabbitTemplate.convertAndSend(messageLog.getExchange(), messageLog.getRoutingKey(), payload);
-            // 成功时把 error_msg 清回 NULL：MyBatis-Plus 全局配置是 update-strategy=not_null，
-            // 但 LambdaUpdateWrapper.set(field, null) 是**显式** set，会照常生成 error_msg = null，
-            // 所以"失败原因"不会被上一次重试的残留值污染（实测：MQ 恢复后重试成功，该列由报错文本变为 NULL）。
+            // 成功时把 error_msg 清回 NULL：LambdaUpdateWrapper.set(field, null) 是显式 set，
+            // 不受 MyBatis-Plus 全局 update-strategy=not_null 影响，失败原因不会被上一次重试的残留值污染。
             lambdaUpdate()
                     .eq(MessageLog::getId, messageLog.getId())
                     .set(MessageLog::getStatus, MessageLog.STATUS_SENT)
@@ -156,7 +131,6 @@ public class MessageLogServiceImpl extends ServiceImpl<MessageLogMapper, Message
                     .set(MessageLog::getNextRetryTime, LocalDateTime.now().plusSeconds(delaySeconds))
                     .set(MessageLog::getErrorMsg, truncate(e.getMessage(), 1000))
                     .update();
-            // 改造前这里就是事件永久丢失的地方（只有一条 log.error，没有任何后续动作）
             log.error("消息投递失败，将在 {} 秒后重试(第 {} 次): bizType={}, bizId={}",
                     delaySeconds, retry, messageLog.getBizType(), messageLog.getBizId(), e);
             return false;

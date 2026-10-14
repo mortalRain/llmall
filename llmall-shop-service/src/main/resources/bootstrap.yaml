@@ -1,16 +1,16 @@
+# bootstrap 阶段就要知道应用名与配置中心地址，所以这些必须写在这里（不能只写在 application.yaml）。
 spring:
   application:
-    name: llmall-shop-service # 核心标识，Nacos 注册与配置都依赖它
+    name: llmall-shop-service   # 核心标识：Nacos 注册与配置、日志都依赖它
   profiles:
-    active: local
+    active: local               # local：本机/虚拟机地址（VM 里的容器名只有在 docker 网络内才解析得到）
   cloud:
     nacos:
-      # 支持环境变量覆盖：本地开发用 192.168.189.128，容器/云服务器上用 NACOS_ADDR=nacos:8848
-      server-addr: ${NACOS_ADDR:192.168.189.128:8848}
+      server-addr: ${NACOS_ADDR:192.168.189.128:8848}   # 本地默认 192.168.189.128，容器/云服务器用 NACOS_ADDR 覆盖
       # 服务发现
       discovery:
         namespace: ${NACOS_NAMESPACE:public}
-      # 配置中心
+      # 配置中心：shared-*.yaml 是跨服务的同一份口径，在 Nacos 上发布即对所有服务生效
       config:
         server-addr: ${NACOS_ADDR:192.168.189.128:8848}
         file-extension: yaml

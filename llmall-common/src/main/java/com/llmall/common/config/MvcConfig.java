@@ -16,11 +16,9 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class MvcConfig implements WebMvcConfigurer {
 
     /**
-     * 内部调用凭证（llmall.internal.token）。
-     * 拦截器靠它判断 user-info 头是不是"我们自己人"写的 —— 见 UserInfoInterceptor 的注释：
-     * 没有它，任何能直连服务端口的人都能自带 user-info 冒充任意用户。
-     * 这里不设默认值（默认空串）：没配置时拦截器一律不采信 user-info（fail-closed），
-     * 而不是悄悄退化成"谁都能自称任意用户"。
+     * 内部调用凭证（llmall.internal.token），拦截器据此判断 user-info 头是否由内部调用写入。
+     * 【注意】未配置（默认空串）时拦截器一律不采信 user-info（fail-closed），
+     * 否则任何能直连服务端口的人都能自带 user-info 冒充任意用户。
      */
     @Value("${llmall.internal.token:}")
     private String internalToken;
@@ -31,9 +29,8 @@ public class MvcConfig implements WebMvcConfigurer {
     }
 
     /**
-     * 全链路 traceId：最先执行的 Filter（最高优先级），保证本服务本次请求的所有日志
-     * （含鉴权、参数解析、异常处理）都带同一个 traceId。
-     * 上游是网关时它已生成好，跨服务 Feign 调用由 DefaultFeignConfig 继续透传。
+     * 全链路 traceId：过滤器取最高优先级，保证鉴权、参数解析、异常处理的日志都带同一 traceId；
+     * 上游（网关）已生成的值直接沿用，跨服务 Feign 调用由 DefaultFeignConfig 继续透传。
      */
     @Bean
     public FilterRegistrationBean<TraceIdFilter> traceIdFilter() {

@@ -7,9 +7,7 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Update;
 
 /**
- * <p>
- * 用户表 Mapper 接口
- * </p>
+ * 用户账号表数据访问：余额扣减与退款入账。
  *
  * @author 同城生活
  * @since 2023-05-05
@@ -18,11 +16,8 @@ public interface UserMapper extends BaseMapper<User> {
     /**
      * 扣减余额。
      *
-     * 【修复】原 SQL 是 `set balance = balance - ${totalFee} where id = #{userId}`：
-     *  ① 没有余额充足性判断 —— 余额不足时会把余额扣成负数（资损）；
-     *  ② 方法返回 void，调用方连"到底扣没扣成功"都感知不到；
-     *  ③ 用 `${}` 直接拼接金额，存在注入面。
-     * 现在改为条件更新 + 返回受影响行数 + `#{}` 预编译占位符。
+     * 【注意】条件更新：SQL 自带 balance >= totalFee 前置条件，余额不足时不更新任何行、
+     * 返回 0，调用方必须检查返回值，禁止假定扣款成功。
      */
     @Update("update user set balance = balance - #{totalFee} where id = #{userId} and balance >= #{totalFee}")
     int updateMoney(@Param("userId") Long userId, @Param("totalFee") Integer totalFee);
@@ -30,12 +25,8 @@ public interface UserMapper extends BaseMapper<User> {
     /**
      * 退款入账：把金额加回余额，返回受影响行数。
      *
-     * 为什么用 `balance = balance + #{amount}` 这种**数据库端自增**而不是
-     * "先 select 出余额、在内存里加、再 update"：并发退款（或多条退款路径同时命中同一用户）下，
-     * 读改写会互相覆盖，最后一笔写入会抹掉前一笔的钱；而 `balance = balance + ?` 是在
-     * 行锁内完成的原子累加，天然不会丢更新 —— 这和扣款用 `balance >= amount` 做条件更新
-     * 是同一个思路：把"钱的运算"交给数据库，而不是应用层。
-     * 不用加减金额判断余额上限：余额只可能因为本方法变大，没有"加多了要把人加破产"的风险。
+     * 用数据库端原子自增（balance = balance + 入参），而非"查出来在内存里加再写回"：
+     * 并发退款下读改写会互相覆盖丢钱。本方法无金额上限判断，余额只会因此变大。
      */
     @Update("update user set balance = balance + #{amount} where id = #{userId}")
     int refundMoney(@Param("userId") Long userId, @Param("amount") Integer amount);

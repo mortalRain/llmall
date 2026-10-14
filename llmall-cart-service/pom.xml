@@ -34,6 +34,21 @@
             <groupId>mysql</groupId>
             <artifactId>mysql-connector-java</artifactId>
         </dependency>
+        <!--
+            Redis：购物车缓存（cache:cart:{userId}）。
+            这是本服务**唯一**用到 Redis 的地方 —— 购物车是"按用户维度、条目数少、读写频繁"
+            的数据，之前每次打开购物车页都要全量查一次 DB，是所有服务里最典型的缓存候选。
+            commons-pool2 必须显式引入：没有它 Spring Boot 不会启用 Lettuce 连接池，
+            Nacos 共享配置里的 spring.redis.lettuce.pool.* 会被**静默忽略**（配了不生效）。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
         <!--mybatis-->
         <dependency>
             <groupId>com.baomidou</groupId>

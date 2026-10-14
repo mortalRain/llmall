@@ -18,11 +18,9 @@ import java.util.List;
 /**
  * 门店接口。
  *
- * 路径设计约定（与网关 excludePaths 配合）：
- *  - 访问路径为**单段**的读接口（/shops/{id}、/shops/hot、/shops/page、/shops/nearby、/shops/batch）
- *    在网关配置为免鉴权 —— 本地生活场景中"未登录也能逛门店"是正常产品行为；
- *  - 多段的写/运维接口（/shops/{id}/visit、/shops/{id}/hot/recompute、/shops/cache/**）必须登录，
- *    这样既保证浏览体验，又不会把运维接口暴露出去。
+ * 【注意】鉴权边界与网关 excludePaths 绑定：单段读接口（/shops/{id}、/shops/hot、/shops/page、
+ * /shops/nearby、/shops/batch）免鉴权，未登录也能逛门店；多段写/运维接口（/shops/{id}/visit、
+ * /shops/{id}/hot/recompute、/shops/cache/**）必须登录，不得把运维入口暴露出去。
  */
 @Tag(name = "门店相关接口")
 @RestController
@@ -36,13 +34,10 @@ public class ShopController {
     private final ShopSearchReconcileTask shopSearchReconcileTask;
 
     /**
-     * 运维接口总开关（llmall.maintenance.enabled，默认 true）。
+     * 运维接口总开关（llmall.maintenance.enabled，application.yaml 中默认 true）。
      *
-     * 为什么需要它：重建 GEO 索引、重算热度分、失效缓存这类接口是"一人执行、全站受影响"的，
-     * 平时必须能用，但一旦怀疑是它们在捣乱（例如索引重建期间查询抖动），
-     * 运维要能**立刻一键停掉**，而不是等发版。
-     * 这里不做权限体系（项目里没有 RBAC，硬造一个只会更危险），只保证"能被关掉"，
-     * 关掉后统一返回 403 + 明确 msg，前端/运维一眼能看出是开关而不是故障。
+     * 【注意】重建 GEO 索引、重算热度分、失效缓存属"一人执行、全站受影响"的动作，必须能一键停掉而非等发版；
+     * 关闭后统一返回 403，便于一眼区分是开关还是故障。项目无 RBAC，不为此另造权限体系。
      */
     @Value("${llmall.maintenance.enabled:false}")
     private boolean maintenanceEnabled;
@@ -113,10 +108,8 @@ public class ShopController {
     @Operation(summary = "对账：检查已投递的门店热度事件搜索域处理了没有，明确未处理则补发（审计 B4，运维/排障用）")
     @PostMapping("/hot/reconcile")
     public HotReconcileResultVO reconcileHotChanged() {
-        // 与其它运维接口共用同一个开关：手动触发对账会请求下游、可能触发补发，
-        // 属于"一人执行、全站受影响"的动作，必须能被一键关掉。
-        // 为什么要有手动入口：定时对账默认 5 分钟一轮，排障时不该让人干等；
-        // 而且"补发是否真的发生"需要一个可重复触发的入口来验证。
+        // 与其它运维接口共用开关：手动对账会请求下游并可能触发补发，属"一人执行、全站受影响"的动作。
+        // 手动入口的另一用途是排障与验证：定时对账默认 5 分钟一轮，且需要一个可重复触发的入口确认补发是否真的发生。
         checkMaintenanceEnabled();
         return shopSearchReconcileTask.reconcile();
     }
@@ -137,8 +130,14 @@ public class ShopController {
     @Operation(summary = "主动失效门店缓存")
     @DeleteMapping("/cache/{id}")
     public void evictCache(@PathVariable("id") Long id) {
-        // 同属"重建/重算"一类的运维动作，共用同一个开关
         checkMaintenanceEnabled();
         shopService.evictCache(id);
+    }
+
+    @Operation(summary = "门店下线：清理详情缓存 + 热度榜成员 + GEO 坐标（门店下架/删除后调用）")
+    @DeleteMapping("/cache/{id}/offline")
+    public void markOffline(@PathVariable("id") Long id) {
+        checkMaintenanceEnabled();
+        shopService.markShopOffline(id);
     }
 }

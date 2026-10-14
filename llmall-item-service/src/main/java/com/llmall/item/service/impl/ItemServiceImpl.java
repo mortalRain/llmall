@@ -30,7 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** 商品表 服务实现类。@author 同城生活 */
+/** 商品（实物商品 / 门店套餐）查询，以及下单扣减库存、取消回滚库存。 */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -45,30 +45,26 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
 
     private final StockFlowMapper stockFlowMapper;
 
-    /**
-     * 扣减库存：库存是否足够交给 SQL 的 stock >= num 原子判断（按受影响行数判定，杜绝超卖），整批扣减同事务，任一商品不足则全部回滚。
-     */
+    /** 扣减库存：充足性交给 SQL 的 stock >= num 原子判断（按受影响行数判定，杜绝超卖），整批同事务，任一商品不足则全部回滚。 */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void deductStock(List<OrderDetailDTO> items) {
         if (CollUtils.isEmpty(items)) {
             return;
         }
-        // 0.入口显式校验：Feign 服务端不会对 @RequestBody 做 Bean Validation，@Min/@NotNull 在这条链路上没有读者；
-        //    num = -5 时 SQL 会变成 stock = stock - (-5) 且 stock >= -5 恒真，防超卖守卫与数量语义一起失效。
         validateDetailItems(items);
         for (OrderDetailDTO dto : items) {
             String bizType = StrUtil.blankToDefault(dto.getBizType(), BIZ_TYPE_DEDUCT);
-            // 1.【幂等闸门】先把流水插进去，插入成功才允许扣减（详见 claimFlow）
+            // 1.【幂等闸门】先写流水，插入成功才允许扣减（详见 claimFlow）
             if (!claimFlow(dto, bizType, -Math.abs(dto.getNum()))) {
                 log.info("库存已扣减过，幂等跳过: bizType={}, bizId={}, itemId={}",
                         bizType, dto.getBizId(), dto.getItemId());
                 continue;
             }
-            // 2.再改库存：闸门与扣减在同一个事务里，任一失败（含库存不足）整体回滚，流水不会残留，消息重投后仍能正常扣减
+            // 2.再改库存：闸门与扣减在同一事务内，任一失败（含库存不足）整体回滚，流水不残留，消息重投后仍可正常扣减
             int rows = baseMapper.deductStock(dto);
             if (rows == 0) {
-                // rows=0 只可能是 stock < num 或 num <= 0（id 不存在也会是 0，同样属于非法请求）
+                // rows=0 只可能是 stock < num 或 num <= 0（id 不存在同样为 0，也属非法请求）
                 throw new BizIllegalException("库存不足，商品 id=" + dto.getItemId());
             }
         }
@@ -80,7 +76,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         if (CollUtils.isEmpty(items)) {
             return;
         }
-        // 与 deductStock 同序：先占流水、再改库存；此处 SQL 是 stock + #{num}，num 为负会反向扣库存并把 sold 抬高，所以入口校验同样必要
+        // 与 deductStock 同序：先占流水再改库存；此处 SQL 是 stock + #{num}，num 为负会反向扣库存并把 sold 抬高，入口校验同样必要
         validateDetailItems(items);
         for (OrderDetailDTO dto : items) {
             String bizType = StrUtil.blankToDefault(dto.getBizType(), BIZ_TYPE_RESTORE);
@@ -96,7 +92,11 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         }
     }
 
-    /** 入口显式校验：@Min/@NotNull 只在经过 Spring MVC 参数绑定 + @Validated 的路径上生效，而这两个接口的主要消费者是 llmall-trade-service 的 Feign 调用，注解在链路上没有读者 */
+    /**
+     * 入口显式校验：@Min/@NotNull 只在经 Spring MVC 参数绑定 + @Validated 的路径上生效，而这两个接口的
+     * 消费者是 llmall-trade-service 的 Feign 调用，注解在链路上没有读者。
+     * 【注意】num 必须为正：为负时 SQL 的 stock >= num 恒真、stock = stock - num 反而加库存，防超卖守卫失效。
+     */
     private void validateDetailItems(List<OrderDetailDTO> items) {
         for (OrderDetailDTO dto : items) {
             if (dto == null || dto.getItemId() == null || dto.getNum() == null || dto.getNum() <= 0) {
@@ -110,8 +110,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         if (StrUtil.isBlank(bizId)) {
             return false;
         }
-        // 与扣减时写入流水的键完全同源（biz_type + biz_id），所以"查得到流水"就等于"确实扣过"；
-        // 这里刻意不查 item 表库存数：库存是个可以被别的链路改变的值，而流水是不可变的证据
+        // 与扣减写流水的键同源（biz_type + biz_id），"查得到流水"即"确实扣过"；刻意不查 item 库存数：库存会被别的链路改变，流水才是不可变证据
         String type = StrUtil.blankToDefault(bizType, BIZ_TYPE_DEDUCT);
         Long count = stockFlowMapper.selectCount(new LambdaQueryWrapper<StockFlow>()
                 .eq(StockFlow::getBizType, type)
@@ -139,7 +138,6 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
 
     @Override
     public PageDTO<ItemDTO> pageQuery(ItemPageQuery query) {
-        // 默认按销量倒序（sortBy 为空或不在白名单内时回落，isAsc 未指定则取降序）
         String sortBy = query.getSortBy();
         if (StrUtil.isBlank(sortBy) || !SORTABLE.contains(sortBy)) {
             query.setSortBy("sold");
@@ -163,7 +161,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
 
     @Override
     public List<Map<String, Object>> listCategories(Integer type) {
-        // 交给 SQL 直接 group by 得到分类到数量，避免把几万行商品拉到内存里再聚合
+        // 交给 SQL group by 聚合出分类与数量，避免把几万行商品拉到内存里再统计
         QueryWrapper<Item> qw = new QueryWrapper<>();
         qw.select("category", "COUNT(*) AS count")
                 .eq("status", STATUS_ON_SALE)
@@ -175,17 +173,18 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
     }
 
     /**
-     * 幂等闸门：先尝试写流水，插入成功才允许执行库存变更，唯一键 (biz_type, biz_id, item_id) 就是闸门本身。
-     * 为什么必须让唯一键做闸门，而不是先查流水再扣减：查询与插入之间没有互斥，并发下（MQ 重投 + 用户重试、
-     * Feign 重试、双击下单）两个线程都会查到 0 并各自扣一次库存，等第二次插流水撞唯一键时库存已经被扣掉。
-     * 反例：先 flowExists() 查、查不到就扣减，两个并发线程会双双扣减成功，唯一键只在写流水时才拦下第二笔。
-     * 为什么不把 DuplicateKeyException 往外抛：插入冲突是预期内的正常分支（重复投递），被捕获后事务不会被标记
-     * rollback-only（只有异常逃出 @Transactional 代理才会），所以同事务内后续商品可以继续处理；返回 true = 闸门通过并已写流水占位，false = 该业务已处理过、跳过。
+     * 幂等闸门：先写流水，插入成功才允许执行库存变更，唯一键 (biz_type, biz_id, item_id) 就是闸门本身。
+     *
+     * 【注意】不能改成"先查流水再扣减"：查询与插入之间无互斥，并发（MQ 重投、Feign 重试、双击下单）下
+     * 两个线程都会查到 0 并各扣一次库存。也不把 DuplicateKeyException 抛出：插入冲突是重复投递的正常分支，
+     * 被捕获后事务不会被标记 rollback-only（只有异常逃出 @Transactional 代理才会），同事务内后续商品可继续处理。
+     *
+     * @return true 闸门通过并已写流水占位；false 该业务已处理过，跳过
      */
     private boolean claimFlow(OrderDetailDTO dto, String bizType, int changeNum) {
         if (StrUtil.isBlank(dto.getBizId())) {
-            // 没有业务号就没有幂等判据（唯一键里的 biz_id 为空无法构成同一笔业务）；此处不静默跳过，
-            // 而是打 WARN 把漏传 bizId 的调用方暴露出来，避免调用方误以为本次已受幂等保护。
+            // 无 bizId 即无幂等判据（唯一键里的 biz_id 为空无法构成同一笔业务），不静默跳过，
+            // 而是打 WARN 暴露漏传 bizId 的调用方，避免其误以为本次已受幂等保护
             log.warn("库存变动未传 bizId，本次操作【未启用幂等保护】: bizType={}, itemId={}, num={}",
                     bizType, dto.getItemId(), dto.getNum());
             return true;

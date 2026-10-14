@@ -8,11 +8,8 @@ import java.io.Serializable;
 /**
  * 事件：门店热度分发生变化。
  *
- * 生产者：llmall-shop-service（重算热度后投递）
- * 消费者：llmall-search-service（更新 ES 文档的 hotScore 字段，用于 function_score 综合排序，M6 接入）
- *
- * 这是"评价 → 门店热度 → 搜索排序"闭环的最后一跳：
- * 内容域改热度、门店域算热度、搜索域用热度排序，三个域通过事件解耦，互不直接调用。
+ * 生产者：llmall-shop-service（重算热度后投递）；
+ * 消费者：llmall-search-service（更新 ES 文档的 hotScore 字段，供 function_score 综合排序）。
  */
 @Data
 @Accessors(chain = true)
@@ -27,7 +24,6 @@ public class ShopHotChangedEvent implements Serializable {
 
     private Long typeId;
 
-    /** 最新热度分 */
     private Double hotScore;
 
     /** 评价数 */

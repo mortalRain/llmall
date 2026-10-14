@@ -16,13 +16,8 @@ import java.util.List;
 @Component
 public class ItemClientFallback implements FallbackFactory<ItemClient> {
     @Override
-    public ItemClient create(Throwable cause) { //形参cause为异常信息
+    public ItemClient create(Throwable cause) {
         return new ItemClient() {
-            /**
-             * 调用queryItemByIds出异常或限流会调用这个方法
-             * @param ids
-             * @return
-             */
             @Override
             public List<ItemDTO> queryItemByIds(Collection<Long> ids) {
                 log.error("远程调用ItemClient的queryItemByIds方法出现异常，参数：{}", ids, cause);
@@ -30,20 +25,12 @@ public class ItemClientFallback implements FallbackFactory<ItemClient> {
                 return CollUtils.emptyList();
             }
 
-            /**
-             * 调用deductStock出异常或限流会调用这个方法
-             * @param items
-             */
             @Override
             public void deductStock(List<OrderDetailDTO> items) {
                 // 库存扣减业务需要触发事务回滚，查询失败，抛出异常
                 throw new BizIllegalException(cause);
             }
 
-            /**
-             * 调用restoreStock出异常或限流会调用这个方法
-             * @param items
-             */
             @Override
             public void restoreStock(List<OrderDetailDTO> items) {
                 // 库存回滚同样必须让调用方感知（订单取消失败会导致库存永久少卖），不能静默降级
@@ -52,11 +39,8 @@ public class ItemClientFallback implements FallbackFactory<ItemClient> {
             }
 
             /**
-             * 调用isStockDeducted出异常或限流会调用这个方法。
-             *
-             * 必须抛异常，**不能返回 false**：false 的语义是"没扣过、不用补偿"，
-             * 而查询失败的真实语义是"不知道"。把未知当成已知，会让"少卖"被静默吞掉 ——
-             * 这恰恰是这个查询要解决的问题本身。
+             * 【注意】查询失败必须抛异常，不能返回 false：false 的语义是"没扣过、不用补偿"，
+             * 而查询失败的真实语义是"不知道"。把未知当成已知，会让"少卖"被静默吞掉。
              */
             @Override
             public boolean isStockDeducted(String bizId, String bizType) {

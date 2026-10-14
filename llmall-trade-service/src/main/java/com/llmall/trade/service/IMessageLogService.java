@@ -12,7 +12,7 @@ public interface IMessageLogService extends IService<MessageLog> {
 
     /**
      * 在当前事务内登记一条待投递消息。
-     * 必须与业务写操作处于同一事务（否则"业务成功但消息没落库"，就又回到丢消息的老问题）。
+     * 【注意】必须与业务写操作处于同一事务，否则"业务成功但消息没落库"，又回到丢消息的老问题。
      */
     void record(String bizType, String bizId, String exchange, String routingKey, Object payload);
 
@@ -29,8 +29,8 @@ public interface IMessageLogService extends IService<MessageLog> {
     int retryPending(int limit);
 
     /**
-     * 对账补偿：把指定业务消息重置为待发送并立即投递（用于"下游说我没收到"的场景）。
-     * 下游消费幂等，因此重复投递是安全的。
+     * 对账补偿：对指定业务的消息立即重新投递（用于"下游说我没收到"的场景）。
+     * 【注意】重复投递是安全的，前提是下游消费幂等。
      */
     boolean compensate(String bizType, String bizId);
 }

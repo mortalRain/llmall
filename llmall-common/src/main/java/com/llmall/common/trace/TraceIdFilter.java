@@ -10,16 +10,14 @@ import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 
 /**
- * 服务侧的 traceId 入口：把上游（网关或调用方服务）带来的 {@code X-Trace-Id}
- * 放进 MDC，供本次请求的所有日志使用；响应头回写同一个值。
+ * 请求级 traceId 入口：把上游（网关或调用方服务）传来的 {@code X-Trace-Id} 写进 MDC
+ * 供本次请求的全部日志使用，并把同一个值回写响应头；没有则自行生成。
  *
- * <p>【为什么是 Filter 而不是 Interceptor】Interceptor 只包住 Controller 的调用，
- * 而"请求进了哪个服务、被哪个过滤器挡下"这类日志发生在更早的阶段。
- * Filter 在整条 servlet 链之外，能覆盖包括鉴权/参数解析在内的全部日志。
+ * 【注意】上游传入的值必须通过 {@code TraceContext.normalize} 的白名单校验才采信：traceId 会进日志，
+ * 照抄外部值等于允许注入换行与伪日志行。
  *
- * <p>【为什么不用 OncePerRequestFilter】llmall-common 里 spring-web 是 provided 的传递依赖
- * （不进编译类路径，见 pom 里 jackson-databind 的同类坑），所以这里只依赖 servlet API。
- * Filter 只需保证 doFilter 里 MDC 成对 set/clear，不会重复创建 traceId（同一个 traceId 重复 set 也无副作用）。
+ * 用 Filter 而非 Interceptor 是为了覆盖 Controller 之前的鉴权、参数解析日志；本模块只依赖
+ * servlet API，故不继承 OncePerRequestFilter。
  */
 public class TraceIdFilter implements Filter {
 
@@ -40,7 +38,7 @@ public class TraceIdFilter implements Filter {
             }
             chain.doFilter(request, response);
         } finally {
-            // 线程池复用：不清理就会出现"下一个请求的日志里带着上一个请求的 traceId"（比没有还难查）
+            // 线程池复用：不清理会把 traceId 带到下一个请求上，造成串号
             TraceContext.clear();
         }
     }

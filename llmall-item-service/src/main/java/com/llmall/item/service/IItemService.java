@@ -9,14 +9,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
-/**
- * <p>
- * 商品表 服务类
- * </p>
- *
- * @author 同城生活
- * @since 2023-05-05
- */
+/** 商品（含门店套餐）的库存变更与商城查询。 */
 public interface IItemService extends IService<Item> {
 
     /** 批量扣减库存（带库存充足性校验与幂等流水） */
@@ -26,14 +19,12 @@ public interface IItemService extends IService<Item> {
     void restoreStock(List<OrderDetailDTO> items);
 
     /**
-     * 查询某个业务号是否已经扣减过库存（读的是库存流水，权威且与幂等键同源）。
+     * 查询某个业务号是否已扣减过库存（以库存流水为准，与幂等键同源）。
      *
-     * <p>供下单方在事务回滚后判断"要不要补库存"：扣库存是跨服务调用，
-     * "扣成功但回包丢失"会让下单方以为没扣、而库存其实少了 —— 只有库存服务自己能回答这个问题。
+     * 【注意】供下单方在事务回滚后判断是否要补库存："扣成功但回包丢失"只有库存服务自己答得上。
      */
     boolean isStockDeducted(String bizId, String bizType);
 
-    /** 查询门店下的套餐/商品 */
     List<ItemDTO> listByShopId(Long shopId);
 
     List<ItemDTO> queryItemByIds(Collection<Long> ids);

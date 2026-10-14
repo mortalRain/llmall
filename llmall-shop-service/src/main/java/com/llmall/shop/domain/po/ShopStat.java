@@ -28,10 +28,8 @@ public class ShopStat implements Serializable {
 
     private Long shopId;
 
-    /** 统计日期 */
     private LocalDate statDate;
 
-    /** 访问次数 */
     private Long pv;
 
     /** 访问人数（HyperLogLog 估算值） */

@@ -11,7 +11,7 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * 门店类型（来源：点评 tb_shop_type）。
+ * 门店类型（分类字典）。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
