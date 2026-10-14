@@ -3,6 +3,7 @@ package com.llmall.content.domain.po;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.llmall.common.mq.MessageLogSupport;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.experimental.Accessors;
@@ -17,24 +18,15 @@ import java.time.LocalDateTime;
  * 投递失败由 {@code MessageRetryTask} 按指数退避重发，失败原因/次数写回本表。
  *
  * 【注意】内容域不做对账，{@link #STATUS_DONE} 没有写入方，
- * 仅与门店域/交易域保持结构一致。
+ * 仅与门店域/交易域保持结构一致。状态字典见 {@link MessageLogSupport}。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
 @Accessors(chain = true)
 @TableName("message_log")
-public class MessageLog implements Serializable {
+public class MessageLog implements Serializable, MessageLogSupport {
 
     private static final long serialVersionUID = 1L;
-
-    /** 待发送 */
-    public static final int STATUS_PENDING = 0;
-    /** 已投递（已进入 MQ，但下游是否处理完还不知道） */
-    public static final int STATUS_SENT = 1;
-    /** 已完成（下游对账确认已处理）—— 本域无对账任务，暂无写入方 */
-    public static final int STATUS_DONE = 2;
-    /** 投递失败待重试（按 nextRetryTime 退避重发） */
-    public static final int STATUS_FAILED = 3;
 
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;

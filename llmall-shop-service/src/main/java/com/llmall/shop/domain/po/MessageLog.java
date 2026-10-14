@@ -3,6 +3,7 @@ package com.llmall.shop.domain.po;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.llmall.common.mq.MessageLogSupport;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.experimental.Accessors;
@@ -17,23 +18,15 @@ import java.time.LocalDateTime;
  * （{@code dispatchAfterCommit}），回滚了就不会发；投递失败不影响业务，由 {@code MessageRetryTask}
  * 按指数退避重发，下游消费幂等 + {@code ShopSearchReconcileTask} 定时对账，保证最终一致。
  * {@link #STATUS_DONE} 只在搜索域回复"已处理"后写入，使对账窗口不会无限重复检查同一批事件。
+ * 状态字典见 {@link MessageLogSupport}。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
 @Accessors(chain = true)
 @TableName("message_log")
-public class MessageLog implements Serializable {
+public class MessageLog implements Serializable, MessageLogSupport {
 
     private static final long serialVersionUID = 1L;
-
-    /** 待发送 */
-    public static final int STATUS_PENDING = 0;
-    /** 已投递（已进入 MQ，但下游是否处理完还不知道） */
-    public static final int STATUS_SENT = 1;
-    /** 已完成（下游对账确认已处理） */
-    public static final int STATUS_DONE = 2;
-    /** 投递失败待重试（按 nextRetryTime 退避重发） */
-    public static final int STATUS_FAILED = 3;
 
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;

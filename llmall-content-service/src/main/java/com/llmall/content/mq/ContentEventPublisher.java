@@ -2,7 +2,8 @@ package com.llmall.content.mq;
 
 import com.llmall.api.event.ReviewCreatedEvent;
 import com.llmall.common.constant.MqConstants;
-import com.llmall.content.service.IMessageLogService;
+import com.llmall.common.mq.IMessageLogService;
+import com.llmall.content.domain.po.MessageLog;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -22,7 +23,7 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class ContentEventPublisher {
 
-    private final IMessageLogService messageLogService;
+    private final IMessageLogService<MessageLog> messageLogService;
 
     /**
      * 发布"评价已产生"事件（路由键 review.created，事件体见 {@link ReviewCreatedEvent}）。

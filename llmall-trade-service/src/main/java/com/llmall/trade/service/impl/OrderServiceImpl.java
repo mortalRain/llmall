@@ -32,7 +32,8 @@ import com.llmall.trade.domain.vo.OrderVO;
 import com.llmall.trade.mapper.OrderMapper;
 import com.llmall.trade.mq.OrderEventFactory;
 import com.llmall.trade.service.IOrderDetailService;
-import com.llmall.trade.service.IMessageLogService;
+import com.llmall.common.mq.IMessageLogService;
+import com.llmall.trade.domain.po.MessageLog;
 import com.llmall.trade.service.IOrderService;
 import io.seata.spring.annotation.GlobalTransactional;
 import lombok.RequiredArgsConstructor;
@@ -69,7 +70,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private final ItemClient itemClient;
     private final IOrderDetailService detailService;
     private final RabbitTemplate rabbitTemplate;
-    private final IMessageLogService messageLogService;
+    private final IMessageLogService<MessageLog> messageLogService;
     private final OrderEventFactory orderEventFactory;
     private final VoucherClient voucherClient;
     private final UserClient userClient;

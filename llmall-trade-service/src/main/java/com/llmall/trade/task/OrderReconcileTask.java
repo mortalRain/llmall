@@ -4,7 +4,8 @@ import com.llmall.api.client.ShopClient;
 import com.llmall.api.client.UserClient;
 import com.llmall.common.constant.MqConstants;
 import com.llmall.trade.domain.po.Order;
-import com.llmall.trade.service.IMessageLogService;
+import com.llmall.common.mq.IMessageLogService;
+import com.llmall.trade.domain.po.MessageLog;
 import com.llmall.trade.service.IOrderService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -46,7 +47,7 @@ public class OrderReconcileTask {
     }
 
     private final IOrderService orderService;
-    private final IMessageLogService messageLogService;
+    private final IMessageLogService<MessageLog> messageLogService;
     private final UserClient userClient;
     private final ShopClient shopClient;
 

@@ -5,7 +5,7 @@ import com.llmall.shop.client.ConsumeStatusDTO;
 import com.llmall.shop.client.SearchClient;
 import com.llmall.shop.domain.po.MessageLog;
 import com.llmall.shop.domain.vo.HotReconcileResultVO;
-import com.llmall.shop.service.IMessageLogService;
+import com.llmall.common.mq.IMessageLogService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -47,7 +47,7 @@ public class ShopSearchReconcileTask {
         UNKNOWN
     }
 
-    private final IMessageLogService messageLogService;
+    private final IMessageLogService<MessageLog> messageLogService;
     private final SearchClient searchClient;
 
     private final AtomicInteger consecutiveUnknownRounds = new AtomicInteger(0);

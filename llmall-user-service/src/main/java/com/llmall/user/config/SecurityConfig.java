@@ -1,4 +1,6 @@
 package com.llmall.user.config;
+import com.llmall.common.security.JwtProperties;
+import com.llmall.common.security.JwtTool;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -26,5 +28,14 @@ public class SecurityConfig {
         return keyStoreKeyFactory.getKeyPair(
                 properties.getAlias(),
                 properties.getPassword().toCharArray());
+    }
+
+    /**
+     * JwtTool 的实现放在 llmall-common（网关与用户服务必须共用一份，避免签发/验签漂移）；
+     * common 不在组件扫描范围内，所以在这里以 Bean 暴露。
+     */
+    @Bean
+    public JwtTool jwtTool(KeyPair keyPair) {
+        return new JwtTool(keyPair);
     }
 }

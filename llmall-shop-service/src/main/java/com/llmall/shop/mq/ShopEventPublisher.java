@@ -2,7 +2,8 @@ package com.llmall.shop.mq;
 
 import com.llmall.common.constant.MqConstants;
 import com.llmall.shop.event.ShopDocChangedEvent;
-import com.llmall.shop.service.IMessageLogService;
+import com.llmall.common.mq.IMessageLogService;
+import com.llmall.shop.domain.po.MessageLog;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -20,7 +21,7 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class ShopEventPublisher {
 
-    private final IMessageLogService messageLogService;
+    private final IMessageLogService<MessageLog> messageLogService;
 
     /**
      * 发布"门店文档变更"事件（路由键 shop.hot.changed，事件体是整行门店快照）。
