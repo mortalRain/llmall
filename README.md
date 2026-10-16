@@ -263,6 +263,27 @@ pwsh -File gates\verify-all.ps1            # 七道闸门 + 13 模块编译；-S
 结论: 全绿
 ```
 
+### 一键运行（`demo.ps1`）
+
+`demo.ps1` 只**编排仓库里既有的材料**，不重造任何东西：`mvn package` + `deploy/Dockerfile` 构建单镜像 →
+`docker/docker-compose-infra-lite.yml` + `docker/docker-compose-addon.yml` 的 `elasticsearch` 起中间件 →
+按 `sql/merged/README.md` 的顺序建库灌数（**52 冻结不执行**，执行前先跑 `52a` 只读清点且要求 verdict = 0）→
+Nacos Open API 导入 `nacos-config/*.yaml` 与 `gateway-routes.json` → `gates/EsBulkLoad.java` + `es-shop-mapping.json` 灌 ES →
+`deploy/docker-compose-apps.yml --profile full` 起应用 → `scripts/MallE2E.java` 冒烟（结果写进 `logs/demo/demo-report-*.md`，
+含 `docker stats` 峰值内存）。
+
+三条命令：
+
+```powershell
+pwsh -File demo.ps1 -Reset     # 停容器 + 删卷 + 删网络（幂等）
+pwsh -File demo.ps1            # 全流程；冒烟全绿则退出码 0
+pwsh -File demo.ps1 -Down      # 收尾（加 -Volumes 连数据卷一起删）
+```
+
+前置：**Docker**（脚本会先跑 `-Preflight` 式检查，缺 docker 时退出码 2 并给出提示）、
+JDK 11 与 Maven（`-SkipBuild` 可复用已有镜像）。只有 Windows PowerShell 5.1 的机器同样可用。
+`--profile` 默认 `full` 而不是 `core`：冒烟链路要 trade/cart/pay/promotion/search，`core` 起不全必然红。
+
 ### 开发约定：注释规范
 
 - **规范正文**：`docs/注释规范.md` —— 八类注释（类 / 方法 / 行内 / 风险警示 / 配置 / Lua / SQL / TODO）的写法，以及各模块必须写清的口径（JWT 闭环、库存口径、三态语义、会话水位等）。
