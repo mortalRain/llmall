@@ -101,6 +101,16 @@ function Fail {
 # 容器运行时是硬前置：中间件和应用都跑在容器里。
 # 单独成函数是因为 -Reset / -Down 会在这条检查之前执行，必须先挡住，
 # 否则 `& docker` 会抛 CommandNotFoundException，报错信息还不如这句话清楚。
+function Get-DockerState {
+    # 返回 daemon 版本字符串；不可用返回 $null。
+    # 拆出这个"只判断、不退出"的版本，是为了让 -Preflight 能把所有问题一次报完，
+    # 而不是撞到第一个就退出（预检的价值就在于一次说清）。
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return $null }
+    $v = & docker version --format '{{.Server.Version}}' 2>&1
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return ($v -join ' ').Trim()
+}
+
 function Assert-Docker {
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Write-Host ''
@@ -109,13 +119,13 @@ function Assert-Docker {
         Write-Host '只想检查别的东西：pwsh -File gates\verify-all.ps1（闸门不依赖容器，clone 下来即可跑）。' -ForegroundColor Yellow
         exit 2
     }
-    $v = & docker version --format '{{.Server.Version}}' 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $v = Get-DockerState
+    if (-not $v) {
         Write-Host ''
         Write-Host 'docker 守护进程不可用（docker version 失败）—— Docker Desktop 可能没启动。' -ForegroundColor Red
         exit 2
     }
-    return ($v -join ' ').Trim()
+    return $v
 }
 
 # 跑一条 docker / docker compose 命令。默认非 0 退出即失败；-AllowFail 只告警。
@@ -194,8 +204,11 @@ function Wait-MySql {
 # 为什么这么做而不是让使用者自己准备 jar：fat jar 是我们刚刚构建出来的既有产物，
 # 里面的 BOOT-INF/lib 就是这套代码真实编译时用的那一组依赖版本。
 function Get-LibsFromFatJar {
-    param([string]$JarPath, [string[]]$Patterns, [string]$Dest)
-    if (-not (Test-Path $JarPath)) { Fail "找不到 $JarPath（需要先完成构建）" }
+    param([string]$JarPath, [string[]]$Patterns, [string]$Dest, [switch]$Optional)
+    if (-not (Test-Path $JarPath)) {
+        if ($Optional) { return @() }
+        Fail "找不到 $JarPath（需要先完成构建）"
+    }
     New-Item -ItemType Directory -Force -Path $Dest | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
@@ -216,7 +229,10 @@ function Get-LibsFromFatJar {
         }
     }
     finally { $zip.Dispose() }
-    if ($got.Count -eq 0) { Fail ("在 $JarPath 的 BOOT-INF/lib 里没找到：" + ($Patterns -join ', ')) }
+    if ($got.Count -eq 0) {
+        if ($Optional) { return @() }
+        Fail ("在 $JarPath 的 BOOT-INF/lib 里没找到：" + ($Patterns -join ', '))
+    }
     return $got
 }
 
@@ -268,20 +284,23 @@ Write-Info ("宿主   : PowerShell " + $PSVersionTable.PSVersion + " (" + $PSVer
 $mvn = Get-GateMaven
 Write-Info ("Maven  : " + $(if ($mvn) { $mvn } else { '未找到（-SkipBuild 时不需要）' }))
 
-$dockerVer = Assert-Docker
-Write-Info ("Docker : server " + $dockerVer)
-$dc = Invoke-Docker -Args @('compose', 'version', '--short') -Quiet
-if ($dc.Code -ne 0) { Fail 'docker compose 插件不可用' }
-Write-Info ("Compose: v" + ($dc.Output -join ' '))
+# -Preflight 的语义是"把所有问题一次报完"，所以这里不立刻 Fail 而是记账，
+# 跑完所有检查再统一给结论；真正跑流程时（不加 -Preflight）仍是撞到就停。
+$problems = New-Object System.Collections.ArrayList
+function Note-Problem {
+    param([string]$Text)
+    if ($Preflight) { [void]$script:problems.Add($Text); Write-Warn2 $Text; return }
+    Fail $Text
+}
 
 foreach ($f in @($InfraCompose, $AddonCompose, $AppsCompose)) {
-    if (-not (Test-Path $f)) { Fail "缺少 compose 文件：$f" }
+    if (-not (Test-Path $f)) { Note-Problem "缺少 compose 文件：$f" }
 }
 # deploy/docker-compose-infra-lite.yml 是废弃桩（services: {}），明确不用它
 if (Test-Path (Join-Path $RepoRoot 'deploy\docker-compose-infra-lite.yml')) {
     Write-Warn2 'deploy/docker-compose-infra-lite.yml 是废弃桩（services: {}），本脚本按文档用 docker/ 下的那份'
 }
-if (-not $SkipBuild -and -not $mvn) { Fail '需要 Maven 构建（或传 -SkipBuild 复用已有镜像）' }
+if (-not $SkipBuild -and -not $mvn) { Note-Problem '需要 Maven 构建（或传 -SkipBuild 复用已有镜像）' }
 
 if (-not $SkipEs -and -not $ExternalEs) {
     $ikDir = Join-Path $RepoRoot 'docker\es\plugins\ik'
@@ -291,11 +310,49 @@ if (-not $SkipEs -and -not $ExternalEs) {
         Write-Warn2 "若 ES 已在本机原生装着（例如 D:\develop\elasticsearch-7.17.10 且 plugins\ik 就位），改用 -ExternalEs 跳过容器版。"
     }
 }
+
+# 冒烟与灌数要用的依赖都从**已构建的 fat jar** 里取。这里先探一遍：
+# 构建跑过就当场验证抽取逻辑，没跑过就明确说"首次运行会由构建段产出"，不让人误以为缺件。
+# 放在 docker 检查之前 —— 这些是本机就能查清的事，先把本机问题报完再谈容器运行时。
+foreach ($probe in @(
+    @{ Jar = 'llmall-item-service\target\llmall-item-service.jar'; Libs = @('jackson-databind-*.jar', 'jackson-core-*.jar', 'jackson-annotations-*.jar'); Who = 'MallE2E' },
+    @{ Jar = 'llmall-search-service\target\llmall-search-service.jar'; Libs = @('mysql-connector*.jar'); Who = 'EsBulkLoad' }
+)) {
+    $jarPath = Join-Path $RepoRoot $probe.Jar
+    if (Test-Path $jarPath) {
+        $got = Get-LibsFromFatJar -JarPath $jarPath -Patterns $probe.Libs -Dest (Join-Path $WorkDir 'preflight-libs') -Optional
+        if ($got.Count -gt 0) { Write-Info ("依赖   : " + $probe.Who + " 需要的 " + ($got -join ', ') + " 已在 " + $probe.Jar + " 里") }
+        else { Note-Problem ($probe.Jar + " 的 BOOT-INF/lib 里没找到 " + ($probe.Libs -join '/') + "（" + $probe.Who + " 会失败）") }
+    }
+    else { Write-Info ("依赖   : " + $probe.Jar + " 尚未构建，" + $probe.Who + " 的依赖将由构建段产出") }
+}
+
+$dockerVer = Get-DockerState
+if ($dockerVer) {
+    Write-Info ("Docker : server " + $dockerVer)
+    $dc = Invoke-Docker -Args @('compose', 'version', '--short') -Quiet
+    if ($dc.Code -ne 0) { Note-Problem 'docker compose 插件不可用' }
+    else { Write-Info ("Compose: v" + ($dc.Output -join ' ')) }
+}
+else {
+    Note-Problem 'docker 不可用（找不到 docker，或守护进程没启动）'
+}
+
 if ($Preflight) {
     Write-Host ''
-    Write-Host '前置检查通过（-Preflight：未做任何变更）' -ForegroundColor Green
-    exit 0
+    if ($problems.Count -eq 0) {
+        Write-Host '前置检查通过（-Preflight：未做任何变更）' -ForegroundColor Green
+        exit 0
+    }
+    Write-Host ("前置检查发现 " + $problems.Count + " 项问题：") -ForegroundColor Red
+    $problems | ForEach-Object { Write-Host ("  - " + $_) -ForegroundColor Red }
+    Write-Host ''
+    Write-Host '修掉后重跑 -Preflight。闸门本身不依赖容器：pwsh -File gates\verify-all.ps1' -ForegroundColor Yellow
+    exit 2
 }
+
+# 真正跑流程：docker 是硬前置，缺了立刻停（这里才用会 exit 的 Assert-Docker）
+Assert-Docker | Out-Null
 
 # ---------------------------------------------------------------- 运行期状态（供 finally 使用）
 $statsJob = $null
