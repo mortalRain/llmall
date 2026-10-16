@@ -29,6 +29,8 @@ x-app: &app
   healthcheck:
     test: ["CMD-SHELL", "for p in 8080 8081 8082 8084 8085 8086 8087 8088 8089 8093; do wget -q -O- http://127.0.0.1:$$p/actuator/health 2>/dev/null | grep -q '\"status\":\"UP\"' && exit 0; done; exit 1"]
     interval: 30s
+    # 【取值依据】单次探针超时 15s，必须远小于 interval（30s），否则一次探针会跨到下一轮；
+    # 探针本体是 wget + grep，正常毫秒级返回，15s 是留给冷启动 JVM 首次响应 actuator 的余量。
     timeout: 15s
     retries: 5
     start_period: 90s
