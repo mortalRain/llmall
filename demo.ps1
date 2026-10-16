@@ -30,6 +30,10 @@
 #   2) 冒烟账号用的是 MallE2E 硬编码的演示账号 Jack/123456 —— "专属账号"这一条**未做到**。
 #      原因：MallE2E.java 没有 CLI 参数，改它属于"顺手重构代码"，是红线。
 #      替代做法：冒烟前后取"自增 id 水位线"，finally 里只删本次冒烟新建的行（见 -NoCleanup）。
+#
+# 【ES 的两种来源】默认起 addon 容器（docker/docker-compose-addon.yml 的 elasticsearch）。
+#   若 ES 已在本机原生装着（本机就有 D:\develop\elasticsearch-7.17.10，且 plugins\ik 已就位），
+#   用 -ExternalEs -EsUrl http://127.0.0.1:9200：脚本不会再起容器版，避免抢 9200 端口。
 # ============================================================================
 
 param(
@@ -45,6 +49,8 @@ param(
     [switch]$NoCleanup,             # 不清理冒烟新建的数据
     [switch]$Online,                # 允许 Maven 走网络（默认离线 -o）
     [switch]$WithDianpingMigration, # 额外执行 99-migrate-dianping-data.sql（需要外部库 dianping_src）
+    [switch]$ExternalEs,            # ES 已在别处跑着（宿主原生安装 / VM），不起 addon 容器
+    [string]$EsUrl = 'http://127.0.0.1:9200',
     [string]$Profile = 'full',      # core | full
     [int]$TimeoutMinutes = 30
 )
@@ -56,7 +62,6 @@ $ErrorActionPreference = 'Stop'
 $ImageTag   = 'local-life/llmall:1.0.0'                      # deploy/docker-compose-apps.yml 里硬编码的 tag
 $Network    = 'local-life'                                   # 三份 compose 都引用这个 external 网络
 $NacosUrl   = 'http://127.0.0.1:8848'
-$EsUrl      = 'http://127.0.0.1:9200'
 $GatewayUrl = 'http://127.0.0.1:8080'
 $DbUser     = 'root'
 $DbPw       = '123'                                          # docker/docker-compose-infra-lite.yml 的 MYSQL_ROOT_PASSWORD
@@ -277,11 +282,12 @@ if (Test-Path (Join-Path $RepoRoot 'deploy\docker-compose-infra-lite.yml')) {
 }
 if (-not $SkipBuild -and -not $mvn) { Fail '需要 Maven 构建（或传 -SkipBuild 复用已有镜像）' }
 
-if (-not $SkipEs) {
+if (-not $SkipEs -and -not $ExternalEs) {
     $ikDir = Join-Path $RepoRoot 'docker\es\plugins\ik'
     if (-not (Test-Path $ikDir)) {
         Write-Warn2 "缺少 IK 分词器目录 docker\es\plugins\ik —— ES 索引 mapping 用的是 ik_max_word/ik_smart，"
         Write-Warn2 "没有它索引建不起来。放法见 docker\M0-环境搭建说明.md（把 IK 解压到 docker\es\plugins，目录名必须是 ik）。"
+        Write-Warn2 "若 ES 已在本机原生装着（例如 D:\develop\elasticsearch-7.17.10 且 plugins\ik 就位），改用 -ExternalEs 跳过容器版。"
     }
 }
 if ($Preflight) {
@@ -324,13 +330,15 @@ try {
     Write-Step '中间件：infra-lite + ES addon'
     Invoke-Docker -Args @('network', 'create', $Network) -AllowFail -Quiet
     Invoke-Docker -Args @('compose', '-f', $InfraCompose, 'up', '-d') | Out-Null
-    # ES 只在 addon 里且不带 profile；infra-lite 的 ES 属于 profile full，不传 profile 就不会起，两者不冲突
-    Invoke-Docker -Args @('compose', '-f', $AddonCompose, 'up', '-d', 'elasticsearch') | Out-Null
+    # ES 只在 addon 里且不带 profile；infra-lite 的 ES 属于 profile full，不传 profile 就不会起，两者不冲突。
+    # -ExternalEs 时不动容器：ES 已在宿主原生装好（本机就是这种拓扑），起容器反而会抢 9200 端口。
+    if ($ExternalEs) { Write-Info "ES 用外部实例：$EsUrl（不起 addon 容器）" }
+    else { Invoke-Docker -Args @('compose', '-f', $AddonCompose, 'up', '-d', 'elasticsearch') | Out-Null }
 
     Wait-MySql
     Wait-Http -Url "$NacosUrl/nacos/v1/console/health/readiness" -Name 'Nacos' -Seconds 240
     if (-not $SkipEs) { Wait-Http -Url "$EsUrl/_cluster/health" -Name 'Elasticsearch' -Seconds 300 -Contains '"status"' }
-    Add-Summary '中间件：mysql / redis / nacos / mq / es 已起'
+    Add-Summary ("中间件：mysql / redis / nacos / mq 已起" + $(if ($ExternalEs) { "；ES 用外部实例 $EsUrl" } else { "；ES 用 addon 容器" }))
 
     # ------------------------------------------------------------ 3. 建库与灌数
     # 顺序照抄 sql/merged/README.md：两处刻意破数字序（23 在 30 之后；50/51 连跑两遍），
@@ -436,13 +444,29 @@ try {
         $mappingFile = Join-Path $RepoRoot 'gates\es-shop-mapping.json'
         if (-not (Test-Path $mappingFile)) { Fail "缺少 $mappingFile" }
         $mapping = [System.IO.File]::ReadAllText($mappingFile)
+        $indexUrl = "$EsUrl/shop_search"
+        $created = $false
         try {
-            Invoke-RestMethod -Method Put -Uri "$EsUrl/shop_search" -Body ([System.Text.Encoding]::UTF8.GetBytes($mapping)) -ContentType 'application/json' -TimeoutSec 30 | Out-Null
-            Write-Info '  已建索引 shop_search（带 mapping）'
+            Invoke-RestMethod -Method Put -Uri $indexUrl -Body ([System.Text.Encoding]::UTF8.GetBytes($mapping)) -ContentType 'application/json' -TimeoutSec 30 | Out-Null
+            $created = $true
+            Write-Info '  已按 es-shop-mapping.json 建索引 shop_search'
         }
         catch {
-            Write-Info '  索引可能已存在，继续（下面灌数会暴露真实问题）'
+            Write-Info '  索引已存在，跳过创建（下面会复核它的 mapping 是不是这一份）'
         }
+        # 复核而不是"建不上就放过"：_bulk 会自动建索引，一旦 mapping 建失败而 bulk 先跑，
+        # 就会留下一个动态映射的索引 —— 里面 name 是 standard 分词，检索结果会悄悄变差而没有任何报错。
+        $idx = $null
+        try { $idx = Invoke-RestMethod -Method Get -Uri $indexUrl -TimeoutSec 15 } catch { }
+        if (-not $idx) { Fail "索引 shop_search 不存在（PUT 失败且 _bulk 也没能建出来）" }
+        $analyzer = $idx.shop_search.mappings.properties.name.analyzer
+        if ($analyzer -ne 'ik_max_word') {
+            Fail ("shop_search 的 name.analyzer = '$analyzer'，不是 es-shop-mapping.json 里的 ik_max_word —— " +
+                  "说明索引是被 _bulk 动态建出来的或来自别的 mapping。先删掉该索引再重跑：" +
+                  "curl -X DELETE $indexUrl")
+        }
+        Write-Info ("  索引 mapping 复核通过（name.analyzer=" + $analyzer + "，本次" + $(if ($created) { '新建' } else { '复用' }) + "）")
+
         $libDir = Join-Path $WorkDir 'libs-es'
         Get-LibsFromFatJar -JarPath (Join-Path $RepoRoot 'llmall-search-service\target\llmall-search-service.jar') `
             -Patterns @('mysql-connector*.jar') -Dest $libDir | Out-Null
@@ -452,6 +476,7 @@ try {
             '127.0.0.1' $DbUser $DbPw $DbName $EsUrl 'shop_search' 2>&1
         $bulkOut | ForEach-Object { Write-Info ('  ' + $_) }
         if ($LASTEXITCODE -ne 0) { Fail 'EsBulkLoad 失败' }
+        if (($bulkOut | Out-String) -match 'errors"\s*:\s*true') { Fail 'EsBulkLoad 的 _bulk 响应里 errors=true' }
         $cnt = Invoke-RestMethod -Method Get -Uri "$EsUrl/shop_search/_count" -TimeoutSec 15
         Add-Summary ("ES：shop_search 文档数 " + $cnt.count)
     }

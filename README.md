@@ -283,6 +283,8 @@ pwsh -File demo.ps1 -Down      # 收尾（加 -Volumes 连数据卷一起删）
 前置：**Docker**（脚本会先跑 `-Preflight` 式检查，缺 docker 时退出码 2 并给出提示）、
 JDK 11 与 Maven（`-SkipBuild` 可复用已有镜像）。只有 Windows PowerShell 5.1 的机器同样可用。
 `--profile` 默认 `full` 而不是 `core`：冒烟链路要 trade/cart/pay/promotion/search，`core` 起不全必然红。
+ES 默认起 addon 容器；若 ES 已在本机原生安装（含 IK 插件），用 `-ExternalEs -EsUrl http://127.0.0.1:9200`
+让脚本复用外部实例、不抢 9200 端口。
 
 ### 开发约定：注释规范
 

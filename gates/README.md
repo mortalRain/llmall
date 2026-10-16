@@ -249,6 +249,30 @@ gates/
 `tools/run-obs-demo.ps1` 仍是例外：它走 Spring 上下文，classpath 是整个 `BOOT-INF/lib`（近百 MB），
 无法入库，因此它需要先跑过一次构建（`verify-all.ps1` 的 BUILD 段）。它不在 `verify-all` 的闸门链上。
 
+### ES 灌数的两个资产（已在本机真实 ES 上验过）
+
+`demo.ps1` 的"灌 ES"用的是 `EsBulkLoad.java` + `es-shop-mapping.json` 这两个随闸门一起迁入的资产。
+它们的可用性在 ES 7.17.10（单机、IK 7.17.10 已装）上逐条验过：
+
+| 验证项 | 做法 | 结果 |
+|---|---|---|
+| mapping 可被 ES 接受 | `PUT /shop_search_demo_probe`，body 用 `es-shop-mapping.json` | `acknowledged: true` |
+| 灌数链路连通 | `EsBulkLoad` 从 `llmall-search.shop_search_doc` 读 30 行 → `_bulk` | HTTP 200、`errors:false`、`RESULT: OK (30 docs)` |
+| IK 分词生效 | `match` 查 `name="餐厅"` / `area="拱宸桥"` | 分别命中 2 / 3 条，带相关性打分 |
+| geo_point 生效 | `geo_distance` 5km（杭州 30.32,120.15） | 命中 22 条 |
+
+**迁入时修掉的一个缺陷**：原 `es-shop-mapping.json` 在 `mappings.properties` 里塞了一个 `"//"` 伪注释键。
+JSON 没有注释语法，ES 会直接拒绝整份 mapping：
+
+```
+mapper_parsing_exception: Expected map for property [fields] on field [//] but got a class java.lang.String
+```
+
+即**这份 mapping 拿去建索引必然 400**，而它此前从未被真正 PUT 过（现网 `shop_search` 的属性清单里没有 `//`，
+说明索引是别的途径建的）。已删掉该键，把它的说明搬到了本文件：
+`eventTimestamp` 统一用 epoch millis 存（无时区/格式歧义；spring-data-elasticsearch 4.4 的
+`LocalDateTime` 转换会截断成 `yyyy-MM-dd`）。**给 JSON 加注释要加在文档里，不能加在 JSON 里。**
+
 ---
 
 ## 八、基线更新流程（**改基线必须附 diff + 理由**）
@@ -296,9 +320,10 @@ pwsh -File gates\gate.ps1 -Snapshot
   （禁止把 `<h3>核心职责</h3>` 这类 HTML 当注释写），而闸门工具自身的 JavaDoc 用 `<p>/<ul>/<li>/<pre>`
   是标准 JavaDoc 写法。排除前后本闸门扫到的**项目文件数一致（323 个）**，项目侧覆盖未被缩小。
   需要单独校验 `gates/` 下某个文件时用 `-Path` 显式指定，`-Path` 模式不受此排除影响。
-- **`gates/baseline/*.round2.txt` 的覆盖缺口（已知且未处理）**：`sql/merged/52a`、`60`、`61`、`62`
-  四个脚本是新增文件，尚未纳入 `any.round2.txt`；`any.round2.txt` 是"按清单校验"而不是"按目录校验"，
-  未列出的文件不会被拦。这是本轮刻意不动基线的结果（只提交现状），补录属于下一轮。
+- **`any.round2.txt` 是「按清单校验」而不是「按目录校验」**：第 3 道闸门只校验清单里列出的文件，
+  清单外的新文件不会被拦。核对过当前清单（40 条）已包含 `sql/merged/52a`、`60`、`61`、`62`
+  四个脚本，即本轮新增的 SQL 全部在覆盖范围内；但**以后新增非 Java/YAML 文件后要记得
+  `gate.ps1 -Snapshot` 补录**，否则那个文件就是闸门的盲区。
 
 ---
 
