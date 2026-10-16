@@ -147,9 +147,12 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
             return;
         }
         if (followers > FEED_PUSH_THRESHOLD) {
-            // 写扩散成本与粉丝数成正比（大 V 一次发布要写几十万行），改为粉丝读 Feed 时拉取合并
-            log.info("作者 {} 的粉丝数 {} 超过写扩散阈值 {}，跳过推送",
-                    authorId, followers, FEED_PUSH_THRESHOLD);
+            // 写扩散成本与粉丝数成正比（大 V 一次发布要写几十万行），超阈值直接跳过推送；
+            // 读路径 queryFeed 只查收件箱、没有"读时拉取合并"分支，因此这些粉丝的 Feed 里不会出现本条笔记
+            // 【可观测性·2026-10-15】从 INFO 升级为 WARN：这是用户可见的功能缺口（笔记对粉丝不可见），
+            // 静默 INFO 会让它淹没在日志里；升级后可按关键字告警与统计。只加信号，不补拉取功能。
+            log.warn("[Feed] 写扩散被阈值跳过，本条笔记不会出现在粉丝 Feed 里: author={}, blogId={}, followers={}, threshold={}",
+                    authorId, blogId, followers, FEED_PUSH_THRESHOLD);
             return;
         }
         int pushed = 0;

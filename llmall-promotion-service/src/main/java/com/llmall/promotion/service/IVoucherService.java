@@ -20,10 +20,10 @@ public interface IVoucherService extends IService<Voucher> {
     /** 券详情 */
     VoucherVO getVoucherDetail(Long voucherId);
 
-    /** 领取普通券，返回 user_voucher.id */
+    /** 领取普通券，返回 user_voucher.id；免费券入口，付费券必须用 receive(Long, String) 提交支付密码 */
     Long receive(Long voucherId);
 
-    /** 秒杀抢券：返回秒杀凭证 token（落库异步完成） */
+    /** 秒杀抢券：返回秒杀凭证 token（落库异步完成）；免费券入口，付费券必须用 seckill(Long, String) 提交支付密码 */
     String seckill(Long voucherId);
 
     /**
@@ -38,7 +38,8 @@ public interface IVoucherService extends IService<Voucher> {
     /**
      * 秒杀抢券（付费券需校验支付密码）：返回秒杀凭证 token。
      *
-     * 顺序固定为"先收款 → 再抢名额"；抢名额失败（已抢完/已持有/系统繁忙）立即退款并回补名额。
+     * 顺序固定为"先收款 → 再抢名额"；抢名额失败（已抢完/已持有/系统繁忙）立即退款（此时名额尚未扣减）；
+     * 只有预扣成功但异步消息投递失败才回补 Redis 名额并退款。
      *
      * @param pw 支付密码：仅当券的 payValue &gt; 0 时必填，免费券传 null 即可
      */
@@ -91,6 +92,17 @@ public interface IVoucherService extends IService<Voucher> {
     /** 标记秒杀失败（写 Redis 结果标记 + 失败原因） */
     void markSeckillFailed(String token, Long voucherId, String message);
 
-    /** 回补 Redis 预扣（库存 +1、已购集合移除该用户），用于落库彻底失败时保持 Redis 与 DB 一致 */
+    /** 回补 Redis 预扣（库存 +1、已发放 -1、已购集合移除该用户），用于落库彻底失败时保持 Redis 与 DB 一致 */
     void compensateSeckillDeduction(Long voucherId, Long userId);
+
+    /**
+     * 预热秒杀库存缓存：按 DB 权威数据重建 Redis 的「库存 + 已发放」两键。
+     *
+     * 契约：幂等 —— 判据是库存键是否存在，存在即两键齐全（二者同生共死），此时为纯读、不写任何 key；
+     * 因此可在每次抢购入口安全调用。库存的"引导"与"扣减"为什么分成两条路径，见实现类
+     * VoucherServiceImpl#warmUpSeckillStock 与 BOOTSTRAP_SCRIPT 的注释。
+     *
+     * @return true 表示本次确实发生了引导（调用方可据此打点/告警"Redis 曾丢数据"）
+     */
+    boolean warmUpSeckillStock(Long voucherId);
 }

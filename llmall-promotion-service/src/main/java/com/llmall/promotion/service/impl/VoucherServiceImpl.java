@@ -12,10 +12,12 @@ import com.llmall.api.client.TradeClient;
 import com.llmall.api.client.UserClient;
 import com.llmall.api.dto.MoneyDeductDTO;
 import com.llmall.api.dto.TradeOrderDTO;
+import com.llmall.common.constant.IdempotentKeys;
 import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.exception.UnauthorizedException;
+import com.llmall.common.trace.BizTrace;
 import com.llmall.common.utils.CollUtils;
 import com.llmall.common.utils.UserContext;
 import com.llmall.promotion.config.RabbitConfig;
@@ -58,8 +60,17 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 券服务实现：普通领券 + 秒杀抢券 + 券核销/退回。
- * 并发正确性靠三道闸（Redis 已购集合 → user_voucher 唯一键 → consume_record 幂等）；库存以 DB 为最终账本，Redis 只做秒杀预扣。
+ * 券业务的唯一实现：普通领券与付费券收款、秒杀抢券（Lua 原子预扣 + MQ 异步落库）、我的券查询与核销/退回。
+ *
+ * 【核心职责】
+ * 1. 普通领券：DB 条件扣减库存后插 user_voucher，付费券先收款，发券失败显式退款；
+ * 2. 秒杀抢券：库存引导 → 付费券收款 → Lua 原子预扣 → 投递 MQ 异步落库，返回 token 供客户端轮询；
+ * 3. 券的核销（1 → 2）与退回（2 → 1）：只接受订单链路调用，orderId 必传并回查交易订单。
+ *
+ * 【设计意图】并发正确性靠三道闸：Redis 已购集合（挡并发洪峰）→ user_voucher 唯一键（一人一张）→ consume_record 幂等（消息级去重）；
+ * 库存以 DB 为最终账本，Redis 只做秒杀预扣。库存的「引导」与「扣减」是两条独立路径，见 warmUpSeckillStock 与 executeSeckillScript 的注释。
+ *
+ * 【注意】秒杀券的库存口径是「总名额」而不是「剩余量」，Java 侧算错会让剩余库存永久少卖且无法自愈，见 totalSeckillStock 的注释。
  */
 @Slf4j
 @Service
@@ -87,6 +98,30 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     /** Lua 脚本返回值：该用户已抢购过 */
     private static final long LUA_DUPLICATE = 2L;
 
+    /** 四段式埋点的业务类型标识（见 llmall-common 的 BizTrace） */
+    private static final String BIZ_TYPE_SECKILL = "SECKILL";
+
+    /**
+     * 本类用到的幂等键：键形态统一由 {@link IdempotentKeys} 提供，本类只传入业务参数。
+     *
+     * 【键与口径】
+     * 1. {@code IdempotentKeys.voucherBuy(券id, 用户id)} —— 领券收款键，确定性的"一人一张券"口径，重复点击不重复扣款；
+     * 2. {@code IdempotentKeys.voucherRefund(券id, 用户id, 尝试uuid)} —— 领券退款键，按次唯一，
+     *    避免"败者的退款把胜者已成功的扣款退走"（资损）；
+     * 3. 秒杀的两个键 IdempotentKeys.voucherSeckillPay(token) 与 IdempotentKeys.seckillRefund(token)，按 token 口径。
+     *
+     * 【为什么领券与秒杀的键必须拆开】两者的口径与失败语义都不同：
+     * 领券是同步事务，收款与发券在同一次请求内完成，"一人一张"由 user_voucher 的 uk_user_voucher 唯一键裁决，键只要标识"谁买哪张券"；
+     * 秒杀则是"预扣在前、落库异步在后"，中间隔着 MQ 与补偿，必须用一个贯穿全链路的凭证（token）标识"这一次尝试"，
+     * 因此收款键与退款键都按 token 构造，且落库失败退款与请求路径的失败补偿共用 SECKILL_REFUND:<token>（见 refundSeckillPurchase）。
+     *
+     * 【唯一性分别由谁保证】用户维度（一人一张）由 uk_user_voucher 保证；
+     * 消息维度（同一条消息只处理一次）由 consume_record 的 uk_consume(biz_type, biz_id, consumer) 保证；
+     * 券维度（名额不超发）由 Redis 预扣与 seckill_voucher.stock 的条件扣减共同保证。
+     *
+     * 【为什么键形态集中到 llmall-common】散落在各服务时，改一处漏一处会让对账静默查不到；集中后键只在一个地方定义与评审。
+     */
+
     /**
      * 回补预扣的脚本：库存 +1、已发放 -1、按需把用户放回已购集合，三者一次原子完成。
      *
@@ -112,24 +147,38 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     /**
      * 秒杀缓存的引导脚本：只负责建立库存键与已发放键，不碰已购集合、不消耗名额。
      *
-     * 【注意】不能复用 seckill.lua 引导：它在引导后会继续执行正常抢购流程，
-     * 给探针 userId 扣掉一个库存并把它 SADD 进已购集合，等于每次预热白送一张券，
-     * 且集合里会留下没有券行对应的幽灵成员。本脚本"键不存在才建立"的判断条件
-     * 与 seckill.lua 的引导分支一致（同一套防超卖夹取），谁先执行结果都相同。
+     * 【为什么不能用 seckill.lua 代做引导】它在引导之后会继续执行正常抢购流程：
+     * 用传入的 userId 扣掉一个库存并把它写进已购集合，等于每次预热都白送一张券，
+     * 且集合里会留下没有券行对应的幽灵成员。本脚本与 seckill.lua 的引导分支是同一套夹取规则，谁先执行结果都相同。
      *
-     * KEYS[1]=库存键，KEYS[2]=已发放键；ARGV[1]=安全的引导库存，ARGV[2]=TTL 秒数。
-     * 返回 1 表示这次真的做了引导，0 表示键已存在、空操作。
+     * 【参数口径】
+     * KEYS[1]=库存键 seckill:stock:{voucherId}（值为剩余可抢数），KEYS[2]=已发放键 seckill:issued:{voucherId}；
+     * ARGV[1]=该券总名额 T（不是剩余量），由 totalSeckillStock 算出 = DB 剩余量 + DB 已发放行数；
+     * ARGV[2]=TTL 秒数；ARGV[3]=已知已放出数量（DB 已发放行数，作为 Redis 丢数据时的保守下限）。
+     *
+     * 【误传后果】ARGV[1] 传成「剩余量」会让库存被二次扣减后夹到 0：DB 里还剩的券全部不可售，
+     * 且重新预热走的是同一个 totalSeckillStock，永远无法自愈。
+     *
+     * 【返回】1=本次确实做了引导（库存键原本不存在）；0=库存键已在，整体空操作，不写任何 key。
+     *
+     * 【多副本同步】本脚本与 src/main/resources/lua/seckill.lua 的引导分支是同一套夹取规则的两个副本，改一处必须同步另一处。
      */
     private static final DefaultRedisScript<Long> BOOTSTRAP_SCRIPT = new DefaultRedisScript<>(
             "if redis.call('exists', KEYS[1]) == 1 then return 0 end "
-                    + "local initStock = tonumber(ARGV[1]) "
-                    + "if not initStock or initStock < 0 then initStock = 0 end "
-                    + "local issued = tonumber(redis.call('get', KEYS[2])) or 0 "
-                    + "if issued < 0 then issued = 0 end "
-                    + "local bootstrapStock = initStock - issued "
+                    + "local total = tonumber(ARGV[1]) "
+                    + "if not total or total < 0 then total = 0 end "
+                    + "local knownIssued = tonumber(ARGV[3]) or 0 "
+                    + "if knownIssued < 0 then knownIssued = 0 end "
+                    + "local redisIssued = tonumber(redis.call('get', KEYS[2])) or 0 "
+                    + "if redisIssued < 0 then redisIssued = 0 end "
+                    // 取两者较大值：Redis 认识的已发放可能比 DB 更多（存在尚未落库的在途预扣），
+                    // 取大值即把在途预扣也算作"已放出"，宁可少卖也不超卖
+                    + "local issued = redisIssued "
+                    + "if knownIssued > issued then issued = knownIssued end "
+                    + "local bootstrapStock = total - issued "
                     + "if bootstrapStock < 0 then bootstrapStock = 0 end "
                     + "redis.call('set', KEYS[1], bootstrapStock) "
-                    + "redis.call('set', KEYS[2], initStock - bootstrapStock) "
+                    + "redis.call('set', KEYS[2], issued) "
                     + "redis.call('expire', KEYS[1], ARGV[2]) "
                     + "redis.call('expire', KEYS[2], ARGV[2]) "
                     + "return 1",
@@ -306,9 +355,14 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         }
 
         // 先收款：免费券 pay_value=0 在此直接跳过
-        //    幂等键按"一人一张券"取 —— uk_user_voucher 已保证一个用户对一张券只能买一次，
-        //    于是同一业务号的重复到达（重复点击、网络重试）不会重复扣款
-        String purchaseBizNo = "VOUCHER-" + voucherId + "-" + userId;
+        //    扣款幂等键按"一人一张券"取（确定性）—— 重复点击/网络重发不会重复扣款。
+        //    【注意】退款幂等键必须与扣款键不同：两者若共用一个键，并发的第二个请求会因为
+        //    "扣款被下游幂等跳过（但仍返回成功）"而误判为自己付过钱，它的失败补偿就会用同一个键
+        //    把第一个请求已经成功的扣款退回去 → 用户白拿付费券（纯资损）。
+        //    故退款键按"本次尝试"生成，与扣款键一一对应但互不覆盖。
+        //    键形态统一由 IdempotentKeys 构造（见本类幂等键注释），本类只传入业务参数
+        String purchaseBizNo = IdempotentKeys.voucherBuy(voucherId, userId);
+        String refundBizNo = IdempotentKeys.voucherRefund(voucherId, userId, IdUtil.fastSimpleUUID());
         boolean paid = chargeVoucherPurchase(voucher, userId, pw, purchaseBizNo);
 
         try {
@@ -340,8 +394,9 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             return userVoucher.getId();
         } catch (RuntimeException e) {
             // 失败补偿：券已被事务回滚，已收的券款必须原路退回
-            //    退款幂等键与扣款一一对应（VOUCHER_REFUND-...），重复补偿只退一次
-            refundPurchaseQuietly(paid, voucher, userId, "领券失败补偿", "VOUCHER_REFUND-" + voucherId + "-" + userId);
+            //    退款键按本次尝试唯一，重复补偿（快路径 + 事务收尾）仍只退一次，
+            //    但绝不会覆盖/抵消另一次尝试的扣款
+            refundPurchaseQuietly(paid, voucher, userId, "领券失败补偿", refundBizNo);
             throw e;
         }
     }
@@ -356,7 +411,18 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     /**
      * 秒杀抢券：先收款，再 Lua 原子预扣名额，最后投递 MQ 异步落库；返回 token 供客户端轮询。
      *
-     * 【注意】付费券先收款再占名额，热路径因此多一次同步扣款；预扣成功之后的每一步失败都必须退款并回补名额。
+     * 【流程】时段校验 → 库存引导 → 已购集合预热 → 付费券收款 → 写 PENDING 结果标记 → Lua 原子预扣 → 投递 MQ。
+     * 除落库外全部同步完成，最终发券结果由 MQ 消费端异步写进结果标记。
+     *
+     * 【异常】BadRequestException：付费券未提交支付密码。
+     * BizIllegalException：券不存在、已下架、不是秒杀券、未到秒杀时段、券款扣款失败，
+     * 以及 Lua 预扣失败的三类分流 —— 库存不足（返回码 1）、该用户已抢购过（返回码 2）、
+     * 系统繁忙（Redis 异常返回 null 或返回未知码）。
+     * 三类预扣失败都会先写 FAILED 结果标记、退回已收的券款再抛异常；此时名额并未被扣减，故无需回补
+     * （唯一的例外是预扣成功但 MQ 投递失败，那条路径会回补 Redis 名额）。
+     *
+     * 【风险】付费券先收款再占名额，热路径因此多一次同步扣款；预扣成功之后的每一步失败都必须退款并回补名额。
+     * token 只在成功时返回，调用方重试即一次全新的抢购（新 token、新幂等键），与本次失败互不抵消。
      */
     @Override
     public String seckill(Long voucherId, String pw) {
@@ -381,41 +447,55 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             throw new BizIllegalException("秒杀已结束");
         }
 
-        // 缓存预热：Redis 丢数据后库存键与已购集合都要重建 —— 只恢复库存会让抢过的用户重新通过第一道闸
+        // 阶段一【库存引导】：只负责确保 Redis 里有权威库存（键已存在则是纯读，无写入）。
+        // 与阶段二的扣减彻底分离：库存的初始化只发生在这里，抢购脚本只做"判断 + 扣减"。
+        // 抢购脚本内仍保留同规则的兜底引导分支，用于兜住"本次引导之后、扣减之前"键刚好过期的极小窗口。
+        warmUpSeckillStock(voucherId);
+        // 阶段一补充【已购集合预热】：一人一单第一道闸，与库存是两套独立语义
         warmUpSeckillCache(voucherId, config);
 
         // 先收款：钱不到位就不去占稀缺名额 —— 扣款是最易失败的跨服务动作，放到 Lua 之后要靠补偿还名额
         //    token 在收款之前生成：它既是抢购凭证，也是这一次收款的幂等键（同一 token 重复到达不会重复扣款）
         String token = IdUtil.fastSimpleUUID();
-        String purchaseBizNo = "VOUCHER-SECKILL-" + token;
-        //    退款幂等键也用 token：与 MQ 消费端落库失败后的退款（refundSeckillPurchase）是同一个键，
-        //    避免"投递已成功但响应丢失"时两边各退一次造成双倍退款
-        String refundBizNo = "SECKILL_REFUND:" + token;
+        // 四段式埋点第 1 段【入口】：用 token 作为 bizId（它同时是抢购凭证与幂等键，天然可串联全链路）
+        long traceStart = BizTrace.enter(BIZ_TYPE_SECKILL, token, "voucherId=" + voucherId + " userId=" + userId);
+        // 幂等键统一由 IdempotentKeys 构造：收款键与退款键必须是两个不同的值（共用会让失败补偿把他人扣款退走）
+        String purchaseBizNo = IdempotentKeys.voucherSeckillPay(token);
+        String refundBizNo = IdempotentKeys.seckillRefund(token);
+        BizTrace.idempotent(BIZ_TYPE_SECKILL, token, purchaseBizNo, "秒杀收款键（token 维度确定）");
         boolean paid = chargeVoucherPurchase(voucher, userId, pw, purchaseBizNo);
 
         // 先写 PENDING 结果标记、再投递消息：顺序反了，消费者的 SUCCESS 会被随后的 PENDING 盖掉
         writeSeckillResult(SeckillResultVO.pending(token, voucherId, "抢购请求已受理，正在生成券"));
 
-        // Lua 原子预扣：库存判断 + 一人一单 + 扣减 + 记名一次完成，失败按返回码分流并退款
+        // 阶段二【库存扣减】：Lua 原子预扣（库存判断 + 一人一单 + 扣减 + 记名一次完成），失败按返回码分流并退款
         Long code = executeSeckillScript(voucherId, config, userId);
         if (code == null) {
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "系统繁忙，抢购失败"));
             refundPurchaseQuietly(paid, voucher, userId, "秒杀预扣失败补偿", refundBizNo);
+            BizTrace.result(BIZ_TYPE_SECKILL, token, false, "Lua 执行异常（Redis 不可用）");
+            BizTrace.cost(BIZ_TYPE_SECKILL, token, traceStart);
             throw new BizIllegalException("系统繁忙，请稍后重试");
         }
         if (code == LUA_DUPLICATE) {
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "您已抢购过该券"));
             refundPurchaseQuietly(paid, voucher, userId, "秒杀重复抢购补偿", refundBizNo);
+            BizTrace.result(BIZ_TYPE_SECKILL, token, false, "一人一单闸门命中（已抢购过）");
+            BizTrace.cost(BIZ_TYPE_SECKILL, token, traceStart);
             throw new BizIllegalException("您已抢购过该券，请勿重复抢购");
         }
         if (code == LUA_SOLD_OUT) {
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "该券已抢完"));
             refundPurchaseQuietly(paid, voucher, userId, "秒杀已抢完补偿", refundBizNo);
+            BizTrace.result(BIZ_TYPE_SECKILL, token, false, "库存不足（Redis 剩余为 0）");
+            BizTrace.cost(BIZ_TYPE_SECKILL, token, traceStart);
             throw new BizIllegalException("手慢了，该券已被抢完");
         }
         if (code != LUA_SUCCESS) {
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "抢购失败"));
             refundPurchaseQuietly(paid, voucher, userId, "秒杀预扣失败补偿", refundBizNo);
+            BizTrace.result(BIZ_TYPE_SECKILL, token, false, "Lua 返回未知码=" + code);
+            BizTrace.cost(BIZ_TYPE_SECKILL, token, traceStart);
             throw new BizIllegalException("抢购失败，请稍后重试");
         }
 
@@ -429,11 +509,16 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             compensateSeckillDeduction(voucherId, userId);
             refundPurchaseQuietly(paid, voucher, userId, "秒杀消息投递失败补偿", refundBizNo);
             writeSeckillResult(SeckillResultVO.failed(token, voucherId, "系统繁忙，抢购失败，请稍后重试"));
+            BizTrace.result(BIZ_TYPE_SECKILL, token, false, "MQ 投递失败，已回补名额并退款");
+            BizTrace.cost(BIZ_TYPE_SECKILL, token, traceStart);
             throw new BizIllegalException("系统繁忙，抢购失败，请稍后重试");
         }
 
         log.info("秒杀预扣成功并已投递异步落库: userId={}, voucherId={}, token={}, 售价={}分",
                 userId, voucherId, token, payValueOf(voucher));
+        // 埋点第 3/4 段：此处"成功"指预扣与投递成功，最终发券结果由 MQ 消费端异步决定
+        BizTrace.result(BIZ_TYPE_SECKILL, token, true, "预扣成功并已投递异步落库");
+        BizTrace.cost(BIZ_TYPE_SECKILL, token, traceStart);
         return token;
     }
 
@@ -461,7 +546,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             return false;
         }
         // 幂等键必须与秒杀收款路径用的退款键一致（SECKILL_REFUND:<token>），否则两条路径各退一次 → 双倍退款
-        userClient.refundMoney(userId, (int) payValue, "SECKILL_REFUND:" + token);
+        userClient.refundMoney(userId, (int) payValue, IdempotentKeys.seckillRefund(token));
         log.warn("{}：秒杀购券款已退回: token={}, userId={}, voucherId={}, amount={}分",
                 scene, token, userId, voucherId, payValue);
         return true;
@@ -733,7 +818,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     /**
      * 付费券收款：pay_value = 0 的免费券直接返回 false；付费券走 llmall-user-service 带支付密码校验的扣款接口，不新增内部免密通道。
      *
-     * @param bizNo 幂等键（调用方给出，须唯一标识"这一次购买"）：普通领券用 {@code VOUCHER-<券id>-<用户id>}，
+     * @param bizNo 幂等键（调用方给出，须唯一标识"这一次购买"）：普通领券用 {@code VOUCHER_BUY_<券id>_<用户id>}，
      *              秒杀用 {@code VOUCHER-SECKILL-<token>}；下游按它落资金流水并去重，重复到达不重复扣款。
      */
     private boolean chargeVoucherPurchase(Voucher voucher, Long userId, String pw, String bizNo) {
@@ -808,16 +893,32 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         return userId;
     }
 
-    /** 执行秒杀 Lua 脚本，返回脚本的返回码；Redis 异常返回 null（调用方按"系统繁忙"处理） */
+    /**
+     * 执行秒杀抢购 Lua 脚本（src/main/resources/lua/seckill.lua），把返回码原样交给调用方分流。
+     *
+     * 【返回】0=预扣成功（已扣库存、已记名、已发放+1）；1=库存不足；2=该用户已抢购过；
+     * null=Redis 异常或脚本执行失败，调用方一律按"系统繁忙"处理（本次抢购直接失败，绝不放行未确认的预扣）。
+     *
+     * 【入参口径】ARGV[1]=userId，ARGV[2]=该券总名额（不是剩余量），ARGV[3]=缓存 TTL 秒数，ARGV[4]=DB 已发放行数。
+     * 脚本内部用 {@code 总名额 - 已发放} 反推剩余库存（该值只在"库存键不存在"的兜底分支被读取）。
+     *
+     * 【误传后果】ARGV[2] 传成「剩余量」会让脚本二次扣减并把库存夹到 0：DB 里还剩的券全部不可售且永不恢复，
+     * 重新预热走的是同一个 totalSeckillStock，仍然是错的 —— 不可自愈。
+     *
+     * 【多副本同步】脚本里的引导夹取规则与 BOOTSTRAP_SCRIPT 是同一套规则的两个副本，改一处必须同步另一处。
+     */
     private Long executeSeckillScript(Long voucherId, SeckillVoucher config, Long userId) {
         try {
+            long total = totalSeckillStock(voucherId, config);
+            Long heldRows = userVoucherMapper.selectCount(Wrappers.<UserVoucher>lambdaQuery()
+                    .eq(UserVoucher::getVoucherId, voucherId));
+            long knownIssued = heldRows == null ? 0L : heldRows;
             return redisTemplate.execute(seckillScript,
                     Arrays.asList(stockKey(voucherId), orderedKey(voucherId), issuedKey(voucherId)),
                     String.valueOf(userId),
-                    // 引导库存必须取"安全值"（已扣掉 DB 已发放的部分），不能直接用 config.stock，
-                    // 否则 Redis 丢数据后会把已经卖出去的名额重新放出来 → 超卖（见 warmUpSeckillCache）
-                    String.valueOf(safeBootstrapStock(voucherId, config)),
-                    String.valueOf(cacheTtlSeconds(config)));
+                    String.valueOf(total),
+                    String.valueOf(cacheTtlSeconds(config)),
+                    String.valueOf(knownIssued));
         } catch (Exception e) {
             log.error("执行秒杀 Lua 脚本失败: voucherId={}, userId={}", voucherId, userId, e);
             return null;
@@ -825,85 +926,132 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     }
 
     /**
-     * 预热秒杀缓存（库存 + 已购集合 + 已发放计数），两个键各自判断、缺哪个补哪个。
+     * 预热秒杀缓存（库存/已发放 + 已购集合），各自判断、缺哪个补哪个。
      *
      * 【注意】只判断库存键是否存在会漏掉"库存键在、已购集合丢"的情况，抢过的用户会重新
      * 通过第一道闸、白跑一趟 DB；判据用 {@code COUNT}（走索引）而非每次预热拉全量
      * user_voucher 行，避免把全表级扫描放进每个秒杀请求的路径。
+     *
+     * 【已购集合不属于"库存引导"】：它是"一人一单"的第一道闸，与库存是两套独立语义，
+     * 故本方法只负责"把缓存补齐"，不参与任何库存加减 —— 库存的初始化统一走
+     * {@link #warmUpSeckillStock(Long)}。
      */
     private void warmUpSeckillCache(Long voucherId, SeckillVoucher config) {
-        String stockKey = stockKey(voucherId);
         String orderedKey = orderedKey(voucherId);
-        String issuedKey = issuedKey(voucherId);
         try {
-            boolean stockExists = Boolean.TRUE.equals(redisTemplate.hasKey(stockKey));
             Long orderedSize = redisTemplate.opsForSet().size(orderedKey);
             boolean orderedExists = orderedSize != null && orderedSize > 0;
-            if (stockExists && orderedExists) {
+            if (orderedExists) {
                 return;
             }
-
-            if (!stockExists) {
-                Long safeStock = safeBootstrapStock(voucherId, config);
-                Long bootstrapped = redisTemplate.execute(BOOTSTRAP_SCRIPT,
-                        Arrays.asList(stockKey, issuedKey),
-                        String.valueOf(safeStock),
-                        String.valueOf(cacheTtlSeconds(config)));
-                log.warn("检测到秒杀库存键缺失（Redis 丢数据），已按安全值引导: voucherId={}, config.stock={}, "
-                                + "safeStock={}, 是否引导={}",
-                        voucherId, config.getStock(), safeStock, bootstrapped);
-            }
-
-            if (!orderedExists) {
-                Long total = userVoucherMapper.selectCount(Wrappers.<UserVoucher>lambdaQuery()
+            Long total = userVoucherMapper.selectCount(Wrappers.<UserVoucher>lambdaQuery()
+                    .eq(UserVoucher::getVoucherId, voucherId));
+            long held = total == null ? 0L : total;
+            if (held > 0) {
+                List<UserVoucher> rows = userVoucherMapper.selectList(Wrappers.<UserVoucher>lambdaQuery()
+                        .select(UserVoucher::getUserId)
                         .eq(UserVoucher::getVoucherId, voucherId));
-                long held = total == null ? 0L : total;
-                if (held > 0) {
-                    List<UserVoucher> rows = userVoucherMapper.selectList(Wrappers.<UserVoucher>lambdaQuery()
-                            .select(UserVoucher::getUserId)
-                            .eq(UserVoucher::getVoucherId, voucherId));
-                    String[] userIds = rows.stream().map(v -> String.valueOf(v.getUserId()))
-                            .distinct().toArray(String[]::new);
-                    if (userIds.length > 0) {
-                        // 已购集合是一人一单的第一道闸，必须整份写入：部分写入不报错，
-                        // 只表现为老用户重新通过 Redis 判定、白跑 DB 与数据库压力升高；
-                        // 且 add 与 expire 分成两条命令会留下没有 TTL 的集合（现役 Redis 是
-                        // noeviction，不会自己回收），故用一条脚本连 TTL 一起设好。
-                        String[] args = new String[userIds.length + 1];
-                        args[0] = String.valueOf(cacheTtlSeconds(config));
-                        System.arraycopy(userIds, 0, args, 1, userIds.length);
-                        redisTemplate.execute(PromotionRedisScripts.SET_REBUILD_WITH_TTL,
-                                Collections.singletonList(orderedKey), (Object[]) args);
-                    }
-                    log.warn("秒杀已购集合缺失，已按 user_voucher 重建: voucherId={}, heldUsers={}",
-                            voucherId, userIds.length);
+                String[] userIds = rows.stream().map(v -> String.valueOf(v.getUserId()))
+                        .distinct().toArray(String[]::new);
+                if (userIds.length > 0) {
+                    // 已购集合是一人一单的第一道闸，必须整份写入：部分写入不报错，
+                    // 只表现为老用户重新通过 Redis 判定、白跑 DB 与数据库压力升高；
+                    // 且 add 与 expire 分成两条命令会留下没有 TTL 的集合（现役 Redis 是
+                    // noeviction，不会自己回收），故用一条脚本连 TTL 一起设好。
+                    String[] args = new String[userIds.length + 1];
+                    args[0] = String.valueOf(cacheTtlSeconds(config));
+                    System.arraycopy(userIds, 0, args, 1, userIds.length);
+                    redisTemplate.execute(PromotionRedisScripts.SET_REBUILD_WITH_TTL,
+                            Collections.singletonList(orderedKey), (Object[]) args);
                 }
+                log.warn("秒杀已购集合缺失，已按 user_voucher 重建: voucherId={}, heldUsers={}",
+                        voucherId, userIds.length);
             }
         } catch (Exception e) {
-            // 预热失败不阻断主流程：Lua 还有"用安全初值兜底初始化"一层，最坏是已购集合缺失（由唯一键兜住）
-            log.warn("秒杀缓存预热失败，将依赖 Lua 兜底初始化: voucherId={}", voucherId, e);
+            // 预热失败不阻断主流程：已购集合最终由 uk_user_voucher 唯一键兜住
+            log.warn("秒杀已购集合预热失败，将依赖 DB 唯一键兜底: voucherId={}", voucherId, e);
         }
     }
 
     /**
-     * 计算安全的引导库存：{@code config.stock - 该券已发放的 DB 行数}，下限 0。
+     * 秒杀库存引导（对外入口）：按 DB 权威数据重建 Redis 的「库存 + 已发放」两键。
      *
-     * 【注意】不能直接用 {@code config.stock}：它是权威扣减后的剩余量，但没算上 MQ 里
-     * 尚未落库的预扣，直接当可抢库存会让这些在途预扣再扣一次 DB 库存 → 超卖。
-     * 故以"总共发放过多少"反推，DB 已发放行数是唯一可信来源；代价是在途预扣不计入
-     * 已发放，重建后可能少卖 —— 刻意偏向少卖而非超卖。
+     * 【设计意图】把"库存初始化"与"库存扣减"彻底分开：
+     * 初始化只在本方法里发生（写库存键，总名额与已发放都来自 DB）；抢购链路只做"判断 + 扣减"，不承担任何初始化职责。
+     * 拆成两条路径的收益：读代码一眼能看出"库存是谁写的"，改夹取规则时只需看一处；
+     * 而且引导可被独立复用（定时预热、运维补数据），不必借用抢购入口。
+     *
+     * 【兜底】抢购脚本内部仍保留"库存键缺失就按同一规则引导"的分支，
+     * 用于兜住"本次引导之后、扣减之前"键刚好过期的极小窗口（见 BOOTSTRAP_SCRIPT 的多副本同步约束）。
+     *
+     * 【幂等】库存键存在时是纯读（不写任何 key），且库存键与已发放键同生共死，可在每次抢购入口安全调用。
+     *
+     * @return true 表示本次确实做了引导（可用于告警"Redis 曾丢数据"）
      */
-    private long safeBootstrapStock(Long voucherId, SeckillVoucher config) {
+    @Override
+    public boolean warmUpSeckillStock(Long voucherId) {
+        if (voucherId == null) {
+            return false;
+        }
+        SeckillVoucher config = seckillVoucherMapper.selectById(voucherId);
+        if (config == null) {
+            return false;
+        }
+        String stockKey = stockKey(voucherId);
+        String issuedKey = issuedKey(voucherId);
+        try {
+            if (Boolean.TRUE.equals(redisTemplate.hasKey(stockKey))) {
+                // 库存键在 → 已发放键必然也在（两者永远同生共死），无需任何写入
+                return false;
+            }
+            // 库存键缺失只可能是"Redis 整体丢数据"：此时 Redis 已发放必然为 0，
+            // 必须把 DB 已知的已发放量作为保守下限，否则会把已卖出的名额重新放出来 → 超卖
+            long total = totalSeckillStock(voucherId, config);
+            Long heldRows = userVoucherMapper.selectCount(Wrappers.<UserVoucher>lambdaQuery()
+                    .eq(UserVoucher::getVoucherId, voucherId));
+            long knownIssued = heldRows == null ? 0L : heldRows;
+            Long bootstrapped = redisTemplate.execute(BOOTSTRAP_SCRIPT,
+                    Arrays.asList(stockKey, issuedKey),
+                    String.valueOf(total),
+                    String.valueOf(cacheTtlSeconds(config)),
+                    String.valueOf(knownIssued));
+            log.warn("【秒杀缓存重建】库存键缺失（Redis 丢数据），已按 DB 权威数据引导: "
+                            + "voucherId={}, 总名额={}, DB已发放={}, 是否引导={}",
+                    voucherId, total, knownIssued, bootstrapped);
+            return bootstrapped != null && bootstrapped > 0;
+        } catch (Exception e) {
+            // 引导失败不抛：抢购脚本内仍有同规则兜底分支；但我们不静默 —— 打 ERROR 便于告警
+            log.error("秒杀库存引导失败（抢购脚本内将按同一规则兜底）: voucherId={}", voucherId, e);
+            return false;
+        }
+    }
+
+    /**
+     * 计算该券的总名额 T（不是剩余量），供引导脚本与抢购脚本使用。
+     *
+     * 【口径】T = DB 剩余量（config.stock）+ DB 已发放行数（user_voucher 行数）。
+     * DB 剩余量是原子的权威扣减结果（{@code deductStock} 带 {@code stock > 0} 守卫），
+     * 已发放行数是唯一可信的"已放出多少"，两者相加即总名额。
+     *
+     * 【为什么必须传总名额】Redis 侧的恒等式是 {@code 库存 + 已发放 = 总名额}，
+     * 两个脚本都用「总名额 - Redis 已发放」反推库存，所以 Java 必须传总名额。
+     *
+     * 【误传后果】传成「剩余量」等于把已扣减过的 config.stock 再减一次已发放行数，
+     * 该值又被脚本当成总名额再减一次 Redis 已发放：库存被二次扣减后夹到 0，
+     * DB 里还剩的券全部不可售且永不恢复 —— 重新预热走的是同一个函数，仍然是错的，无法自愈。
+     *
+     * @return 总名额（≥ 0）；统计失败时返回 0（fail-closed：没有依据时宁可少卖，绝不凭猜测放行）
+     */
+    private long totalSeckillStock(Long voucherId, SeckillVoucher config) {
         long stock = config.getStock() == null ? 0L : config.getStock();
         try {
             Long issued = userVoucherMapper.selectCount(Wrappers.<UserVoucher>lambdaQuery()
                     .eq(UserVoucher::getVoucherId, voucherId));
             long issuedCount = issued == null ? 0L : issued;
-            long safe = stock - issuedCount;
-            return Math.max(safe, 0L);
+            return Math.max(stock, 0L) + Math.max(issuedCount, 0L);
         } catch (Exception e) {
             // 查不出来就按 0 处理（fail-closed）：没有依据时宁可少卖，绝不凭 DB 剩余量放行
-            log.error("统计券已发放数量失败，引导库存按 0 处理（宁可少卖不超卖）: voucherId={}", voucherId, e);
+            log.error("统计券已发放数量失败，总名额按 0 处理（宁可少卖不超卖）: voucherId={}", voucherId, e);
             return 0L;
         }
     }

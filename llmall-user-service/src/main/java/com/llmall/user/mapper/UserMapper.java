@@ -4,15 +4,22 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 
 import com.llmall.user.domain.po.User;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 /**
- * 用户账号表数据访问：余额扣减与退款入账。
- *
- * @author 同城生活
- * @since 2023-05-05
+ * 用户账号表数据访问：口令列读取、余额扣减与退款入账。
  */
 public interface UserMapper extends BaseMapper<User> {
+    /**
+     * 查询支付密码哈希。
+     *
+     * 【注意】支付校验必须只读 pay_password 列，禁止改读 password：
+     * 两列混用会让"改登录密码"顺带改掉支付密码的能力。单独取一列也避免了把整行 User 带进支付链路。
+     */
+    @Select("select pay_password from user where id = #{userId}")
+    String selectPayPassword(@Param("userId") Long userId);
+
     /**
      * 扣减余额。
      *

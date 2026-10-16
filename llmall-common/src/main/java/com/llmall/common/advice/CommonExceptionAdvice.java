@@ -17,11 +17,23 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.util.NestedServletException;
 
+import javax.validation.ConstraintViolation;
+import javax.validation.ConstraintViolationException;
 import java.util.stream.Collectors;
 
 /**
- * 统一异常处理：把各类异常翻译成统一响应体（R），HTTP 状态码直接取异常自带的 code，
- * 参数校验类异常为 400，未预期异常兜底 500。
+ * 统一异常处理：把各类异常翻译成统一响应体 R，HTTP 状态码取异常自带的 code。
+ *
+ * 【映射策略】
+ * 1. CommonException 及其子类回各自的 code：BadRequestException 为 400，
+ *    DbException 为 500（数据库操作失败属服务端故障，不能被说成客户端传错）；
+ * 2. 参数绑定、请求体解析、参数类型不匹配、方法级参数校验失败 → 400；
+ * 3. IllegalStateException、RuntimeException 等一切未被上面命中的异常 → 兜底 500。
+ *
+ * 【为什么不把它们统一成业务异常】兜底 500 承载的是基础设施与编程错误
+ * （消息体序列化失败、未注册的消息类型、下游检索不可用等）：这不是调用方请求错了，
+ * 而是服务端自身故障。统一成 400 会把 500 变成 400 —— 监控里的 5xx 归零、告警不再触发，
+ * 真实故障被静默掩盖。故这里刻意保留两条出路。
  *
  * 【注意】必须限定 SERVLET 应用：本类经 spring.factories 装配到所有服务，而网关是 WebFlux 应用、
  * 类路径上没有 javax.servlet，去掉该条件网关会以 NoClassDefFoundError 启动失败。
@@ -34,12 +46,19 @@ public class CommonExceptionAdvice {
     /** 回给前端的根因消息最大长度，超出部分截断 */
     private static final int MAX_ROOT_MESSAGE_LENGTH = 300;
 
+    /**
+     * 数据库操作异常：DbException 自带 code 500，因此这里只补日志、不改状态码 ——
+     * 数据库故障必须让运维看见（error + 堆栈），不能被降级成 400。
+     */
     @ExceptionHandler(DbException.class)
     public Object handleDbException(DbException e) {
         log.error("mysql数据库操作异常 -> ", e);
         return processResponse(e);
     }
 
+    /**
+     * 业务异常：响应状态码原样返回异常自带的 code，日志级别按 code 分流（分流理由见方法内说明）。
+     */
     @ExceptionHandler(CommonException.class)
     public Object handleCommonException(CommonException e) {
         // 4xx 属预期内的业务拒绝，用 warn 且不打堆栈；5xx 才是真故障，保留 error + 堆栈，
@@ -114,6 +133,36 @@ public class CommonExceptionAdvice {
         return processResponse(new BadRequestException("请求参数处理异常"));
     }
 
+    /**
+     * 方法级参数校验失败：{@code ConstraintViolationException}。
+     *
+     * 【注意】它不经 MVC 参数解析，而是由类级 {@code @Validated} 注册的 MethodValidationInterceptor 抛出，
+     * 因此不会被上面的 MethodArgumentNotValidException 处理器接住；不处理就会落到 Exception 兜底变成 500，
+     * 把"参数写错了"说成"服务端坏了"（例如 {@code POST /users/code?phone=123} 命中 @Pattern 时）。
+     */
+    @ExceptionHandler(ConstraintViolationException.class)
+    public Object handleConstraintViolationException(ConstraintViolationException e) {
+        String msg = e.getConstraintViolations() == null ? null
+                : e.getConstraintViolations().stream()
+                .map(ConstraintViolation::getMessage)
+                .filter(m -> m != null && !m.isEmpty())
+                .distinct()
+                .collect(Collectors.joining("|"));
+        if (msg == null || msg.isEmpty()) {
+            msg = "请求参数不合法";
+        }
+        log.warn("方法级参数校验异常 -> {}", msg);
+        log.debug("", e);
+        return processResponse(new BadRequestException(msg));
+    }
+
+    /**
+     * 最后一道兜底：所有未被上面命中的异常（含 IllegalStateException、RuntimeException）
+     * 一律回 500，并保留 error 级日志与请求 URI —— 这是真实故障唯一的对外出口。
+     *
+     * 【严禁】在此处把异常"友好化"成 400、或吞掉异常：那会让故障在监控里消失，
+     * 把"服务端坏了"说成"客户端传错了"。
+     */
     @ExceptionHandler(Exception.class)
     public Object handleRuntimeException(Exception e) {
         log.error("其他异常 uri : {} -> ", WebUtils.getRequest().getRequestURI(), e);
