@@ -7,3 +7,9 @@ llmall:
     # 支付并发闸门（pay:lock:{payOrderId}）用的 Redis，与网关同一实例
     host: 192.168.189.128
     pw: ${LLMALL_REDIS_PW:123456}   # 【注意】口令为 123456，与库口令 123 不同
+  # 【注意】shared-mq.yaml 用 ${llmall.mq.host} 拼连接，本文件缺此键会因占位符无法解析而启动即退出。
+  # 缺了它的实际表现不是"MQ 不可用"，而是把字面量 `${llmall.mq.host}` 当成主机名：
+  #   java.net.UnknownHostException: ${llmall.mq.host}
+  # pay 要向 MQ 发支付结果事件，必然走到这条连接（trade 的同类注释见其 application-local.yaml）。
+  mq:
+    host: 192.168.189.128
