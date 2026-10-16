@@ -22,8 +22,10 @@ public interface CartMapper extends BaseMapper<Cart> {
      *
      * 【注意】不能用"先查存在→再更新/插入"替代：并发下两个请求都会查到不存在而各插一行。
      * 数量以 {@code LEAST(num + 1, #{maxNum})} 封顶，否则 num 可被刷到 int 溢出（负数）。
-     * name/spec/price/image 在插入与更新时都刷新，故购物车展示的是最新价，
-     * 结算价仍以订单侧重新计算为准。SQL 不使用 MySQL 8.0.20 起废弃的 {@code VALUES(col)} 语法，
+     * name/spec/price/image 在插入与更新两条路径上都由入参 form 覆盖，落库的是加购请求体里的快照值，
+     * 不是服务端实时查询到的价格（对外展示的最新价另由 CartServiceImpl 按 itemId 回源商品域填 newPrice 字段），
+     * 因此 price 只是加购时刻的留痕，结算价仍以订单侧重新计算为准。
+     * SQL 不使用 MySQL 8.0.20 起废弃的 {@code VALUES(col)} 语法，
      * 全部走参数占位，5.7 与 8.x 均可用。
      *
      * @return 1=新增了一条；2=更新了已有条目；0=更新但数值没变（已达数量上限）

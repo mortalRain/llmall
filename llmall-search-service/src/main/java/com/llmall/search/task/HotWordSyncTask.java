@@ -7,7 +7,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * 热词两段式落库：Redis ZSet 实时计数 + 定时任务汇总写 MySQL，供报表与离线分析使用。
+ * 热词两段式落库：Redis ZSet 实时计数 + 定时任务汇总写 MySQL；落库后的 search_hot_word 由
+ * 搜索建议（ISearchService.suggest 的前缀匹配查询）读取，检索本身不读这张表。
  */
 @Slf4j
 @Component

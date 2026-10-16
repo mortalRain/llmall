@@ -22,6 +22,10 @@ public interface SearchRedisConstants {
      */
     int HOT_WORD_MAX_SIZE = 1000;
 
-    /** 热词 ZSet 的 TTL（滚动窗口）；不设 TTL 时 score 是历史累计，旧热词会永远压住新热词 */
+    /**
+     * 热词 ZSet 的 TTL，由写入路径的 Lua 每次 pexpire 续期（滑动过期）。
+     * 【注意】它只是"闲置到期即回收"，不是按窗口淘汰旧热词：只要有搜索流量在写，key 就不过期，
+     * score 始终是历史累计值。压住旧热词靠的是 HOT_WORD_MAX_SIZE 的按分截断，不能指望本 TTL。
+     */
     Duration HOT_WORD_TTL = Duration.ofDays(7);
 }

@@ -43,7 +43,7 @@ public class UserInfo implements Serializable {
 
     private LocalDate birthday;
 
-    /** 积分（与 promotion.points_flow 流水对账） */
+    /** 积分（与 `llmall-user`.`points_flow` 流水对账；该表在用户库，不在营销库） */
     private Integer credits;
 
     /** 会员等级 1~9，0 表示未开通 */

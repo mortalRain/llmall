@@ -46,7 +46,7 @@ public class SeckillOrderListener {
             channel.basicAck(deliveryTag, false);
         } catch (CommonException e) {
             // 业务性失败不回队列（只会无限重投），把原因写给前端轮询。
-            // Z3：付费券在抢购请求时已扣款而券没发出去，必须退款，否则就是"钱收了、券没有"的直接资损
+            // 付费券在抢购请求时已扣款而券没发出去，必须退款，否则就是"钱收了、券没有"的直接资损
             // （退款本身按 token 幂等，见 consume_record）。
             log.warn("秒杀落库业务失败，不再重试: token={}, reason={}", token, e.getMessage());
             voucherService.markSeckillFailed(token, voucherId, e.getMessage());
@@ -62,7 +62,7 @@ public class SeckillOrderListener {
                 voucherService.markSeckillFailed(token, voucherId, "系统繁忙，抢购失败，请稍后重试");
                 if (message != null) {
                     voucherService.compensateSeckillDeduction(message.getVoucherId(), message.getUserId());
-                    // Z3：名额回补必须与退款成对出现，两者都按 token 幂等
+                    // 名额回补必须与退款成对出现，两者都按 token 幂等
                     voucherService.refundSeckillPurchase(token, message.getVoucherId(), message.getUserId(),
                             "秒杀落库持续失败退款");
                 }

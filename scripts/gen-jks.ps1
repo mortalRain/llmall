@@ -1,6 +1,6 @@
 # 生成 JWT 签名密钥库（llmall.jks）
 #
-# 为什么需要这个脚本：llmall.jks 是 JWT 签名私钥，**不入库**（见 .gitignore）。
+# 为什么需要这个脚本：llmall.jks 是 JWT 签名私钥，不入库（见 .gitignore）。
 # 但它又是服务启动的必需件（llmall.jwt.location 指向 classpath:llmall.jks），
 # 所以首次 clone 后需要先跑本脚本生成一份本地密钥库。
 #

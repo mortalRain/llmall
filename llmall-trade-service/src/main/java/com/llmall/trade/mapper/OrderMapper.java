@@ -13,3 +13,4 @@ import com.llmall.trade.domain.po.Order;
 public interface OrderMapper extends BaseMapper<Order> {
 
 }
+

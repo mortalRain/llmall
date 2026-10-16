@@ -48,24 +48,47 @@ import java.util.stream.Collectors;
 import static com.llmall.search.constant.SearchRedisConstants.*;
 
 /**
- * 搜索域实现：检索优先走 ES（IK 中文分词、多字段相关性、function_score、geo 距离），
- * MySQL 读模型 shop_search_doc 保存权威数据并在 ES 不可用时兜底（engine = es / mysql / auto）；
- * 热词两段式 —— 运行时 ZINCRBY 累加到 Redis ZSet，定时任务批量落库，避免高频写 MySQL。
+ * 搜索域核心实现：检索（双引擎）、热词与建议、搜索历史、读模型维护、索引重建与对账。
  *
- * 【注意】ES 的写是整文档替换，没有局部更新语义：每次落库之后必须重新读回完整行再写索引，
- * 拿局部 doc 去写会把名称、地址、坐标全刷成 null。
+ * 【核心职责】
+ * 1. 检索：优先走 ES（IK 中文分词、多字段相关性、function_score、geo 距离）；
+ *    MySQL 读模型 {@code shop_search_doc} 既是权威数据，也是 ES 不可用时的回落通道。
+ * 2. 热词两段式：运行时 ZINCRBY 累加到 Redis ZSet（读时实时取 Top N），
+ *    定时任务批量落库到 {@code search_hot_word}，避免每次搜索都写 MySQL。
+ * 3. 读模型维护：消费 {@code shop.hot.changed} 事件做整行 upsert，并提供全量重建。
+ * 4. 对账：按 {@code consume_record} 回答门店域"这条事件处理了没有"。
+ *
+ * 【使用场景】
+ * HTTP 入口是 {@code SearchController}；{@link #applyShopHotChanged} 由 MQ 监听器
+ * {@code ShopHotChangedListener} 在事务内调用；{@link #syncHotWordsToDb} 由定时任务
+ * {@code HotWordSyncTask} 调用；{@link #isShopHotChangedConsumed} 由门店域对账任务经 Feign 调用。
+ *
+ * 【关键设计】
+ * 1. 三态引擎（{@code llmall.search.engine}）：{@code es} = 只用 ES，检索抛错直接向上抛
+ *    （刻意不回落，保证"纯 ES"的压测数据干净）；{@code mysql} = 只用 MySQL 读模型（等价于引入 ES 之前的行为）；
+ *    {@code auto}（默认）= 优先 ES，ES 抛错则 warn 并回落 MySQL，接口对前端仍可用。
+ * 2. 权威数据在 MySQL：ES 只是加速副本，读模型永远是可以重建的唯一真相。
+ * 3. 幂等闸门不在本类：事件幂等由 {@code consume_record} 的唯一键
+ *    {@code (biz_type, biz_id, consumer)} 裁决，见 {@code ShopHotChangedListener}。
+ *
+ * 【注意】ES 的写是整文档替换，没有局部更新语义：每次落库之后必须重新读回完整行再写索引
+ * （见 {@link #syncToEs}），拿局部 doc 去写会把名称、地址、坐标全刷成 null。
+ *
+ * 【风险】ES 文档同步是 best-effort（{@link #syncToEs} 失败只 warn），
+ * 而对账判据只看读模型与 {@code consume_record}，两者都不含 ES → 索引可能永久陈旧，
+ * 而 {@link #engineStatus} 仍报"一致"。位数一致不代表内容一致，重建是唯一可靠的收敛手段。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class SearchServiceImpl implements ISearchService {
 
+    /** 门店状态：营业中。检索只返回该状态，打烊/下线门店不进搜索结果 */
     private static final int STATUS_OPEN = 1;
+    /** 全量重建时向门店域拉取的每页条数 */
     private static final int REBUILD_PAGE_SIZE = 100;
     /** 全量重建的页数上限，防止对端分页异常时死循环 */
     private static final int REBUILD_MAX_PAGES = 100;
-
-    /** 本域在 consume_record 中的消费者标识（服务名），门店域对账时按它查"我处理了没有" */
 
     private final ShopSearchDocMapper shopSearchDocMapper;
     private final SearchHotWordMapper hotWordMapper;
@@ -78,17 +101,45 @@ public class SearchServiceImpl implements ISearchService {
     private final EsShopSearchGateway esGateway;
     private final ShopSearchEngineProperties engineProperties;
 
+    /** 门店检索（无坐标）：委托 {@link #doSearch}，x/y 传 null 即走综合排序 */
     @Override
     public PageDTO<ShopDTO> search(String keyword, Long typeId, Integer page, Integer size, Long userId) {
         return doSearch(keyword, typeId, page, size, null, null, userId);
     }
 
+    /** 附近检索：x/y 同时非空时 ES 侧改按距离升序，MySQL 回落路径忽略坐标只做普通检索 */
     @Override
     public PageDTO<ShopDTO> searchNearby(String keyword, Long typeId, Integer page, Integer size,
                                          Double x, Double y, Long userId) {
         return doSearch(keyword, typeId, page, size, x, y, userId);
     }
 
+    /**
+     * 检索主流程：先试 ES，再视引擎配置决定"回落 MySQL"还是"直接向上抛"。
+     *
+     * 【设计意图】
+     * 检索是读接口，ES 抖动不应该让整个搜索页打不开；但压测/对照场景又需要一份"纯 ES"的数据，
+     * 因此把选择权交给 {@code llmall.search.engine}：{@code auto} 回落保证可用性，
+     * {@code es} 不回落保证观测口径纯净。回落点只记 warn 不埋点，说明它本身就是"异常路径"。
+     *
+     * 【边界约束】
+     * 1. 每页条数上限 50，比 {@code PageQuery} 的全局上限 100 更严 —— 放宽会让一次检索
+     *    从 ES/MySQL 拉走更多行，检索 QPS 高时放大对两边的压力。
+     * 2. MySQL 回落的排序口径必须保持"hotScore → comments"：与 ES 的 function_score
+     *    不追求数值一致，但"热门店在前"这一相对次序要一致，否则换引擎后前端看到的名次会突变。
+     * 3. 关键词命中范围必须包含 {@code typeName}：首页分类 chip 传的就是类型名（"美食""KTV"），
+     *    漏掉它会让点击分类后搜不到任何门店。
+     *
+     * @param keyword 关键词，可空（为空即按热度/类型浏览）；前后空白会被 trim，全空白视同为空
+     * @param typeId  门店类型 id，可空；非空时精确过滤
+     * @param page    页码，<=0 或 null 收敛为第 1 页
+     * @param size    每页条数，非法值取默认 10，上限 50
+     * @param x       经度，可空；仅与 y 同时给出时生效（"附近"场景）
+     * @param y       纬度，可空
+     * @param userId  当前登录用户 id，可空（未登录走匿名检索，只是不记搜索历史）
+     * @return 分页结果；total 来自 ES 的精确总数或 MySQL 的 count，list 不会为 null
+     * @throws IllegalStateException engine=es 时 ES 检索失败 —— 刻意不回落，调用方需自行降级或提示
+     */
     private PageDTO<ShopDTO> doSearch(String keyword, Long typeId, Integer page, Integer size,
                                       Double x, Double y, Long userId) {
         // 检索接口的单页上限（50）刻意比 PageQuery 的全局上限更严，不要放宽

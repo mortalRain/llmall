@@ -3,8 +3,9 @@ package com.llmall.shop.constant;
 /**
  * 门店域 Redis key 与缓存策略参数。
  *
- * 【注意】逻辑过期时长与物理 TTL 是两套口径，必须分开计：物理 TTL 若等于逻辑过期时长，
+ * 【注意】逻辑过期时长与物理 TTL 是两套口径，正常缓存必须分开计：物理 TTL 若等于逻辑过期时长，
  * key 会在逻辑过期同一时刻被 Redis 删除，"读旧值 + 异步重建"路径随之失效。
+ * 空值哨兵是例外：它没有"返回旧值"的分支，物理 TTL 直接取逻辑过期时长（见 ShopServiceImpl 的 writeNullSentinel）。
  */
 public interface ShopRedisConstants {
 

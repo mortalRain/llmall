@@ -85,7 +85,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .setStatus(STATUS_PUBLISHED);
         save(blog);
 
-        // 写扩散推送粉丝收件箱：粉丝过多时跳过，改由读时拉取
+        // 写扩散推送粉丝收件箱：粉丝过多时跳过；读路径只查收件箱，没有拉取合并，跳过后这些粉丝的 Feed 里不会有本条笔记
         followService.pushToFollowers(userId, blog.getId());
 
         // 【注意】不能把下面的调用套回 TxAfterCommit：publishReviewCreated 先在当前事务里 record()

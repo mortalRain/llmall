@@ -40,7 +40,7 @@ public class StockFlow implements Serializable {
     /** 业务主键（订单号） */
     private String bizId;
 
-    /** 1 有效 2 已回滚 */
+    /** 状态：写入路径一律置 1（有效）。回补不靠改本字段表达，而是新增一条正数 changeNum 的流水 */
     private Integer status;
 
     private LocalDateTime createTime;

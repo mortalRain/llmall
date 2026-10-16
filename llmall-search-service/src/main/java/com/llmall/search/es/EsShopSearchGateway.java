@@ -16,7 +16,7 @@ public interface EsShopSearchGateway {
     /** 配置层面是否启用 ES（llmall.search.engine = es / auto） */
     boolean enabled();
 
-    /** 真连一次 ES 探活（用于状态接口与回落判断），不做缓存 */
+    /** 真连一次 ES 探活（内部走 count()，不做缓存）；当前没有调用方：状态接口用 count() 的异常分支判定，是否回落由 llmall.search.engine 决定 */
     boolean healthy();
 
     /** 索引文档数（与 MySQL 读模型条数对比即为"对账"） */

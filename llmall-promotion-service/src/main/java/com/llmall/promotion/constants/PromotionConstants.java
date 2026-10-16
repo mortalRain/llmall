@@ -15,7 +15,7 @@ public interface PromotionConstants {
     String BIZ_SECKILL_ORDER = "SECKILL_ORDER";
 
     /**
-     * 业务类型：付费券的购买退款（Z3）。
+     * 业务类型：付费券的购买退款。
      *
      * 付费券在抢购请求时就已扣款、落库却是异步的，落库失败必须退款，
      * 且同一条消息重投时不能退两次；借用 consume_record 的 uk_consume(biz_type, biz_id, consumer)

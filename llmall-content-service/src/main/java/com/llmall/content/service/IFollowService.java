@@ -19,7 +19,7 @@ public interface IFollowService extends IService<Follow> {
     /** 共同关注（Redis 集合求交集） */
     Set<String> commonFollows(Long userId, Long otherUserId);
 
-    /** 粉丝数（Redis 集合基数） */
+    /** 粉丝数（缓存优先，未命中回源 DB 计数；不得用关注集合的基数代替，Redis 被清空后会静默偏小） */
     long followerCount(Long userId);
 
     /** 发布笔记后推送到粉丝收件箱（粉丝数超过阈值不做写扩散） */

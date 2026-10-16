@@ -3,11 +3,11 @@
 #
 # 【为什么需要这个脚本】
 # 本项目现役 Redis 是 maxmemory 0 + maxmemory-policy noeviction（已实测）。
-# 也就是说：**没有 TTL 的 key 既不会过期、也不会被淘汰**，只会一直堆积，
+# 也就是说：没有 TTL 的 key 既不会过期、也不会被淘汰，只会一直堆积，
 # 直到内存耗尽后所有写命令直接报错 —— 故障面比"缓存穿透"大得多。
 #
 # 而"忘记给 key 设 TTL"是这类问题里最容易复发的一种：它不报错、不留日志，
-# 只在几周后以"Redis 内存莫名涨满"的形式出现。唯一可靠的发现方式就是**定期扫一遍**。
+# 只在几周后以"Redis 内存莫名涨满"的形式出现。唯一可靠的发现方式就是定期扫一遍。
 #
 # 实测（本次修复前）：81 个 key 里有 5 个 TTL = -1，全部集中在门店域
 #   hot:shop:all(5)  hot:shop:1(3)  hot:shop:2(1)  hot:shop:8(1)  geo:shop(30)
@@ -22,7 +22,7 @@ param(
     [string]$RedisHost = '192.168.189.128',
     [int]$RedisPort = 6379,
     [string]$Password = $env:LLMALL_REDIS_PW,
-    # 允许清单：确实**应该**永不过期的 key（没有就留空）。
+    # 允许清单：确实应该永不过期的 key（没有就留空）。
     # 不要为了"让脚本变绿"往这里塞业务缓存 key —— 那等于把护栏拆了。
     [string[]]$AllowNoTtlPattern = @(),
     # redis-cli 路径：默认取项目文档里记录的 Windows 版 Redis
@@ -58,9 +58,9 @@ if ($ping -ne 'PONG') {
 $dbsize = Invoke-Redis DBSIZE
 Write-Output "Redis ${RedisHost}:${RedisPort}  DBSIZE=$dbsize"
 
-# 【注意】SCAN 的输出在 PowerShell 里是**一个多行字符串**，不是字符串数组：
+# 【注意】SCAN 的输出在 PowerShell 里是一个多行字符串，不是字符串数组：
 # 直接 @(Invoke-Redis --scan) 会得到"1 个元素"（内容里带换行），
-# 于是后面的 TTL 检查只对一个巨型字符串做了一次，最后输出"全部带 TTL"的**假绿**。
+# 于是后面的 TTL 检查只对一个巨型字符串做了一次，最后输出"全部带 TTL"的假绿。
 # 必须先按换行拆开再逐条检查 —— 巡检脚本给出错误的"没问题"比不巡检更危险。
 $keys = @(Invoke-Redis --scan) -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() }
 $keys = @($keys)

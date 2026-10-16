@@ -12,7 +12,7 @@
 #   bash install-redis-ha.sh --repair        # 修复哨兵 monitor 行漂移（故障转移后必备）
 #
 # 【幂等性设计（很重要）】
-#   哨兵在运行中会**自己重写配置文件**（写入 discovered replicas、current-epoch 等集群状态）。
+#   哨兵在运行中会自己重写配置文件（写入 discovered replicas、current-epoch 等集群状态）。
 #   因此对已存在的哨兵配置，本脚本绝不覆盖 —— 否则等于把集群状态抹掉，
 #   三个哨兵会重新开始互相发现，期间无法达成多数派。
 #   从库配置是无状态的，可以安全重生成。
@@ -94,7 +94,7 @@ status() {
 # ---------------------------------------------------------------------------
 # 修复哨兵配置漂移。
 #
-# 【为什么需要这个动作】哨兵在**故障转移成功后会把自己的 monitor 行改写成新主库的地址**，
+# 【为什么需要这个动作】哨兵在故障转移成功后会把自己的 monitor 行改写成新主库的地址，
 # 并把 config-epoch/current-epoch 递增。所以只要发生过一次切换，配置文件就"记住"了新主库：
 #   sentinel monitor llmall-master 192.168.189.128 6380 1
 # 此时如果你把拓扑改回 6379 主 / 6380 从（本项目 6379 是长期主库），
@@ -167,7 +167,7 @@ do_install() {
   ok "主库 6379 在线，角色 master"
 
   # 端口占用检查。
-  # 【为什么要区分"自己的实例"和"别人的进程"】本脚本要支持**续装/重装**：
+  # 【为什么要区分"自己的实例"和"别人的进程"】本脚本要支持续装/重装：
   # 上一次跑到一半失败（本次实测就发生过），从库可能已经起来并占着 6380。
   # 这时直接 die 会逼人先手工 systemctl stop，属于脚本自身不够健壮。
   # 判据用 systemd 单元归属：端口被占且对应单元 active → 是我们自己的，跳过即可；
@@ -219,11 +219,11 @@ do_install() {
       "$SCRIPT_DIR/redis-replica.conf.template" > "$REPLICA_CONF"
   chown redis:redis "$REPLICA_CONF"
   chmod 640 "$REPLICA_CONF"
-  # 语法预检：这里**不**调用 `redis-server --check-config`。
+  # 语法预检：这里不调用 `redis-server --check-config`。
   # 实测（Redis 7.0.15 / MSYS2 构建）它不接受这种用法：
   #   `redis-server <conf> --check-config` → 把 check-config 当成配置指令，报 Bad directive；
   #   `redis-server --check-config <conf>` → 同样报 Bad directive。
-  # 与其和一个不确定的 CLI 参数较劲，不如用**行为**校验：下面第 5 步会真正启动实例，
+  # 与其和一个不确定的 CLI 参数较劲，不如用行为校验：下面第 5 步会真正启动实例，
   # 配置有错就起不来（失败原因会进 journalctl -u redis-replica，比预检输出更好定位）。
   # 这里只做一条廉价的价值检查：确认模板里的占位符已被全部替换（漏替换会导致启动失败且难查）。
   if grep -q '__VM_IP__' "$REPLICA_CONF"; then
@@ -293,7 +293,7 @@ Type=notify
 User=redis
 Group=redis
 Environment="TZ=Asia/Shanghai"
-# 【为什么不用 redis-sentinel】Ubuntu 24.04 的 redis-server 包**不提供** redis-sentinel 可执行文件
+# 【为什么不用 redis-sentinel】Ubuntu 24.04 的 redis-server 包不提供 redis-sentinel 可执行文件
 # （实测 dpkg -L redis-server 只有 redis-server/redis-cli/redis-check-*/redis-benchmark，
 #  而 /usr/bin/redis-server 本身还是个指向 redis-check-rdb 的软链）。
 # 用 redis-sentinel 启动会得到 systemd 的 status=203/EXEC（"No such file or directory"），

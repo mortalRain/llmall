@@ -11,7 +11,9 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * 支付订单。
+ * 支付单（pay_order 表）：一笔交易订单在支付域的唯一账本。
+ *
+ * 【边界约束】金额单位一律为分；biz_order_no 上有唯一键，一笔交易订单只允许存在一条支付单。
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
@@ -35,16 +37,21 @@ public class PayOrder implements Serializable {
     /** 支付金额，单位分 */
     private Integer amount;
 
-    /** 支付类型，1：h5，2：小程序，3：公众号，4：扫码，5：余额支付 */
+    /** 支付类型，取值见 PayType：1 网页支付JS、2 小程序支付、3 APP支付、4 扫码支付、5 余额支付 */
     private Integer payType;
 
-    /** 支付状态，0：待提交，1：待支付，2：支付超时或取消，3：支付成功 */
+    /** 支付状态，取值见 PayStatus：0 未提交、1 待支付、2 已关闭、3 支付成功 */
     private Integer status;
 
     private String expandJson;
 
+    /**
+     * 结果码：余额支付不写第三方业务码，本列承载对账标记 —— 扣款结果未知时写 UNCERTAIN，
+     * 日终对账按它筛出待对账单（见 PayOrderServiceImpl 与 PayReconcileTask）。
+     */
     private String resultCode;
 
+    /** 结果说明：扣款结果未知时写入扣款幂等键与失败原因，供人工核对余额流水 */
     private String resultMsg;
 
     private LocalDateTime paySuccessTime;

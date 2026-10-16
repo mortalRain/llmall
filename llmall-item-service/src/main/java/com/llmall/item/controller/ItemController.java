@@ -23,6 +23,36 @@ import javax.validation.Valid;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 商品域对外的 HTTP 入口：商品读接口（匿名可访问）+ 商品与库存写接口（仅服务间调用）。
+ *
+ * 【核心职责】
+ * 1. 读：分页列表、分类聚合、按 id 批量查、按 id 单个查、按门店查商品 —— 全部匿名可访问，是商城的公开数据面
+ * 2. 写：新增 / 更新 / 改状态 / 逻辑删除商品，批量扣减库存、批量回滚库存 —— 全部要求服务间凭证
+ * 3. 判定：{@code GET /items/stock/deducted} 回答"某业务号到底扣没扣过"，是下单方补偿链路的判据
+ *
+ * 【使用场景】
+ * 1. 前端 / 小程序 → 网关 → 本类的 GET 接口；网关只读白名单（见 llmall-gateway 的 {@code llmall.auth.excludePaths}）
+ *    只放行 {@code /items}、{@code /items/*}、{@code /items/shop/*}、{@code /items/categories}、{@code /items/page}，
+ *    且只对 GET/HEAD/OPTIONS 生效
+ * 2. llmall-trade-service 的 Feign 客户端 {@code ItemClient} → 本类的写接口与判定接口。Feign 按服务名直连本服务，
+ *    不经过网关，凭证由 {@code DefaultFeignConfig} 统一注入
+ * 3. MQ 监听器不经过本类：它们直接调 {@code IItemService}，因此本类的入口校验挡不住也管不着它们
+ *
+ * 【关键设计】
+ * 1. 两道门，互不替代：网关回答"你是谁"（非 GET 一律要求登录态），本类回答"你是不是内部服务"（服务间凭证）。
+ *    服务监听 0.0.0.0，绕过网关直连端口时只剩第二道门，所以 {@code assertInternalCall} 不能省
+ * 2. 入口校验只做"防呆"，权威校验在 {@code ItemServiceImpl.validateDetailItems}：Feign 调用不经过 Spring MVC，
+ *    本层的 {@code @Valid} 对它没有约束力
+ * 3. 读接口按商品状态收口：单个查询要求 status=1；批量查询刻意不按状态过滤，风险见 {@code queryItemByIds}
+ *
+ * 【注意】匿名可访问的读接口是公开数据面，写接口是资产变更面，两者边界由本类与网关两侧共同把守。
+ * 【注意】写接口一旦去掉 {@code assertInternalCall}，任何人一个请求就能把任意商品库存改掉或清零；
+ * 反过来把它下沉到 Service 层，又会把直接调 service 的 MQ 回调一起挡掉（原因见该方法注释）。
+ *
+ * @author 同城生活
+ * @since 2023-05-05
+ */
 @Tag(name = "商品管理相关接口")
 @RestController
 @RequestMapping("/items")
@@ -54,6 +84,31 @@ public class ItemController {
         }
     }
 
+    /**
+     * 商品分页列表（匿名可访问）。
+     *
+     * 【使用场景】
+     * 商城首页、搜索结果页、门店套餐页的唯一列表入口；三个页面共用同一套筛选参数，靠不同入参组合区分场景。
+     * 本接口是公网暴露面最大的读接口，因此挂了 Sentinel 资源 {@code itemPage} 做限流。
+     *
+     * 【入参约束】见 {@link ItemPageQuery}，全部可选，越界不报错而是"收敛"：
+     * 1. {@code pageNo}：小于 1 或缺失按第 1 页处理（不返回 400）
+     * 2. {@code pageSize}：小于 1 按默认 20 条；超过上限时被夹到上限（默认 100，可由 {@code llmall.page.max-size} 覆盖）。
+     *    这是防"一次拉走整张表"的闸门，不是参数校验 —— 非法分页参数不该让前端翻页组件整页报错
+     * 3. {@code sortBy}：只接受白名单列（sold / price / comment_count / create_time / update_time / id），
+     *    未命中一律回落到 {@code sold} 倒序。它是被拼进 ORDER BY 的自由字符串，白名单即注入防护
+     * 4. {@code status}：不传默认只查上架（1）；传 2/3 可查出下架/已删除商品，属管理场景预留
+     * 5. {@code minPrice} / {@code maxPrice}：单位分；只写一侧即单边过滤
+     *
+     * 【返回】{@link PageDTO} 包裹的 {@code List<ItemDTO>}；无数据时返回空列表而非 null。
+     *
+     * 【异常】
+     * 1. 400（BadRequest）：{@code pageNo} / {@code pageSize} 类型不是整数、{@code minPrice} 等传了非数字
+     * 2. 400（BadRequest）：触发 Sentinel 限流或熔断 —— 由 {@link #pageQueryBlocked} 抛出，文案为"访问过于频繁"
+     * 3. 500（InternalServerError）：数据库不可用等真实故障
+     *
+     * 【兼容性】筛选参数只增不减；新增筛选参数时前端无需同步调整。
+     */
     @Operation(summary = "分页查询商品（支持关键词/分类/门店/类型/价格区间筛选，默认只返回上架商品）")
     @GetMapping("/page")
     // Sentinel 热点资源埋点，规则见 llmall-common 的 SentinelRuleConfig；被限流/熔断时走 blockHandler，返回可读提示而非 500 堆栈
@@ -134,7 +189,7 @@ public class ItemController {
         assertInternalCall(requestToken);
         // 不允许修改商品状态：置 null 后更新会忽略该字段
         item.setStatus(null);
-        // @Valid 同新增接口；本接口为全量更新语义，字段为 null 时静默跳过，超长字符串才报 500
+        // @Valid 同新增接口：name/price/stock 为必填，缺任一即 400；其余字段为 null 时不参与 SQL（update-strategy=not_null）
         itemService.updateById(BeanUtils.copyBean(item, Item.class));
     }
 

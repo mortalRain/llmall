@@ -28,8 +28,8 @@ public class SearchController {
     /**
      * 运维接口总开关（llmall.maintenance.enabled）。
      *
-     * 全量重建搜索视图是重活：执行期间会大量读写 Redis 并扫描商品表，怀疑线上抖动与它有关时
-     * 改一行配置重启即可停掉，不必发版，也不会误伤同一控制器下的正常搜索接口。
+     * 全量重建是重活：执行期间会经 Feign 逐页拉取门店数据、整表重写搜索读模型并重灌 ES 索引，
+     * 怀疑线上抖动与它有关时改一行配置重启即可停掉，不必发版，也不会误伤同一控制器下的正常搜索接口。
      */
     @Value("${llmall.maintenance.enabled:false}")
     private boolean maintenanceEnabled;

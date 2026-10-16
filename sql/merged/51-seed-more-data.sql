@@ -1,6 +1,6 @@
 -- =====================================================================
 -- 51-seed-more-data.sql
--- 把"所有可能被查询到的表"都铺上演示数据（第二轮补数据）
+-- 51 · 把"所有可能被查询到的表"都铺上演示数据（第二轮补数据）
 --
 -- #####################################################################
 -- # ⚠️ 仅演示库，勿在生产执行                                          #
@@ -11,31 +11,128 @@
 -- #   DELETE  llmall-promotion.voucher      id BETWEEN 8001 AND 8099     #
 -- #   DELETE  llmall-promotion.user_voucher id BETWEEN 8101 AND 8199     #
 -- #   DELETE  llmall-promotion.seckill_voucher voucher_id 8001~8099      #
--- #   DELETE  llmall-user.user_sign    id BETWEEN 990001 AND 999999      #
+-- #   DELETE  llmall-user.user_sign    id BETWEEN 990000 AND 999999      #
 -- # 生产库只跑 00~41 的建库/建表/改造脚本；50/51/52/99 属演示数据。     #
 -- #####################################################################
 --
--- 背景：
+-- 本脚本只用于本地与演示环境：影响面与风险等级都按"误在生产执行"来评估，见"三、影响面"。
+--
+-- 执行：mysql -uroot -p < 51-seed-more-data.sql
+--
+-- ============================ 一、功能 ============================
+-- 给演示库第二批空表铺上数据：8 个缺失类型的门店、评价评论/点赞/关注/Feed 收件箱、
+-- 搜索历史与热词、门店经营数据、五个库的事件消费记录、代金券/用户券/秒杀券、
+-- 用户画像与签到与积分流水、购物车、物流单。
+--
+-- ============================ 二、背景 ============================
 --   只给门店/套餐/订单打了数据是不够的 —— 评价评论、点赞、关注、Feed 收件箱、
 --   搜索历史、热词、门店经营数据、事件消费记录、优惠券、签到、物流……全是空表，
 --   前端任何一个入口点进去都是空白页。而且门店只有"美食"和"KTV"两类，
 --   首页的分类 chip 点到"丽人·美发""亲子游乐"就是 0 家门店。
 --
 -- 本脚本（可重复执行）：
---   一、补齐 8 个缺失门店类型的门店（共 16 家）→ 门店覆盖全部 10 类
---   二、内容域：评价评论、点赞、关注、Feed 收件箱
---   三、搜索域：搜索历史、热词补充
---   四、门店域：近 7 天经营数据（pv/uv）
---   五、五个库的事件消费记录（对账/幂等演示）
---   六、促销域：代金券、用户券、秒杀券
---   七、用户域：签到日历、用户画像补全、积分流水补类型、购物车
---   八、交易域：物流单
+--   第一步：补齐 8 个缺失门店类型的门店（共 16 家）→ 门店覆盖全部 10 类
+--   第二步：内容域：评价评论、点赞、关注、Feed 收件箱
+--   第三步：搜索域：搜索历史、热词补充
+--   第四步：门店域：近 7 天经营数据（pv/uv）
+--   第五步：五个库的事件消费记录（对账/幂等演示）
+--   第六步：促销域：代金券、用户券、秒杀券
+--   第七步：用户域：签到日历、用户画像补全、积分流水补类型、购物车
+--   第八步：交易域：物流单
 --   注意：门店套餐与探店评价由 50-seed-local-life-data.sql 生成（覆盖全部门店），
 --         本脚本跑完需重新执行一次 50 号脚本，再调用 /search/view/rebuild 与 /shops/cache/geo/rebuild。
+--
+-- ============================ 三、影响面 ============================
+-- 【适用范围】仅用于本地 / 演示环境，不要在生产执行。
+--   生产库只跑 00~41 的建库/建表/改造脚本；50 / 51 / 52 / 99 属演示数据脚本。
+--   · 会被删除的业务行（按 id 区间删除，区间内不分来源）：
+--       llmall-shop.shop                id BETWEEN 101 AND 199
+--       llmall-content.blog_comments    id BETWEEN 940001 AND 949999
+--       llmall-search.search_history    id BETWEEN 980001 AND 989999
+--       llmall-promotion.voucher        id BETWEEN 8001 AND 8099
+--       llmall-promotion.user_voucher   id BETWEEN 8101 AND 8199
+--       llmall-promotion.seckill_voucher voucher_id BETWEEN 8001 AND 8099
+--       llmall-user.user_sign           id BETWEEN 990000 AND 999999
+--     其中 shop 的 101~199 最危险：生产库里门店 id 落在这个区间会被整段删掉，
+--     而 llmall-item.item.shop_id 与 llmall-trade.order.shop_id 仍指向这些 id（不会级联清理）。
+--   · 会被改写的行：llmall-user.points_flow 之外，本脚本以 INSERT / INSERT IGNORE 为主；
+--     插入前带 NOT EXISTS 守卫，重复执行不会重复累加积分。
+--   · 不受影响：llmall-shop.shop 中 id 不在 101~199 的门店（1~14 与 99 迁移进来的行都不动）；
+--     llmall-content.blog 与 llmall-item.item（评价与套餐由 50 号脚本负责，本脚本只读它们）；
+--     llmall-trade.order / llmall-pay.pay_order（本脚本不删不改，只按 order_type 生成物流单）；
+--     除 1 / 2 / 3 / 4 / 19 之外的账号（关注关系与用户画像只涉及这几个演示账号）。
+--
+-- ============================ 四、执行步骤 ============================
+--   1. 确认 00~50 都已按 README 的顺序执行（不可跳过：本脚本读 shop / blog / item /
+--      points_flow 等表，并依赖 50 号脚本已经生成评价 —— 评价为空时评论、点赞、
+--      Feed 收件箱、按评价发的积分全部插不进去）。
+--   2. 备份将被删除的七张表（不可跳过：删掉的行无法由脚本还原）：
+--        mysqldump -uroot -p llmall-shop shop > backup-51-shop.sql
+--        mysqldump -uroot -p llmall-promotion voucher user_voucher seckill_voucher > backup-51-promotion.sql
+--        mysqldump -uroot -p llmall-user user_sign > backup-51-user.sql
+--   3. 执行：mysql -uroot -p < 51-seed-more-data.sql
+--   4. 紧接着再跑一遍 50（不可跳过：本步新增的 16 家门店需要套餐与评价，
+--      且它们的 hot_score 在本脚本里被显式写成 0 —— 只有 50 号的无 WHERE 全量重算才会把它补上；
+--      漏跑这一步不会报错，只表现为这 16 家门店在热度榜与搜索结果里排最后）：
+--        mysql -uroot -p < 50-seed-local-life-data.sql
+--   5. 再跑一遍本脚本（不可跳过：补依赖"评价"的聚合数据 —— 评论 / 点赞 / Feed 收件箱）。
+--      完整顺序见 README 第 6 步：50 → 51 → 50 → 51 → 52。
+--   6. 调接口（不可跳过）：
+--        POST /search/view/rebuild      —— 重建搜索读模型
+--        POST /shops/cache/geo/rebuild  —— 重建门店地理缓存
+--   7. 看脚本末尾"Step 9 · 自检"的输出：门店总数应比只有 50 号脚本时多出 16 家、
+--      门店类型覆盖数应为 10，其余各项都不应为 0。
+-- 幂等：全部语句都可以重复执行 —— 7 处按 id 区间先删后插、其余用 INSERT IGNORE
+--   或 INSERT ... WHERE NOT EXISTS；第二遍执行不报错，结果与第一遍一致。
+--   【注意】user_sign 的 DELETE 区间左端必须是 990000：INSERT 生成的 id 从 990000 起
+--   （990000 + n，n = 0..5），区间写成 990001 会让 990000 这一行永远删不掉，
+--   第二遍执行直接报 ERROR 1062 Duplicate entry '990000' for key 'user_sign.PRIMARY'。
+--
+-- ============================ 五、前置依赖 ============================
+--   1) 00-create-databases.sql；上级目录的原商城脚本；01 / 02；10 ~ 41 全部改造脚本；
+--      50-seed-local-life-data.sql（本脚本的评论/点赞/Feed 依赖它生成的评价）。
+--   2) 本脚本与 50 是"A 生成 → B 补类型 → A 再补 → B 再补"的交替关系，
+--      四步都不能省（README 第 6 步 6.1~6.4，与 docs/最终验收与交付清单.md 的 7.7 节一致）。
+--   3) 顺序反了会怎样：
+--      · 本脚本先于 50 → 没有评价可供评论/点赞/Feed 引用，这三段各插 0 行
+--        （不报错，只是静默为空，最难发现）；
+--      · 只跑一轮 50 → 51 → 新增的 16 家门店没有套餐、没有评价，首页点进去是空白页；
+--      · 门店类型只有 2 类时跑本脚本 → 分类 chip 点到其余 8 类仍是 0 家门店。
+--   4) 执行前请确认目标是演示库：本脚本不对库名做任何校验，指向生产库即按"三、影响面"生效。
+--
+-- ============================ 六、回滚方案 ============================
+-- 本脚本的产物可以按 id 区间清干净（区间与脚本内一致），但被它删掉的原有行无法由脚本还原：
+--   · 可逆部分（清掉演示数据；清完门店类型覆盖会退回 2 类，属预期）：
+--       DELETE FROM `llmall-shop`.`shop`              WHERE id BETWEEN 101 AND 199;
+--       DELETE FROM `llmall-content`.`blog_comments`  WHERE id BETWEEN 940001 AND 949999;
+--       DELETE FROM `llmall-search`.`search_history`  WHERE id BETWEEN 980001 AND 989999;
+--       DELETE FROM `llmall-promotion`.`voucher`      WHERE id BETWEEN 8001 AND 8099;
+--       DELETE FROM `llmall-promotion`.`user_voucher` WHERE id BETWEEN 8101 AND 8199;
+--       DELETE FROM `llmall-promotion`.`seckill_voucher` WHERE voucher_id BETWEEN 8001 AND 8099;
+--       DELETE FROM `llmall-user`.`user_sign`         WHERE id BETWEEN 990000 AND 999999;
+--     其余段（blog_like / follow / feed_inbox / search_hot_word / shop_stat / consume_record /
+--     user_info / cart / order_logistics）用的是 INSERT IGNORE 或 NOT EXISTS，
+--     清理由固定 id 或业务键精确删除，例如：
+--       DELETE FROM `llmall-content`.`follow`      WHERE id BETWEEN 960001 AND 960012;
+--       DELETE FROM `llmall-content`.`feed_inbox`  WHERE id BETWEEN 970001 AND 970999;
+--       DELETE FROM `llmall-cart`.`cart`           WHERE id IN (90001, 90002);
+--   · 不可逆部分：被上面七处 DELETE 掉的原有行（当 id 区间与真实数据重叠时，例如生产库里
+--     id 为 101~199 的门店）、以及被清掉的 shop_stat / consume_record 历史统计
+--     （这些行是"曾经发生过"的记录，重跑脚本只会造出"现在"的新值）。
+--     因此"四、执行步骤"第 2 步的备份不可跳过。
+--   · 恢复方式：mysql -uroot -p <对应库> < backup-51-*.sql（注意会覆盖备份之后的其它变更）。
+--
+-- ============================ 附、风险等级 ============================
+-- 高 —— 判据有两条，都指向"误在生产执行即不可自动恢复"：
+--   · 会按 id 区间 DELETE，其中 llmall-shop.shop 的 101~199 会整段删掉真实门店，
+--     而 item.shop_id / order.shop_id 仍指向被删的 id（不会级联清理，缺陷被延长）；
+--   · 其它六处 DELETE（评论、搜索历史、券、用户券、秒杀券、签到）同样不分数据来源，
+--     删掉即不可由脚本还原，历史统计类数据（shop_stat / consume_record）重跑只会造新值。
+--   结论：只在本地 / 演示库执行，生产环境一律跳过本脚本。
 -- =====================================================================
 
 -- =====================================================================
--- 一、补齐 8 个缺失类型的门店（id 101~116）
+-- Step 1 · 补齐 8 个缺失类型的门店（id 101~116）
 --     杭州坐标区间：经度 120.14~120.17，纬度 30.28~30.33
 -- =====================================================================
 DELETE FROM `llmall-shop`.`shop` WHERE id BETWEEN 101 AND 199;
@@ -61,7 +158,7 @@ VALUES
   (116, 'Lily Nails 日式美甲', 10, '', '武林商圈', '杭州市下城区延安路 588 号 3 层', 120.1662, 30.2761, 158, 2640, 1180, 47, 0, NOW(), NOW(), '10:30-21:00', 1, NOW(), NOW());
 
 -- =====================================================================
--- 二、内容域：评价评论 / 点赞 / 关注 / Feed 收件箱
+-- Step 2 · 内容域：评价评论 / 点赞 / 关注 / Feed 收件箱
 -- =====================================================================
 
 -- 2.1 评价评论：给前 60 条评价各加 2 条评论 + 1 条回复（共 180 行）
@@ -115,7 +212,7 @@ FROM `llmall-content`.`blog` b
 WHERE b.id BETWEEN 910001 AND 910240 AND b.user_id IN (1, 2, 3) AND (b.id % 7) = 0;
 
 -- =====================================================================
--- 三、搜索域：搜索历史 / 热词补充
+-- Step 3 · 搜索域：搜索历史 / 热词补充
 -- =====================================================================
 DELETE FROM `llmall-search`.`search_history` WHERE id BETWEEN 980001 AND 989999;
 
@@ -143,7 +240,7 @@ WHERE NOT EXISTS (SELECT 1 FROM `llmall-search`.`search_hot_word` e
                   WHERE e.word = w.word AND e.stat_date = CURDATE());
 
 -- =====================================================================
--- 四、门店域：近 7 天经营数据（pv/uv，可用于"门店经营看板"叙事）
+-- Step 4 · 门店域：近 7 天经营数据（pv/uv，可用于"门店经营看板"叙事）
 -- =====================================================================
 INSERT IGNORE INTO `llmall-shop`.`shop_stat` (shop_id, stat_date, pv, uv, create_time, update_time)
 SELECT s.id, DATE_SUB(CURDATE(), INTERVAL n.n DAY),
@@ -155,7 +252,7 @@ CROSS JOIN (SELECT 0 n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3
             UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6) n;
 
 -- =====================================================================
--- 五、五个库的事件消费记录（幂等/对账演示：同一事件只被消费一次）
+-- Step 5 · 五个库的事件消费记录（幂等/对账演示：同一事件只被消费一次）
 -- =====================================================================
 INSERT IGNORE INTO `llmall-shop`.`consume_record` (biz_type, biz_id, consumer, create_time) VALUES
   ('ORDER_PAID', '1900100000000000001', 'llmall-shop-service', NOW() - INTERVAL 2 DAY),
@@ -182,7 +279,7 @@ INSERT IGNORE INTO `llmall-promotion`.`consume_record` (biz_type, biz_id, consum
   ('ORDER_CANCELED', '1900100000000000002', 'llmall-promotion-service', NOW() - INTERVAL 1 HOUR);
 
 -- =====================================================================
--- 六、促销域：代金券 / 用户已领券 / 秒杀券
+-- Step 6 · 促销域：代金券 / 用户已领券 / 秒杀券
 -- =====================================================================
 DELETE FROM `llmall-promotion`.`voucher` WHERE id BETWEEN 8001 AND 8099;
 INSERT INTO `llmall-promotion`.`voucher` (id, shop_id, title, sub_title, rules, pay_value, actual_value, type, status, create_time, update_time) VALUES
@@ -210,7 +307,7 @@ INSERT INTO `llmall-promotion`.`seckill_voucher` (voucher_id, stock, begin_time,
   (8004, 120, NOW() - INTERVAL 6 HOUR, NOW() + INTERVAL 1 DAY, NOW(), NOW());
 
 -- =====================================================================
--- 七、用户域：画像补全 / 签到 / 积分 / 购物车
+-- Step 7 · 用户域：画像补全 / 签到 / 积分 / 购物车
 -- =====================================================================
 INSERT IGNORE INTO `llmall-user`.`user_info` (user_id, city, introduce, fans, followee, gender, birthday, credits, level, create_time, update_time) VALUES
   (1,  '杭州', '爱吃爱逛，探店 5 年老饕', 128, 36, 1, '1995-06-18', 1280, 5, NOW(), NOW()),
@@ -218,11 +315,11 @@ INSERT IGNORE INTO `llmall-user`.`user_info` (user_id, city, introduce, fans, fo
   (3,  '杭州', '健身+按摩，养生派',        54,  41, 1, '1993-11-25', 740,  3, NOW(), NOW()),
   (4,  '杭州', '带娃探店专业户',            72,  63, 2, '1990-08-09', 1520, 5, NOW(), NOW());
 
--- 【修复记录 · 2026-10 审计】下面的 DELETE 区间原来写成 990001 AND 999999，
---   而 INSERT 生成的 id 是 990000 + n（n = 0..5，最小 990000）—— 区间左端少算了 1，
---   于是 990000 这一行永远删不掉，第二次执行报
+-- 【注意】下面 DELETE 的区间左端必须是 990000，不能写成 990001：
+--   INSERT 生成的 id 是 990000 + n（n = 0..5，最小 990000），区间左端少算 1 时
+--   990000 这一行永远删不掉，第二遍执行报
 --       ERROR 1062 (23000): Duplicate entry '990000' for key 'user_sign.PRIMARY'
---   这个 bug 只在"第二遍执行"时才暴露，本次"连续跑两遍"的验收把它抓了出来。
+--   这个错误只在"第二遍执行"时才暴露，因此改区间后必须连续执行两遍验收。
 DELETE FROM `llmall-user`.`user_sign` WHERE id BETWEEN 990000 AND 999999;
 INSERT INTO `llmall-user`.`user_sign` (id, user_id, year, month, date, is_backup, create_time)
 SELECT 990000 + n.n, 19, YEAR(DATE_SUB(CURDATE(), INTERVAL n.n DAY)), MONTH(DATE_SUB(CURDATE(), INTERVAL n.n DAY)),
@@ -251,7 +348,7 @@ INSERT IGNORE INTO `llmall-cart`.`cart` (id, user_id, item_id, num, name, spec, 
 SELECT 90002, 19, 900103, 2, i.name, i.spec, i.price, i.image FROM `llmall-item`.`item` i WHERE i.id = 900103;
 
 -- =====================================================================
--- 八、交易域：物流单（实物订单）
+-- Step 8 · 交易域：物流单（实物订单）
 -- =====================================================================
 INSERT IGNORE INTO `llmall-trade`.`order_logistics`
   (order_id, logistics_number, logistics_company, contact, mobile, province, city, town, street, create_time, update_time)
@@ -262,7 +359,7 @@ WHERE o.order_type = 1 AND o.status IN (2, 3, 4)
   AND NOT EXISTS (SELECT 1 FROM `llmall-trade`.`order_logistics` l WHERE l.order_id = o.id);
 
 -- =====================================================================
--- 九、自检
+-- Step 9 · 自检
 -- =====================================================================
 SELECT '门店总数' t, COUNT(*) c FROM `llmall-shop`.`shop`
 UNION ALL SELECT '门店类型覆盖数', COUNT(DISTINCT type_id) FROM `llmall-shop`.`shop`

@@ -5,7 +5,7 @@
 #   主 127.0.0.1:7001   从 127.0.0.1:7002   哨兵 127.0.0.1:27001/27002/27003
 #   数据目录 /var/lib/redis-lab，日志 /var/log/redis-lab
 #
-# 目的：把"故障转移卡在 wait-promotion"这件事在**最简配置**下复现或排除。
+# 目的：把"故障转移卡在 wait-promotion"这件事在最简配置下复现或排除。
 # 最简 = 不带 rename-command、不带 replica-announce-*、单实例目录、无 AOF/RDB 调优。
 #
 # 用法：bash lab-cluster.sh {up|down|status|promote-test|failover-test|add-configs}
@@ -37,7 +37,7 @@ mk_dirs() {
 extra_conf() {
   local role="$1"
   # rename-command 分组定位：现役集群为"加固"做了四条 rename，
-  # 二分已确认**就是这一组导致故障转移失效**（只加 replica-announce 时 t+5s 切换成功）。
+  # 二分已确认就是这一组导致故障转移失效（只加 replica-announce 时 t+5s 切换成功）。
   # 现在逐条试，找出具体是哪一条 —— 每条单测一次，避免组合掩盖。
   case "$STATE" in
     ren-config)   echo 'rename-command CONFIG "CONFIG_9f3a1c"' ;;
@@ -79,7 +79,7 @@ write_node_conf() {
   local port="$1"
   local role="$2"
   # 【注意】不要写成 `local port="$1" role="$2" conf="$BASE/$port/..."`：
-  # local 的多重赋值会**先展开所有右侧表达式**，此时 port 尚未成为局部变量，
+  # local 的多重赋值会先展开所有右侧表达式，此时 port 尚未成为局部变量，
   # 在 set -u 下直接报 "port: unbound variable"（实测踩过）。
   local conf="$BASE/$port/redis.conf"
   {

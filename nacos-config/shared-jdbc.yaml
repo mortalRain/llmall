@@ -10,6 +10,13 @@ spring:
       # （表现为 Too many connections，连 root 都被拒）。本地/演示负载 5 条足够，最坏情况从 110 降到 55。
       maximum-pool-size: 5
       minimum-idle: 1
+      # 【取值依据】连接获取超时 5s：池满时请求最多等 5s 就快速失败（默认 30s 会让 Tomcat 线程
+      # 陪着一起挂住，把"池被占满"放大成"接口全线变慢"）。
+      # 【调大后果】池真的耗尽时每个请求的等待时间成比例拉长，故障从快速失败变成整体卡死。
+      # 【调小后果】DB 一次短暂抖动就让正常请求拿不到连接，失败率上升。
       connection-timeout: 5000
+      # 空闲连接回收：空闲超过 60s 且总数大于 minimum-idle 时归还给 MySQL，避免占着不用。
       idle-timeout: 60000
+      # 【注意】连接最长寿命 10 分钟，必须远小于 MySQL 的 wait_timeout（默认 8 小时）：
+      # 超龄连接会被服务端单方面关闭而客户端仍以为可用，取到即报 Communications link failure。
       max-lifetime: 600000

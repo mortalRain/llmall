@@ -65,6 +65,11 @@ llmall:
   db:
     # 库名：shared-jdbc.yaml 用 ${llmall.db.database} 拼 url；host/pw 在 application-local.yaml。
     database: llmall-item
+  # 【注意】本服务当前不解析 JWT：没有 JwtTool Bean、也没有 JwtProperties 绑定 —— 身份由网关注入的
+  # user-info 头承载，UserInfoInterceptor 只校验内部凭证头后采信该头，不做验签、不需要密钥库。
+  # 全项目只有 llmall-gateway 与 llmall-user-service 装配 JwtTool，因此本段不会生效（保留仅为口径一致）；
+  # 要改令牌寿命请改那两处的 llmall.jwt.tokenTTL。若将来本服务要自行验签，
+  # 须先补 KeyPair Bean 与 @EnableConfigurationProperties(JwtProperties.class)。
   jwt:
     location: ${LLMALL_JKS_LOCATION:classpath:llmall.jks}
     alias: llmall
