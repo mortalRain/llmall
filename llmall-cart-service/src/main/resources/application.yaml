@@ -5,6 +5,17 @@ feign:
     enabled: true  # 开启 OkHttp 连接池
   sentinel:
     enabled: true  # 开启 Feign 对 Sentinel 的支持
+  client:
+    config:
+      default:
+        # 【注意】Feign 默认没有读超时：下游 hang 住时调用方会一直等，最终把线程池与连接池一起耗尽
+        # （而不是快速失败 + 走兜底）。口径与 item/trade/user/pay 四个服务保持一致（2s / 5s）。
+        connectTimeout: 2000
+        readTimeout: 5000
+        # 【注意】不在此处配 retryer：Spring Cloud OpenFeign 默认就是 Retryer.NEVER_RETRY，
+        # 且禁止自动重试是本项目的硬约束 —— 重试发生在"连接超时/IOException"之后，调用方无法区分
+        # "请求没发出去"与"发出去了但响应没回来"，后者重试会对写接口造成重复副作用。
+        # 显式声明见 CartFeignConfig（feign.Retryer.NeverRetry 是内部类，无法用字符串在这里构造）。
 llmall:
   swagger:
     title: "同城生活电商综合服务系统接口文档"
@@ -23,6 +34,12 @@ spring:
     # 显式声明 local（与其它服务一致）：local 存的是本机/虚拟机地址
     active: local
   cloud:
+    loadbalancer:
+      retry:
+        # 【2026-10-15】显式关闭负载均衡层重试。本层与 Feign 层的 Retryer 是两套独立机制：
+        # Feign 层已由 NoRetryFeignConfig 钉死为 NEVER_RETRY，而本层由 spring.cloud.loadbalancer.retry 控制（当前默认关闭）。
+        # 写接口一旦在这层被重试就是重复扣款/重复下单，且不会有任何编译或运行时报错 —— 显式写死 false 防回归。
+        enabled: false
     sentinel:
       # eager：是否在启动期就向 Sentinel 控制台注册；默认 false = 惰性注册，控制台要等第一次请求进来才看到实例。
       # 【注意】不要改成 true：eager=true 会在启动期就去连控制台，控制台没起（开发常态）时

@@ -24,6 +24,12 @@ spring:
   # 数据源（url / driver / 账号 / hikari 池参数）统一来自 Nacos 的 shared-jdbc.yaml，本文件不再复制一份
   # 库名由下方 llmall.db.database 提供，host/pw 在 application-local.yaml
   cloud:
+    loadbalancer:
+      retry:
+        # 【2026-10-15】显式关闭负载均衡层重试。本层与 Feign 层的 Retryer 是两套独立机制：
+        # Feign 层已由 NoRetryFeignConfig 钉死为 NEVER_RETRY，而本层由 spring.cloud.loadbalancer.retry 控制（当前默认关闭）。
+        # 写接口一旦在这层被重试就是重复扣款/重复下单，且不会有任何编译或运行时报错 —— 显式写死 false 防回归。
+        enabled: false
     sentinel:
       transport:
         # Sentinel 控制台地址（默认按"控制台与应用同机"取）：换环境用启动参数
@@ -49,6 +55,11 @@ llmall:
   db:
     # 库名：shared-jdbc.yaml 用 ${llmall.db.database} 拼 url；host/pw 在 application-local.yaml。
     database: llmall-pay
+  # 【注意】本服务当前不解析 JWT：没有 JwtTool Bean、也没有 JwtProperties 绑定 —— 身份由网关注入的
+  # user-info 头承载，UserInfoInterceptor 只校验内部凭证头后采信该头，不做验签、不需要密钥库。
+  # 全项目只有 llmall-gateway 与 llmall-user-service 装配 JwtTool，因此本段不会生效（保留仅为口径一致）；
+  # 要改令牌寿命请改那两处的 llmall.jwt.tokenTTL。若将来本服务要自行验签，
+  # 须先补 KeyPair Bean 与 @EnableConfigurationProperties(JwtProperties.class)。
   jwt:
     location: ${LLMALL_JKS_LOCATION:classpath:llmall.jks}
     alias: llmall

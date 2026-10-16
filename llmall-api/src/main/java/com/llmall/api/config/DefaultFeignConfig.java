@@ -10,6 +10,26 @@ import feign.RequestTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 
+/**
+ * Feign 全局默认配置：为所有服务间调用补齐"身份 + 链路"请求头，并统一日志级别与降级实现。
+ *
+ * 【核心职责】
+ * 1. 补齐内部凭证 x-internal-token 与服务间凭证 x-service-token —— 服务到服务的调用不经过网关，
+ *    缺了这两个头，下游要么把透传的 user-info 当伪造头丢掉（表现为莫名其妙的 401），
+ *    要么被资金类内部接口的 fail-closed 守卫直接拒绝。
+ * 2. 透传全链路 traceId：当前线程取不到就现生成一个，避免定时任务/后台线程发起的调用产生无主日志。
+ * 3. 透传 user-info，且只在 UserContext 有值时才写。
+ * 4. 统一 Feign 日志级别为 BASIC，避免请求体里的支付密码等明文凭据落盘。
+ *
+ * 【使用方式】本类刻意不加 @Configuration、也不参与组件扫描：各服务在自己的启动类上用
+ * @EnableFeignClients(defaultConfiguration = DefaultFeignConfig.class) 显式引入，
+ * 这样配置只对项目内的 Feign 客户端生效，不会波及第三方客户端的全局默认。
+ *
+ * 【注意】本类不负责重试策略 —— 显式禁止 Feign 自动重试的是 NoRetryFeignConfig，
+ * 目前只有 llmall-cart-service 把两个配置一起引入，其余服务依赖 Spring Cloud OpenFeign
+ * 默认的 Retryer.NEVER_RETRY。该默认值一旦被改动（例如引入 spring-retry）就会静默失效，
+ * 而写接口被重试就是重复下单/重复扣款，因此新增服务建议照 cart 的写法把两个配置一起引入。
+ */
 public class DefaultFeignConfig {
 
     /**
