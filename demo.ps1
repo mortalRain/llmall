@@ -44,6 +44,7 @@ param(
     [switch]$SkipBuild,             # 跳过 mvn package + docker build（复用已有镜像）
     [switch]$SkipSql,               # 跳过建库与灌数
     [switch]$SkipNacos,             # 跳过 Nacos 配置导入
+    [switch]$ForceNacos,            # Nacos 上已有与仓库不一致的配置时，允许覆盖（默认停下问）
     [switch]$SkipEs,                # 跳过 ES 索引与灌数
     [switch]$SkipSmoke,             # 跳过 MallE2E 冒烟
     [switch]$NoCleanup,             # 不清理冒烟新建的数据
@@ -410,7 +411,39 @@ try {
         Write-Step 'Nacos 共享配置与网关路由（Open API 导入）'
         $nacosDir = Join-Path $RepoRoot 'nacos-config'
         $files = @(Get-ChildItem $nacosDir -File | Where-Object { $_.Name -like '*.yaml' -or $_.Name -eq 'gateway-routes.json' })
+
+        # 先用**原始文本**读一遍现网值，把每份分成"不存在 / 已一致 / 不一致"三类。
+        # 【为什么必须用 Invoke-WebRequest 而不是 Invoke-RestMethod】RestMethod 会按 Content-Type 把
+        # json 响应反序列化成对象，`"$back"` 拿到的就不是原文（gateway-routes.json 会变成一个对象数组的
+        # 字符串），于是"回读比对"对 json 配置恒为假 —— 看上去在核对，实际什么都没核对。
+        $toImport = @()
+        $conflict = @()
         foreach ($f in $files) {
+            $getUrl = "$NacosUrl/nacos/v1/cs/configs?dataId=$([System.Uri]::EscapeDataString($f.Name))&group=DEFAULT_GROUP"
+            $remote = $null
+            try { $remote = (Invoke-WebRequest -Uri $getUrl -TimeoutSec 20 -UseBasicParsing).Content } catch { $remote = $null }
+            $local = ([System.IO.File]::ReadAllText($f.FullName) -replace "`r`n", "`n").Trim()
+            if ($null -eq $remote -or "$remote".Trim() -eq '') {
+                Write-Info ("  " + $f.Name + " : Nacos 上不存在 → 将导入")
+                $toImport += $f
+            }
+            elseif (("$remote" -replace "`r`n", "`n").Trim() -eq $local) {
+                Write-Info ("  " + $f.Name + " : 已与仓库一致 → 跳过（幂等）")
+            }
+            else {
+                Write-Warn2 ($f.Name + " : 与仓库版本**不一致**（远端 " + "$remote".Length + " B / 仓库 " + $local.Length + " B）")
+                $conflict += $f
+            }
+        }
+        # 不一致时默认停下：导入会覆盖别人在 Nacos 上改过的配置，属于"动别人的环境"，要显式授权。
+        if ($conflict.Count -gt 0 -and -not $ForceNacos) {
+            Write-Host ''
+            Write-Host ("有 " + $conflict.Count + " 份配置与仓库版本不一致：" + (($conflict | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Red
+            Write-Host '导入会用仓库版本覆盖它们。确认这是你要的（例如这一整套本来就是按仓库重建的），加 -ForceNacos 重跑；' -ForegroundColor Red
+            Write-Host '否则请先把 Nacos 上的版本导出备份，或改用 -SkipNacos。' -ForegroundColor Red
+            exit 4
+        }
+        foreach ($f in ($toImport + $conflict)) {
             $type = if ($f.Extension -eq '.json') { 'json' } else { 'yaml' }
             $content = [System.IO.File]::ReadAllText($f.FullName)
             # 自己拼 form body 而不用哈希表：PowerShell 的哈希表表单编码在 5.1 下按 ASCII 走，
@@ -424,8 +457,10 @@ try {
             }
             catch { Fail ("导入 " + $f.Name + " 失败：" + $_.Exception.Message) }
             if ("$r" -ne 'true') { Fail ("Nacos 拒绝导入 " + $f.Name + "（返回 $r）") }
-            # 回读校验：Nacos 的 GET 有读缓存，发布后立刻回读可能拿到旧值，故规范换行后再比对
-            $back = Invoke-RestMethod -Method Get -Uri "$NacosUrl/nacos/v1/cs/configs?dataId=$([System.Uri]::EscapeDataString($f.Name))&group=DEFAULT_GROUP" -TimeoutSec 30
+            # 回读校验同样用原始文本（理由见上）。Nacos 的 GET 有读缓存，故规范化换行后比对。
+            Start-Sleep -Milliseconds 300
+            $getUrl = "$NacosUrl/nacos/v1/cs/configs?dataId=$([System.Uri]::EscapeDataString($f.Name))&group=DEFAULT_GROUP"
+            $back = (Invoke-WebRequest -Uri $getUrl -TimeoutSec 30 -UseBasicParsing).Content
             $a = ($content -replace "`r`n", "`n").Trim()
             $b = ("$back" -replace "`r`n", "`n").Trim()
             if ($a -ne $b) {
@@ -435,7 +470,7 @@ try {
             }
             else { Write-Info ("  导入并回读通过：" + $f.Name + "  (" + $type + ", " + $content.Length + " 字节)") }
         }
-        Add-Summary ("Nacos：导入 " + $files.Count + " 份配置（含 gateway-routes.json）并回读校验通过")
+        Add-Summary ("Nacos：导入 " + ($toImport.Count + $conflict.Count) + " 份，跳过已一致 " + ($files.Count - $toImport.Count - $conflict.Count) + " 份；回读校验完成")
     }
 
     # ------------------------------------------------------------ 5. ES 索引与灌数

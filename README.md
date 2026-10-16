@@ -284,7 +284,8 @@ pwsh -File demo.ps1 -Down      # 收尾（加 -Volumes 连数据卷一起删）
 JDK 11 与 Maven（`-SkipBuild` 可复用已有镜像）。只有 Windows PowerShell 5.1 的机器同样可用。
 `--profile` 默认 `full` 而不是 `core`：冒烟链路要 trade/cart/pay/promotion/search，`core` 起不全必然红。
 ES 默认起 addon 容器；若 ES 已在本机原生安装（含 IK 插件），用 `-ExternalEs -EsUrl http://127.0.0.1:9200`
-让脚本复用外部实例、不抢 9200 端口。
+让脚本复用外部实例、不抢 9200 端口。Nacos 导入是**幂等且不覆盖**的：远端不存在或已一致才写，
+遇到与仓库版本不一致的配置会停下并列出清单（要用仓库版本覆盖它们得显式加 `-ForceNacos`）。
 
 ### 开发约定：注释规范
 
