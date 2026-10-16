@@ -38,6 +38,11 @@ benchmark/report/
 *.tmp
 *.bak
 
+# ---------- 闸门构建产物 ----------
+# 指纹工具（CommentFingerprint / YamlFingerprint）与探针编译出的 class，
+# 由 gates/gate-env.ps1 的 Initialize-GateClasses 按需生成，不入库。
+gates/build/
+
 # ---------- 操作系统 ----------
 .DS_Store
 Thumbs.db

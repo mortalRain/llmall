@@ -1,0 +1,27 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "refresh_interval": "1s"
+  },
+  "mappings": {
+    "properties": {
+      "shopId":    { "type": "long" },
+      "name":      { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+      "typeId":    { "type": "long" },
+      "typeName":  { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+      "area":      { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+      "address":   { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+      "avgPrice":  { "type": "long" },
+      "score":     { "type": "integer" },
+      "comments":  { "type": "integer" },
+      "sold":      { "type": "integer" },
+      "hotScore":  { "type": "double" },
+      "status":    { "type": "integer" },
+      "location":  { "type": "geo_point" },
+
+      "//": "时间统一用 epoch millis 存：无时区/格式歧义，且 spring-data-elasticsearch 的 LocalDateTime 转换在 4.4 上会把值截断成 yyyy-MM-dd（实测踩过）",
+      "eventTimestamp": { "type": "date", "format": "epoch_millis" }
+    }
+  }
+}
