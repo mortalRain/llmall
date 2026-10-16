@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS `order` (
   `total_fee` int NOT NULL DEFAULT '0' COMMENT '总金额，单位为分',
   `payment_type` tinyint(1) unsigned zerofill NOT NULL COMMENT '支付类型，1、支付宝，2、微信，3、扣减余额',
   `user_id` bigint NOT NULL COMMENT '用户id',
-  `status` tinyint(1) DEFAULT NULL COMMENT '订单的状态，1、未付款 2、已付款,未发货 3、已发货,未确认 4、确认收货，交易成功 5、交易取消，订单关闭 6、交易结束，已评价',
+  `status` tinyint(1) DEFAULT NULL COMMENT '订单状态：1 未付款 2 已付款（待发货/待核销） 5 交易取消/订单关闭 7 已核销（与 Order.STATUS_* 逐值一致）',
   `create_time` timestamp NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `pay_time` timestamp NULL DEFAULT NULL COMMENT '支付时间',
   `consign_time` timestamp NULL DEFAULT NULL COMMENT '发货时间',

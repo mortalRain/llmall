@@ -63,6 +63,11 @@ mysql -uroot -p < 23-content-image-default.sql  # 5.9  ⚠️ 依赖 5.8：blog 
 mysql -uroot -p < 31-order-alter.sql            # 5.10 交易域改造（order 加 order_type/shop_id/voucher_id/verify_code/verify_time + 索引）
 mysql -uroot -p < 40-search.sql                 # 5.11 搜索域建表（shop_search_doc / search_hot_word / search_history）
 mysql -uroot -p < 41-search-geo.sql             # 5.12 ⚠️ 依赖 5.11：给 shop_search_doc 补 x/y
+mysql -uroot -p < 62-align-dict-comments.sql    # 5.13 【存量库注释对齐；全新初始化可跳过】7 条纯 ALTER ... COMMENT
+mysql -uroot -p < 60-user-pay-password.sql      # 5.13 用户域改造（user 加 pay_password，拆分登录/支付口令）
+                                                #      ⚠️ 必须在**发布应用之前**执行：应用启动即依赖该列
+# 5.14 存量弱口令批量重置（61 号）**默认不执行**：它会改变用户登录凭据，
+#      需先跑脚本第 1 段的清点语句确认数量，再手动放开第 2 段注释执行
 
 # ── 6) 演示数据（**仅演示库，勿在生产执行**：50/51 内含按 id 区间的 DELETE） ──
 mysql -uroot -p < 50-seed-local-life-data.sql   # 6.1  门店套餐 + 精选实物 + 评价 + 演示订单
@@ -144,6 +149,9 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 | 50 | `50-seed-local-life-data.sql` | 演示数据：`DELETE`（id 区间）+ 重插；`UPDATE` 幂等收敛；`INSERT` 多带 `NOT EXISTS` 守卫。**⚠️ 会删数据，仅演示库** |
 | 51 | `51-seed-more-data.sql` | 演示数据：7 处 `DELETE`（id 区间）+ 重插；`INSERT IGNORE` / `NOT EXISTS`。**⚠️ 会删数据，仅演示库** |
 | 52 | `52-fix-orphan-pay-orders.sql` | 纯 `UPDATE`（孤儿单退一次款后即无孤儿，重复执行为空操作） |
+| 60 | `60-user-pay-password.sql` | **新增守卫**：`COLUMNS` 判断 `pay_password` 是否已存在。`ADD COLUMN ... NOT NULL DEFAULT '123456'` 会把**既有行**一并填充，故存量账号余额支付行为不变。**⚠️ 必须早于应用发布** |
+| 61 | `61-user-weak-password-reset.sql` | 存量弱口令重置：第 1 段清点、第 2 段 `UPDATE`（**默认注释，需人工启用**）、第 3 段校验。`WHERE password = '<初始哈希>'` 保证幂等且不误伤已改密账号 |
+| 62 | `62-align-dict-comments.sql` | **存量库注释对齐（全新初始化可跳过）**：7 条纯 `ALTER TABLE ... MODIFY COLUMN ... COMMENT`，把 `stock_flow` / `voucher` / `user_voucher` / `pay_order`(×2) / `order` / `message_log` 的字典型注释改成与代码事实一致。**只改 COMMENT，不动类型/可空性/默认值/数据；可重复执行**。源文件已同步为同一口径，故新库无需执行 |
 | 99 | `99-migrate-dianping-data.sql` | `INSERT ... ON DUPLICATE KEY UPDATE` + `UPDATE ... WHERE hot_score = 0` |
 
 ### 3.1 守卫模板（统一写法）
@@ -176,7 +184,8 @@ PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 2. **数据迁移语句默认是注释状态**（每个脚本末尾的 `INSERT INTO ... SELECT`）。先看一遍再取消注释 ——
    尤其是 `21-user-alter.sql` 里的用户迁移，密码策略要先定：**统一 BCrypt，历史数据重置密码**，
    不要留两套校验分支。
-3. **`ALTER TABLE user ADD UNIQUE KEY uk_phone`** 可能因历史数据里 phone 重复/NULL 而失败：
+3. **`ALTER TABLE user ADD UNIQUE KEY uk_phone`** 可能因历史数据里 phone **重复**而失败
+   （MySQL 唯一索引允许多个 NULL，所以 NULL 多不会失败 —— 只有重复的非 NULL 值才会）：
    先 `SELECT phone, COUNT(*) FROM user GROUP BY phone HAVING COUNT(*) > 1;` 清洗后再加。
    这是**数据**问题，不是幂等问题（索引已存在时守卫会跳过，不会重复报错）。
 4. **MySQL 8 兼容性**：本目录脚本已去掉原点评脚本里的 `ZEROFILL` 和 `'0000-00-00'` 默认值
