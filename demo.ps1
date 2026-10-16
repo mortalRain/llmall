@@ -452,8 +452,12 @@ try {
         $auditOut = Invoke-SqlFile -Path "$SqlMerged\52a-orphan-pay-orders-audit.sql"
         $auditOut | Set-Content -Encoding UTF8 (Join-Path $WorkDir "52a-audit-$Stamp.txt")
         $auditOut | ForEach-Object { Write-Info ('  ' + $_) }
-        $lastLine = @($auditOut | Where-Object { $_ -and $_.Trim() -ne '' })[-1]
-        $orphans = ($lastLine -split "`t")[0]
+        # 取"最后一个结果集的第一个字段"。52a 的查询 3 是最后一条且只返回 1 行，
+        # 所以 batch 模式（-N -B，无表头）下它就是最后一行、第一个 tab 字段。
+        # 先滤掉 mysql 客户端自己的告警行（口令写在命令行上会多出一条 [Warning]），否则可能被当成数据读。
+        $dataLines = @($auditOut | Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^mysql:' -and $_ -notmatch '^\[Warning\]' })
+        if ($dataLines.Count -eq 0) { Fail '52a 没有任何输出 —— 建库段可能没跑成功，先看上面的日志' }
+        $orphans = (($dataLines[-1]) -split "`t")[0].Trim()
         if ($orphans -ne '0') {
             Write-Host ''
             Write-Host "52a 清点结果 non_user1_paid_orphans = $orphans（≠ 0）—— 停下报告。" -ForegroundColor Red
