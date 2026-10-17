@@ -1,6 +1,7 @@
 package com.llmall.content.controller;
 
 import com.llmall.common.utils.UserContext;
+import com.llmall.content.domain.vo.FeedItemVO;
 import com.llmall.content.service.IFollowService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import io.swagger.v3.oas.annotations.Operation;
@@ -48,10 +49,26 @@ public class FollowController {
         return followService.followerCount(userId);
     }
 
-    @Operation(summary = "我的 Feed 流（滚动分页：传上一页最后一条 id）")
+    /**
+     * 我的 Feed 流：返回完整内容（笔记详情 + 作者 id），一次请求即拿到可渲染的数据。
+     *
+     * 【游标】lastId 传上一页最后一条的 feedId（收件箱记录 id），首页不传。
+     * 【为什么返回完整内容】只返回 blogId 时，客户端要为每条笔记各发一次详情请求，
+     * 阅读放大从服务端挪到了网络侧；服务端已用一条 IN 查询把整页笔记批量取回并合并。
+     * 【兼容】只需要 id 列表的调用方走 {@link #feedIds}（同一份收件箱查询，形状不变）。
+     */
+    @Operation(summary = "我的 Feed 流（滚动分页：传上一页最后一条的 feedId，返回笔记详情）")
     @GetMapping("/feed")
-    public List<Long> feed(@RequestParam(value = "lastId", required = false) Long lastId,
-                           @RequestParam(value = "size", required = false, defaultValue = "10") Integer size) {
+    public List<FeedItemVO> feed(@RequestParam(value = "lastId", required = false) Long lastId,
+                                 @RequestParam(value = "size", required = false, defaultValue = "10") Integer size) {
+        return followService.queryFeedItems(UserContext.getUser(), lastId, size);
+    }
+
+    /** 我的 Feed 流（仅 id 列表）：供只要 id、自己再取详情的调用方使用，滚动分页口径与上面的 feed 一致 */
+    @Operation(summary = "我的 Feed 流（仅收件箱记录对应的笔记 id 列表）")
+    @GetMapping("/feed/ids")
+    public List<Long> feedIds(@RequestParam(value = "lastId", required = false) Long lastId,
+                              @RequestParam(value = "size", required = false, defaultValue = "10") Integer size) {
         return followService.queryFeed(UserContext.getUser(), lastId, size);
     }
 }

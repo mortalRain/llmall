@@ -5,9 +5,13 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.UnauthorizedException;
 import com.llmall.common.utils.CollUtils;
+import com.llmall.common.utils.UserContext;
 import com.llmall.content.constant.ContentRedisScripts;
+import com.llmall.content.domain.po.Blog;
 import com.llmall.content.domain.po.FeedInbox;
 import com.llmall.content.domain.po.Follow;
+import com.llmall.content.domain.vo.FeedItemVO;
+import com.llmall.content.mapper.BlogMapper;
 import com.llmall.content.mapper.FeedInboxMapper;
 import com.llmall.content.mapper.FollowMapper;
 import com.llmall.content.service.IFollowService;
@@ -24,6 +28,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -41,7 +46,11 @@ import static com.llmall.content.constant.ContentRedisConstants.*;
 @RequiredArgsConstructor
 public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> implements IFollowService {
 
+    /** 笔记状态"已发布"：对外可见的唯一状态（与笔记详情的可见性判据保持一致） */
+    private static final int STATUS_PUBLISHED = 1;
+
     private final FeedInboxMapper feedInboxMapper;
+    private final BlogMapper blogMapper;
     private final StringRedisTemplate redisTemplate;
 
     @Override
@@ -187,6 +196,77 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
             return CollUtils.emptyList();
         }
         return list.stream().map(FeedInbox::getBlogId).collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    /**
+     * 读 Feed 的完整内容：先按游标取一页收件箱，再用一条 IN 查询把整页笔记一次取回并按收件箱顺序合并。
+     *
+     * 【为什么必须批量】逐条查笔记是阅读路径最典型的放大点：一页 10 条就是 10 次往返，
+     * 而放大倍数随页大小线性增长。这里的固定口径是"每请求 2 条 SQL"（收件箱 1 条 + 笔记 IN 1 条），
+     * 与页大小无关，可直接用 MySQL 的 Com_select 增量 ÷ 请求数 核对。
+     *
+     * 【可见性】与笔记详情同口径：仅 status=1（已发布）对他人可见，作者本人可看到自己未过审的内容。
+     * 不可见或已被删除的条目直接跳过而不是占位返回 —— 返回一个空壳会把"不该给看"变成"看起来没内容"。
+     *
+     * 【失效条件】若把 IN 查询改回循环内单条查询，本条链路的 SQL 条数会随页大小线性增长；
+     * 若去掉可见性判定，被屏蔽的笔记会经 Feed 继续对外传播。
+     */
+    @Override
+    public List<FeedItemVO> queryFeedItems(Long userId, Long lastId, Integer size) {
+        if (userId == null) {
+            return CollUtils.emptyList();
+        }
+        int limit = (size == null || size <= 0) ? 10 : Math.min(size, 50);
+        List<FeedInbox> inbox = feedInboxMapper.selectList(new LambdaQueryWrapper<FeedInbox>()
+                .eq(FeedInbox::getUserId, userId)
+                .lt(lastId != null, FeedInbox::getId, lastId)
+                .orderByDesc(FeedInbox::getId)
+                .last("LIMIT " + limit));
+        if (CollUtils.isEmpty(inbox)) {
+            return CollUtils.emptyList();
+        }
+        // 同一篇笔记可能因重复推送出现在多行（唯一索引 uk 只防 (user_id, blog_id) 重复插入，理论上不会），
+        // 去重后批量查，保证 IN 参数不会重复膨胀
+        List<Long> blogIds = inbox.stream().map(FeedInbox::getBlogId).distinct()
+                .collect(Collectors.toCollection(ArrayList::new));
+        Map<Long, Blog> blogMap = blogMapper.selectBatchIds(blogIds).stream()
+                .collect(Collectors.toMap(Blog::getId, blog -> blog, (left, right) -> left));
+
+        Long currentUserId = UserContext.getUser();
+        List<FeedItemVO> items = new ArrayList<>(inbox.size());
+        for (FeedInbox row : inbox) {
+            Blog blog = blogMap.get(row.getBlogId());
+            if (blog == null) {
+                // 笔记被物理删除：收件箱里还留着指针，跳过而不是抛异常，否则一条脏数据会让整页读不出来
+                log.debug("Feed 项对应的笔记已不存在，跳过: feedId={}, blogId={}", row.getId(), row.getBlogId());
+                continue;
+            }
+            boolean authorSelf = currentUserId != null && currentUserId.equals(blog.getUserId());
+            if (!Integer.valueOf(STATUS_PUBLISHED).equals(blog.getStatus()) && !authorSelf) {
+                log.debug("Feed 项对应笔记当前不可见，跳过: feedId={}, blogId={}, status={}",
+                        row.getId(), row.getBlogId(), blog.getStatus());
+                continue;
+            }
+            items.add(toFeedItem(row, blog));
+        }
+        return items;
+    }
+
+    /** 收件箱记录 + 笔记详情 → 对外视图；authorId 取收件箱记录上的值（写扩散时落下的作者） */
+    private FeedItemVO toFeedItem(FeedInbox row, Blog blog) {
+        return new FeedItemVO()
+                .setFeedId(row.getId())
+                .setBlogId(blog.getId())
+                .setAuthorId(row.getAuthorId() != null ? row.getAuthorId() : blog.getUserId())
+                .setShopId(blog.getShopId())
+                .setTitle(blog.getTitle())
+                .setImages(blog.getImages())
+                .setContent(blog.getContent())
+                .setScore(blog.getScore())
+                .setLiked(blog.getLiked())
+                .setComments(blog.getComments())
+                .setStatus(blog.getStatus())
+                .setCreateTime(blog.getCreateTime());
     }
 
     /** DB 权威计数：粉丝数，走 idx_followed(follow_user_id) 索引 */

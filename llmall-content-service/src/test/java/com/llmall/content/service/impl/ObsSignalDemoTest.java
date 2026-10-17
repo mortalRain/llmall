@@ -48,7 +48,9 @@ class ObsSignalDemoTest {
     }
 
     private FollowServiceImpl serviceWith(long followerCount) throws Exception {
-        FollowServiceImpl service = new FollowServiceImpl(null, null);
+        // 走的是"超阈值直接返回"与"粉丝为 0 直接返回"两条分支，两条都不碰 feedInboxMapper / blogMapper / redisTemplate，
+        // 所以三者传 null 即可（构造顺序见 FollowServiceImpl 的 final 字段声明）
+        FollowServiceImpl service = new FollowServiceImpl(null, null, null);
         Field baseMapper = ServiceImpl.class.getDeclaredField("baseMapper");
         baseMapper.setAccessible(true);
         baseMapper.set(service, stubMapper(followerCount));
