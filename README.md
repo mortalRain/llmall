@@ -422,3 +422,22 @@ curl -b cookie.txt http://localhost:8090/app/llmall-cart-service/machines.json  
 > ② 历史上这段配置的默认值是 `192.168.189.128:8090`（"控制台部署在 VM"的口径）。按实际拓扑
 > （服务在 Windows IDEA、中间件在 VM）改成 `localhost:8090` 后，IDEA 里起服务即可直接连上控制台；
 > 变更记录见 `../最终验收与交付清单.md` 第九节。
+
+---
+
+## 十、安全须知（公开仓库口径）
+
+- **不入库的东西**（`.gitignore` 保证）：`target/`、`logs/`、`.env`、`*.jks`。
+  其中 `llmall.jks` 是 **JWT 签名私钥**，首次 clone 后须先跑 `scripts/gen-jks.ps1` 生成，
+  否则网关与用户服务起不来（仓库里没有私钥，所以 yaml 中的 JKS 口令默认值单独存在时不可用）。
+- **仓库里保留的**：`docker/`、`nacos-config/` 与各服务 `application.yaml` 中的**本地演示默认凭据**
+  —— 它们只对"本机 + 私有 VM 的演示环境"有意义，**任何对外部署前必须替换并轮换**：
+
+  | 凭据 | 位置 | 换法 |
+  |---|---|---|
+  | MySQL root | `docker/docker-compose-infra-lite.yml:27` | 改 `MYSQL_ROOT_PASSWORD`，同步 `deploy/.env` |
+  | Redis | `docker/docker-compose-infra-lite.yml:51` | `REDIS_PASSWORD`（已支持环境变量） |
+  | Seata 控制台 / DB | `docker/seata/application.yml:20、48` | 改控制台账号与 DB 口令 |
+  | JKS 口令 | 5 个服务 `application.yaml` | `LLMALL_JKS_PASSWORD`（已有环境变量兜底） |
+
+> **一句话**：这是**演示工程**，不是生产部署模板；照搬上线前请先替换全部默认凭据。
