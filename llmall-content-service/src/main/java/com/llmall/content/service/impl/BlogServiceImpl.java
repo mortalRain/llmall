@@ -330,7 +330,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                         .eq(BlogComments::getBlogId, blogId)
                         // 只出 status=0（正常）的评论：1 被举报、2 禁止查看 若照样返回，评论审核就白做。
                         // 口径以本模块建表语句与 BlogComments 字段注释为准，新增评论也写 0，读写一致。
-                        .eq(BlogComments::getStatus, 0)
+                        // 【注意】这里是"只允许 0"，比"排除 2"更严：将来新增任何非 0 状态都默认不展示，
+                        // 不会出现"新增一个状态却忘了加过滤"的漏网。不要把它降级成 ne(status, 2)。
+                        .eq(BlogComments::getStatus, BlogComments.STATUS_NORMAL)
                         .orderByDesc(BlogComments::getCreateTime));
         return PageDTO.of(result, BlogComments.class);
     }
