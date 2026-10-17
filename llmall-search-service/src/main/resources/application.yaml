@@ -22,7 +22,7 @@ spring:
       http-method-specify: true
 llmall:
   swagger:
-    title: "同城生活电商综合服务系统 · 搜索服务接口文档"
+    title: "同城生活电商平台 · 搜索服务接口文档"
     package: com.llmall.search.controller
   db:
     database: llmall-search

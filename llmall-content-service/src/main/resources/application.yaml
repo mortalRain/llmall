@@ -17,7 +17,7 @@ spring:
       http-method-specify: true
 llmall:
   swagger:
-    title: "同城生活电商综合服务系统 · 内容社区服务接口文档"
+    title: "同城生活电商平台 · 内容社区服务接口文档"
     package: com.llmall.content.controller
   db:
     database: llmall-content

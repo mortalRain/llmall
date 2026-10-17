@@ -17,7 +17,7 @@ spring:
       http-method-specify: true # 以请求方式作为资源名称
 llmall:
   swagger:
-    title: "同城生活电商综合服务系统 · 门店服务接口文档"
+    title: "同城生活电商平台 · 门店服务接口文档"
     package: com.llmall.shop.controller
   db:
     database: llmall-shop

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>同城生活 · 电商综合服务系统</title>
+<title>同城生活电商平台</title>
 <!-- 设计系统集中在 theme.css（浅蓝钢蓝配色 + 门店域 + 商城域组件），单一来源便于统一改版。
      这里不再内联样式：之前 index.html 里留了一份旧的样式副本，导致 theme.css 里新增的组件
      （商品卡 / 订单卡 / 核销码 / 分类金刚区…）全都不生效，页面排版错乱——踩过这个坑。 -->
@@ -36,7 +36,7 @@
 <div class="wrap"><div id="view"></div></div>
 
 <footer>
-  <span>同城生活电商综合服务系统</span>
+  <span>同城生活电商平台</span>
   <span>·</span>
   <span>Spring Cloud Alibaba 微服务架构</span>
   <span>·</span>
@@ -47,7 +47,7 @@
 
 <script>
 /* ============================================================================
- * 同城生活电商综合服务系统 · 演示前端
+ * 同城生活电商平台 · 演示前端
  * 纯原生 JS + fetch，零依赖、零构建 —— 双击本文件即可打开
  * 后端地址：默认 http://localhost:8080（网关），点右上角「⚙ 接口」可改
  * ========================================================================== */
@@ -170,7 +170,7 @@ async function renderHome(keyword) {
   const v = $('#view');
   v.innerHTML = `
     <section class="hero hero-sm">
-      <h1>同城生活电商综合服务系统</h1>
+      <h1>同城生活电商平台</h1>
       <p>逛门店 · 买套餐 · 下单到店 · 写评价 —— 评价实时影响门店热度与榜单排序</p>
       <form class="searchbar" onsubmit="return doSearch(event)">
         <input id="kw" placeholder="搜索门店名称 / 商圈 / 地址，如：烧烤、拱墅" value="${h(keyword || '')}" />

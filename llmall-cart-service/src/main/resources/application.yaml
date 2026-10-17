@@ -18,7 +18,7 @@ feign:
         # 显式声明见 CartFeignConfig（feign.Retryer.NeverRetry 是内部类，无法用字符串在这里构造）。
 llmall:
   swagger:
-    title: "同城生活电商综合服务系统接口文档"
+    title: "同城生活电商平台接口文档"
     package: com.llmall.cart.controller
   db:
     database: llmall-cart
