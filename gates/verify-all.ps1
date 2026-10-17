@@ -1,4 +1,4 @@
-﻿# 单一入口：一次跑完全部分析闸门 + 全量编译
+# 单一入口：一次跑完全部分析闸门 + 全量编译
 #
 # 用法:
 #   pwsh -File gates\verify-all.ps1                 # 全部闸门 + 编译
@@ -38,7 +38,7 @@ $java = Get-GateJava
 Write-Host ''
 Write-Host '运行环境' -ForegroundColor Cyan
 Write-Host ("  仓库根      : " + $RepoRoot)
-Write-Host ("  JDK         : " + (Get-GateJavaHome) + "  " + (Get-GateJavaVersion))
+Write-Host ("  JDK         : " + (Get-GateJavaHome) + "  " + (Get-GateJavaVersion) + "  [主版本 " + (Get-GateJavaMajorVersion) + "，支持区间 11~17]")
 Write-Host ("  PowerShell  : " + $PSVersionTable.PSVersion + " (" + $PSVersionTable.PSEdition + ")  " + (Get-GatePowerShell))
 $mvnShown = Get-GateMaven
 if ($mvnShown) { Write-Host ("  Maven       : " + $mvnShown) }

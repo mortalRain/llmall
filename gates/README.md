@@ -17,7 +17,7 @@
 |---|---|---|
 | 操作系统 | Windows（路径分隔符与 `-ExecutionPolicy` 逻辑按 Windows 写；Linux/macOS 未验证） | Windows 10/11 |
 | PowerShell | **Windows PowerShell 5.1 或 PowerShell 7+ 均可**。闸门不依赖 `PATH` 上有 `pwsh` —— 谁跑起闸门，子脚本就用同一个宿主跑 | pwsh 7.6.6；另在 Windows PowerShell 5.1 上整套复跑通过（退出码同为 0） |
-| JDK | **JDK 11+**（项目本身要求 11；闸门用 `javac` 现场编译两个指纹工具）。解析顺序：`JAVA_HOME` → `PATH` 上的 `java` 反推 | Microsoft OpenJDK 11.0.32.1 |
+| JDK | **JDK 11~17**（项目本身按 11 编译；闸门用 `javac` 现场编译两个指纹工具）。**主版本不在 11~17 时 `gate-env.ps1` 当场停止**并给出可操作提示（JDK 18+ 上 Lombok 1.18.30 编译必然失败，而只跑分析闸门时它是绿的 —— 会让"闸门通过"掩盖"构建不了"）。解析顺序：`JAVA_HOME` → `PATH` 上的 `java` 反推 | Microsoft OpenJDK 11.0.32.1 |
 | Maven | 只有跑 `verify-all.ps1` 的编译段（不加 `-SkipBuild`）才需要。解析顺序：`MAVEN_BIN` → `PATH` 上的 `mvn.cmd`/`mvn` | Apache Maven 3.9.6 |
 | 网络 | 默认**离线**编译（`mvn -o`）。机器上没有本地仓库时用 `-Online` | — |
 
@@ -337,3 +337,4 @@ pwsh -File gates\gate.ps1 -Snapshot
 | `docs/Feign禁重试治理清单-2026-10-15.md` | 第 7 道闸门对应的治理清单 |
 | `docs/字典与口径漂移清单-2026-10-15.md`、`docs/DDL字典对齐工单-2026-10-15.md` | 第 6 道闸门对应的清单与工单 |
 | `docs/52-孤儿单清点报告-2026-10-15.md` | `tools/AuditQuery*.java` 的产出 |
+

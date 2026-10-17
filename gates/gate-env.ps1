@@ -6,7 +6,7 @@
 # 解析逻辑只留这一份，其余脚本一律引用这里的变量与函数。
 #
 # 解析优先级：
-#   JDK          环境变量 JAVA_HOME → PATH 上的 java 反推安装目录 → 报错
+#   JDK          环境变量 JAVA_HOME → PATH 上的 java 反推安装目录 → 报错（**主版本须在 11~17**，否则当场停止）
 #   仓库根        本文件所在目录的上一级（gates/ 就放在仓库根下）
 #   PowerShell    当前正在运行本脚本的宿主（$PSHOME），不依赖 PATH 上有 pwsh
 #   Maven         环境变量 MAVEN_BIN → PATH 上的 mvn.cmd / mvn
@@ -74,7 +74,7 @@ function Get-GateJavac {
 
 function Get-GateJavaVersion {
     # 解析出的 JDK 实际版本（打印在 verify-all 开头，把"跑在什么环境上"写进证据里）。
-    # 项目本身要求 JDK 11（见 pom.xml 的 maven.compiler.*）；闸门脚本在 11~25 上都能跑，
+    # 项目本身要求 JDK 11（见 pom.xml 的 maven.compiler.*）；闸门脚本在 11~17 上都能跑，
     # 但编译段必须用项目要求的版本，所以这里把版本显示出来而不是悄悄用。
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -89,6 +89,85 @@ function Get-GateJavaVersion {
     finally {
         $ErrorActionPreference = $old
     }
+}
+
+# ---------------------------------------------------------------- JDK 版本准入（fail-fast）
+#
+# 【为什么必须有这道闸门】本项目用 Lombok 1.18.30 做注解处理，它打不开 JDK 22 以后版本的内部 javac API：
+# 在 JDK 25 上 `mvn package` 会以注解处理崩溃收场。而这条链路的失败方式极具误导性 ——
+# 报错落在某个业务类的编译上，看起来像"代码写错了"，于是人会去翻代码，而不是怀疑 JDK。
+# 更糟的是**只跑分析闸门时它还是绿的**（指纹闸门不编译），于是"verify-all 通过"并不代表能构建。
+# 所以把版本判断前移到环境解析这一刻：区间外的 JDK 一律当场停下，不进入任何闸门。
+#
+# 【为什么用区间而不是"至少 11"】JDK 12~17 都能编过本项目；JDK 18+ 起 Lombok 逐步失配，
+# 25 上确定失败。区间写成 11~17 是"确定能用"的范围，超出就必须人工确认，而不是默认放行。
+#
+# 【严禁】不得静默切换 JDK、不得自动改 JAVA_HOME / PATH、不得"顺手"去找系统里别的 JDK 顶替：
+# 闸门报的是"你指定了哪个 JDK"，替使用者选 JDK 会让证据里写的版本与环境里跑的版本不是同一个。
+$script:GateJdkMinMajor = 11
+$script:GateJdkMaxMajor = 17
+
+function Get-GateJavaMajorVersion {
+    # 从 `java -version` 的首行解析主版本号；解析不出来返回 $null（调用方按"环境不可信"处理）。
+    # 三种形态都要对：`java version "25.0.2"`、`openjdk version "11.0.32.1"`、`java version "1.8.0_202"`（1.8 即 8）。
+    $raw = Get-GateJavaVersion
+    if ($raw -match 'version\s+"?(\d+)(?:\.(\d+))?') {
+        $first = [int]$matches[1]
+        if ($first -eq 1 -and $matches[2]) { return [int]$matches[2] }
+        return $first
+    }
+    return $null
+}
+
+function Assert-GateJavaSupported {
+    # 主版本不在 [11,17] 区间时：打印可操作提示并**抛异常终止本次运行**，返回值是区间内的主版本号。
+    #
+    # 【为什么用 throw 而不是 exit】本文件是被点源（. gate-env.ps1）进调用方作用域的，
+    # 而 `exit` 在点源文件里只结束本文件、**不会结束调用方脚本** —— 实测调用方会继续往下跑完整个
+    # verify-all 并最终以 0 收场，等于闸门没拦。throw 会一路冒到调用方，`pwsh -File` 下退出码为 1。
+    # 【变量名坑】不能叫 $home：PowerShell 7 把 $HOME 当只读自动变量，赋值会报
+    # "Cannot overwrite variable HOME"，于是提示里打印出的是用户主目录而不是 JDK 目录。
+    $jdkHome = ''
+    try { $jdkHome = Get-GateJavaHome } catch { $jdkHome = '（未解析到）' }
+    $major = Get-GateJavaMajorVersion
+    $range = "$($script:GateJdkMinMajor)~$($script:GateJdkMaxMajor)"
+
+    if ($null -ne $major -and $major -ge $script:GateJdkMinMajor -and $major -le $script:GateJdkMaxMajor) {
+        return $major
+    }
+
+    $stop = 'JDK 版本不满足要求，闸门不启动'
+    Write-Host ''
+    Write-Host ('=' * 74) -ForegroundColor Red
+    Write-Host ("【停止】" + $stop) -ForegroundColor Red
+    Write-Host ('=' * 74) -ForegroundColor Red
+    Write-Host ("  当前 JAVA_HOME : " + $jdkHome)
+    Write-Host ("  当前 java -version : " + (Get-GateJavaVersion))
+    if ($null -eq $major) {
+        Write-Host '  解析结果        : 无法从 `java -version` 解析出主版本号 —— 环境不可信，不继续' -ForegroundColor Red
+        Write-Host '  处理办法        : 确认 JAVA_HOME 指向完整的 JDK（11~17），或把 java 放进 PATH' -ForegroundColor Yellow
+        $why = 'JDK 版本无法解析，请把 JAVA_HOME 指向 JDK 11（支持区间 ' + $range + '）'
+    }
+    elseif ($major -gt $script:GateJdkMaxMajor) {
+        Write-Host ("  解析结果        : 主版本 " + $major + "，超出支持区间 " + $range) -ForegroundColor Red
+        Write-Host ("  原因            : 本项目 Lombok 与 JDK " + $major + " 不兼容，请用 JDK 11") -ForegroundColor Yellow
+        Write-Host '                    （Lombok 1.18.30 无法在 JDK 22+ 的内部 javac API 上工作，编译阶段必然失败）' -ForegroundColor Yellow
+        Write-Host '  处理办法        : 把 JAVA_HOME 指向 JDK 11 后重跑，例如：' -ForegroundColor Yellow
+        Write-Host '                      $env:JAVA_HOME = ''<你的 JDK 11 目录>''' -ForegroundColor Yellow
+        Write-Host '                      pwsh -File gates\verify-all.ps1' -ForegroundColor Yellow
+        $why = "本项目 Lombok 与 JDK $major 不兼容，请用 JDK 11（支持区间 $range，把 JAVA_HOME 指向 JDK 11 后重跑）"
+    }
+    else {
+        Write-Host ("  解析结果        : 主版本 " + $major + "，低于最低要求 " + $script:GateJdkMinMajor) -ForegroundColor Red
+        Write-Host ("  原因            : 本项目按 JDK 11 编译（pom.xml 的 maven.compiler.*），JDK " + $major + " 编不过") -ForegroundColor Yellow
+        Write-Host '  处理办法        : 把 JAVA_HOME 指向 JDK 11 后重跑' -ForegroundColor Yellow
+        $why = "JDK $major 低于最低要求 11（支持区间 $range，把 JAVA_HOME 指向 JDK 11 后重跑）"
+    }
+    Write-Host ''
+    Write-Host '  闸门不会替你切换 JDK，也不会改 JAVA_HOME：证据里记录的版本必须就是实际跑的版本。' -ForegroundColor DarkGray
+    Write-Host ('=' * 74) -ForegroundColor Red
+    Write-Host ''
+    throw $why
 }
 
 function Initialize-GateClasses {
@@ -175,3 +254,7 @@ function Invoke-GateScript {
     $output = & $ps @argv 2>&1
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = @($output) }
 }
+
+# 点源即校验：区间外的 JDK 在这里就终止（throw 会冒到调用方），任何闸门脚本都不会带着错误的 JDK 往下跑。
+# 放在文件末尾而不是开头，是为了让上面所有解析函数先定义好（本文件被点源，顺序即依赖顺序）。
+$script:GateJdkMajor = Assert-GateJavaSupported

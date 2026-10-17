@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maven 构建专用 settings.xml（只给 deploy/Dockerfile 的构建阶段用，不进运行镜像、不影响本机 ~/.m2）
+
+  为什么构建阶段必须带一份自己的 settings.xml：
+    Maven Central（repo.maven.apache.org）在开发机与多数内网/机房网络里不可达（TLS 握手直接失败），
+    而 `maven:3.9-eclipse-temurin-11` 官方镜像里没有任何镜像配置。
+    于是容器内构建会卡在第一次下载依赖上，报的却是连接超时——看起来像"网络抖动"，实际是"目标仓库根本到不了"。
+    把镜像源写进仓库（而不是指望每台机器都手工配 ~/.m2/settings.xml），构建就不再依赖宿主环境。
+
+  为什么 mirrorOf 用 * 而不是 central：
+    pom.xml 目前只声明了 Central，但插件仓库、以及以后新增的任何 repository 默认同样指向 Central；
+    只要漏掉一个，那一处就会绕开镜像去打不可达的地址，失败方式还是"超时"。
+    * 让所有仓库解析统一落到 Aliyun，排查时只需要看一个地址。
+    （将来若接入私有仓库，再改成 `*,!私有仓库id`，不要直接删掉 mirror。）
+
+  改这里的后果：把 url 换成不可达的地址，docker build 会在依赖解析阶段超时失败；
+  但这**不会**影响本机 `mvn`（本机不读这个文件，除非显式 -s deploy/settings.xml）。
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <mirrors>
+    <mirror>
+      <id>aliyun-central</id>
+      <name>Aliyun public repository (mirror of all repositories)</name>
+      <url>https://maven.aliyun.com/repository/public</url>
+      <mirrorOf>*</mirrorOf>
+    </mirror>
+  </mirrors>
+
+</settings>
