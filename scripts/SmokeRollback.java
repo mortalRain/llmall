@@ -132,7 +132,10 @@ public class SmokeRollback {
             usage("未知模式 " + mode);
         }
 
-        String url = "jdbc:mysql://" + host + ":3306/?useSSL=false&allowPublicKeyRetrieval=true"
+        // 主机可以写成 host:port（与 gates/EsBulkLoad.java 同一口径）：压测/演示用容器库时
+        // 宿主端口常常不是 3306（例如 docker compose 把 mysql 映射到 3307），不带端口时仍取 3306。
+        String hostPort = host.indexOf(':') >= 0 ? host : (host + ":3306");
+        String url = "jdbc:mysql://" + hostPort + "/?useSSL=false&allowPublicKeyRetrieval=true"
                 + "&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8"
                 + "&connectTimeout=8000&socketTimeout=120000&useAffectedRows=true";
 
