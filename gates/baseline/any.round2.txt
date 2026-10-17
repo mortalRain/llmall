@@ -1,4 +1,5 @@
 .dockerignore	121f8f22e1af3700c5e1ffdb5a8b052c76d78023bf4fdfb844e80fac9220f93c	17	37
+demo.ps1	53d7fb6fc2dae191400466e196287dcbd53c3a69a7e111df58076b39ff2b0e76	596	747
 deploy/Dockerfile	f541a375c128e24c3e247969d35c8c142b1b11b4822bd6281c1e33b45bbd4ddd	33	62
 llmall-promotion-service/src/main/resources/lua/seckill.lua	fe3c88325b1b20d77082a4b78a17af57f8b4944acfb8c9d1736113b31c87e69a	32	96
 scripts/check-redis-ttl.ps1	613984257aae0f3bc36d4df5c1a465894b9be188f89f56977288b99e229ac5d2	71	112
@@ -37,4 +38,5 @@ sql/merged/52a-orphan-pay-orders-audit.sql	ea5b5b0f35fbcafb4197d7984654c4a977e1f
 sql/merged/60-user-pay-password.sql	980da0f0180c2d98703e09eef8bce2e06a224dddcf7e349c36c3d2cae683a3b5	16	103
 sql/merged/61-user-weak-password-reset.sql	ffe41d69ebd99582ed0f6f9bf5981b922d31dce646658211bf750dc5020ec141	48	232
 sql/merged/62-align-dict-comments.sql	1f3f5447871928f34f842702ab3a356ebf4730872f3ff9ea638313dedcfa0fb2	21	99
+sql/merged/63-user-demo-pay-password.sql	4f3510a2e766f5f5acb1f9b222854b590859231abf5c1a518974f4193d786b84	17	75
 sql/merged/99-migrate-dianping-data.sql	967cf63a8b1635741327e31e46b437fe34c42414ec10a89187d84b2972c42998	16	112

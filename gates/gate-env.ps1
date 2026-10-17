@@ -1,4 +1,4 @@
-﻿# 闸门运行环境的**单一解析点**（gates/ 下所有脚本共用，被点源引入）
+# 闸门运行环境的**单一解析点**（gates/ 下所有脚本共用，被点源引入）
 #
 # 为什么单独成文件：路径、JDK、PowerShell 宿主三件事原先硬编码在每个脚本里
 # （$jdk = 'D:\develop\jdk11\bin'、$root = 'D:\dsh\llmall'、子进程直接写 pwsh），
@@ -125,9 +125,13 @@ function Get-GateMaven {
 
 function Get-GateMavenSettings {
     if ($env:MAVEN_SETTINGS -and (Test-Path $env:MAVEN_SETTINGS)) { return $env:MAVEN_SETTINGS }
-    $home = [System.Environment]::GetFolderPath('UserProfile')
-    if ($home) {
-        $def = Join-Path $home ('.m2' + [System.IO.Path]::DirectorySeparatorChar + 'settings.xml')
+    # 【注意】变量不能叫 $home：PowerShell 7 把 $HOME 当只读自动变量，
+    # 赋值会抛 "Cannot overwrite variable HOME because it is read-only or constant"。
+    # 而 demo.ps1 / verify-all 在 $ErrorActionPreference='Stop' 下调用本函数，
+    # 于是整个构建段会在取 settings 这一步直接中断（命令还没发给 mvn）。
+    $userHome = [System.Environment]::GetFolderPath('UserProfile')
+    if ($userHome) {
+        $def = Join-Path $userHome ('.m2' + [System.IO.Path]::DirectorySeparatorChar + 'settings.xml')
         if (Test-Path $def) { return $def }
     }
     return $null

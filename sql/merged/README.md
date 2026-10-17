@@ -1,8 +1,9 @@
 # sql/merged · 库表脚本执行说明
 
 > **本文件是执行顺序的唯一权威（single source of truth）。**
-> 目录里共 **19 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
+> 目录里共 **27 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
 > 有一处必须破数字序，见 2.1 的 `23` / `30`）。
+> 其中 `52a` 是只读清点（不是变更脚本）、`63` 是演示 / 冒烟环境专用（生产库不得执行），两者在清单里都单列了用途。
 
 ## 一、库 ↔ 服务对照（一个服务一个库）
 
@@ -75,6 +76,9 @@ mysql -uroot -p < 51-seed-more-data.sql         # 6.2  补齐 8 个缺失类型�
 mysql -uroot -p < 50-seed-local-life-data.sql   # 6.3  ★再跑一遍 50：为 51 新增的门店生成套餐与评价
 mysql -uroot -p < 51-seed-more-data.sql         # 6.4  ★再跑一遍 51：补齐依赖"评价"的聚合数据（评论/点赞/Feed）
 mysql -uroot -p < 52-fix-orphan-pay-orders.sql  # 6.5  清理前端 Number() 精度丢失产生的孤儿支付单并退款
+mysql -uroot -p < 63-user-demo-pay-password.sql # 6.6  ★演示 / 冒烟环境专用：把 Jack 的支付口令预置成 888888
+#      ⚠️ 必须在 60 号之后执行（依赖 pay_password 列）；⛔ 生产库与任何对外开放的库都不得执行
+#      ⚠️ 52a 是 52 之前的只读清点，不改数据，位置见「已知偏差台账」；本清单不含 52a 的调用
 # 跑完调一次接口：POST /search/view/rebuild 与 POST /shops/cache/geo/rebuild
 
 # ── 7) 可选：从原点评库迁移门店数据（需要外部库 dianping_src 已存在） ──
@@ -152,6 +156,7 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 | 60 | `60-user-pay-password.sql` | **新增守卫**：`COLUMNS` 判断 `pay_password` 是否已存在。`ADD COLUMN ... NOT NULL DEFAULT '123456'` 会把**既有行**一并填充，故存量账号余额支付行为不变。**⚠️ 必须早于应用发布** |
 | 61 | `61-user-weak-password-reset.sql` | 存量弱口令重置：第 1 段清点、第 2 段 `UPDATE`（**默认注释，需人工启用**）、第 3 段校验。`WHERE password = '<初始哈希>'` 保证幂等且不误伤已改密账号 |
 | 62 | `62-align-dict-comments.sql` | **存量库注释对齐（全新初始化可跳过）**：7 条纯 `ALTER TABLE ... MODIFY COLUMN ... COMMENT`，把 `stock_flow` / `voucher` / `user_voucher` / `pay_order`(×2) / `order` / `message_log` 的字典型注释改成与代码事实一致。**只改 COMMENT，不动类型/可空性/默认值/数据；可重复执行**。源文件已同步为同一口径，故新库无需执行 |
+| 63 | `63-user-demo-pay-password.sql` | **演示 / 冒烟环境专用**：把演示账号 Jack 的 `pay_password` 从 60 号写入的"初始口令哈希"改成"888888 的哈希"，使冒烟脚本（`scripts/MallE2E.java`）能走过余额支付 —— 否则会被"首次支付前强制改密"那条拦截（`UserServiceImpl#deductMoney`）挡下。幂等：`WHERE username='Jack' AND pay_password='<初始口令哈希>'`，第二遍命中 0 行；已自行改过支付密码的账号不受影响。列不存在时只打印提示、不报错。**⛔ 生产库不得执行** |
 | 99 | `99-migrate-dianping-data.sql` | `INSERT ... ON DUPLICATE KEY UPDATE` + `UPDATE ... WHERE hot_score = 0` |
 
 ### 3.1 守卫模板（统一写法）
