@@ -89,6 +89,18 @@ public class SearchServiceImpl implements ISearchService {
     private static final int REBUILD_PAGE_SIZE = 100;
     /** 全量重建的页数上限，防止对端分页异常时死循环 */
     private static final int REBUILD_MAX_PAGES = 100;
+    /**
+     * 空索引降级判定的缓存时长。取 10 秒而不是分钟级：索引被清空后，用户最多等这么久就能看到正确结果
+     * （60 秒的窗口太长：清空索引后一分钟内搜索页仍然是空的，用户体感就是"坏了"）。
+     * 成本可忽略：只有"本次命中 0 条"的检索才会触发判定，且最多每 10 秒一次。
+     * 另外"命中非 0 条"的检索会把判定时刻清零（见 doSearch），所以"原来有数据、随后被清空"这一
+     * 最常见的变化会被立即识别，不受这个时长限制。
+     */
+    private static final long EMPTY_INDEX_CHECK_TTL_MS = 10_000L;
+
+    /** 上一次"空索引/读模型非空"判定的时刻与结论（volatile 即可：最坏情况是并发多探测一次） */
+    private volatile long emptyIndexCheckedAt = 0L;
+    private volatile boolean emptyIndexDetected = false;
 
     private final ShopSearchDocMapper shopSearchDocMapper;
     private final SearchHotWordMapper hotWordMapper;
@@ -150,8 +162,23 @@ public class SearchServiceImpl implements ISearchService {
         if (esGateway.enabled()) {
             try {
                 PageDTO<ShopDTO> result = esGateway.search(kw, typeId, current, pageSize, x, y);
-                recordSearch(kw, userId);
-                return result;
+                // 【空索引降级】ES 对"索引存在但没有文档"的查询返回 200 + 0 命中，不会抛异常 ——
+                // 于是下面 catch 里的回落分支形同虚设：新环境建了索引却忘了灌数时，搜索页静默返回空列表，
+                // 既不回落 MySQL、也不打 WARN，只有 /search/engine 的 esDocs=0 能看出来。
+                // 这里补一道"命中 0 条"的判定：只有确认为"索引里一条文档都没有、而 MySQL 读模型有数据"
+                // 才回落。单纯的"这个关键词没有门店命中"仍然照常返回空结果，不能被误判成故障。
+                if (isEmptyResult(result) && engineProperties.fallbackToMysql() && isEmptyIndexButReadModelNotEmpty()) {
+                    log.warn("[ES] 索引为空但读模型非空（esDocs=0），该次检索回落 MySQL 读模型: keyword={}", kw);
+                }
+                else {
+                    // 反向失效：这次 ES 确实查出了数据，说明索引不是空的 —— 把负向缓存的时刻清零，
+                    // 于是"索引随后被清空"后的第一次 0 命中检索会立刻重新判定，而不是等缓存到期。
+                    if (result != null && result.getList() != null && !result.getList().isEmpty()) {
+                        emptyIndexCheckedAt = 0L;
+                    }
+                    recordSearch(kw, userId);
+                    return result;
+                }
             } catch (Exception e) {
                 // engine=es 时刻意不回落：混入 MySQL 结果会让"纯 ES"的表现失真
                 if (!engineProperties.fallbackToMysql()) {
@@ -178,6 +205,46 @@ public class SearchServiceImpl implements ISearchService {
 
         recordSearch(kw, userId);
         return PageDTO.of(result, this::toShopDTO);
+    }
+
+    /**
+     * 检索结果是否"一条都没有"。ES 无命中时 total 是 0；这里把 null 也一并视为空，
+     * 避免上游某种序列化把 total 丢掉时降级判定直接失效。
+     */
+    private boolean isEmptyResult(PageDTO<ShopDTO> result) {
+        return result == null || result.getTotal() == null || result.getTotal() == 0L;
+    }
+
+    /**
+     * 判定"索引为空、而 MySQL 读模型有数据"—— 这是"检索静默返回空列表"的唯一判据。
+     *
+     * 【为什么不是"命中 0 条就回落"】关键词本来就可能没有门店命中（例如搜一个不存在的词），
+     * 那种情况下 ES 与 MySQL 都应当返回空。只有"索引里一条文档都没有、读模型却有一堆"才说明
+     * 索引没灌数，此时回落到读模型才是把正确结果还给用户。
+     *
+     * 【为什么要缓存 60 秒】"命中 0 条"的检索一旦高发（例如索引真的丢了），每次检索都会多打
+     * 一次 ES count + 一次 MySQL count 两次往返；索引状态按分钟级变化，缓存 60 秒足够跟上，
+     * 也不会让"检索"这条热路径多出稳定开销。
+     */
+    private boolean isEmptyIndexButReadModelNotEmpty() {
+        long now = System.currentTimeMillis();
+        if (now - emptyIndexCheckedAt < EMPTY_INDEX_CHECK_TTL_MS) {
+            return emptyIndexDetected;
+        }
+        boolean detected = false;
+        try {
+            if (esGateway.count() == 0L) {
+                Long docs = shopSearchDocMapper.selectCount(null);
+                detected = docs != null && docs > 0L;
+            }
+        }
+        catch (Exception e) {
+            // 判定本身失败时不降级：宁可返回空结果，也不要因为一次探测异常把检索打到 MySQL 上
+            log.warn("[ES] 空索引降级判定失败，按不降级处理: {}", e.getMessage());
+        }
+        emptyIndexDetected = detected;
+        emptyIndexCheckedAt = now;
+        return detected;
     }
 
     /** 关键词统计与历史记录：ES / MySQL 两条检索分支共用，避免换引擎后统计口径出现差异 */

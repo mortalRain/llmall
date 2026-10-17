@@ -94,6 +94,7 @@ public class SmokeRollback {
         String userName = DEFAULT_USER_NAME;
         long userId = DEFAULT_USER_ID;
         String itemsArg = DEFAULT_ITEMS;
+        String extraArg = "";
         long shopId = DEFAULT_SHOP_ID;
         String reportPath = null;
 
@@ -117,6 +118,8 @@ public class SmokeRollback {
                     itemsArg = val;
                 } else if ("--shop".equals(key)) {
                     shopId = Long.parseLong(val);
+                } else if ("--extra-tables".equals(key)) {
+                    extraArg = val;
                 } else if ("--report".equals(key)) {
                     reportPath = val;
                 } else {
@@ -142,7 +145,7 @@ public class SmokeRollback {
         int exit = 0;
         try (Connection c = DriverManager.getConnection(url, user, pw)) {
             if ("capture".equals(mode)) {
-                capture(c, host, userName, userId, itemsArg, shopId, file);
+                capture(c, host, userName, userId, itemsArg, shopId, extraArg, file);
             } else if ("rollback".equals(mode)) {
                 rollback(c, host, file);
             } else {
@@ -179,14 +182,14 @@ public class SmokeRollback {
         System.out.println("  java -cp <mysql-connector.jar> SmokeRollback.java capture  主机 用户 口令 水位线文件 [选项]");
         System.out.println("  java -cp <mysql-connector.jar> SmokeRollback.java rollback 主机 用户 口令 水位线文件 [选项]");
         System.out.println("  java -cp <mysql-connector.jar> SmokeRollback.java verify   主机 用户 口令 水位线文件 [选项]");
-        System.out.println("选项：--user-name --user-id --items --shop --report");
+        System.out.println("选项：--user-name --user-id --items --shop --extra-tables --report");
         System.exit(2);
     }
 
     // capture：取水位线并快照被改写的统计列
 
     static void capture(Connection c, String host, String userName, long userId,
-                        String itemsArg, long shopId, String file) throws Exception {
+                        String itemsArg, long shopId, String extraArg, String file) throws Exception {
         Map<String, Object> doc = new LinkedHashMap<>();
         doc.put("format", FORMAT);
         doc.put("createdAt", now());
@@ -206,6 +209,25 @@ public class SmokeRollback {
             }
         }
         doc.put("derivedTables", derived);
+
+        // 额外表（例如压测专用账号所在的 llmall-user.user / user_info / address）：
+        // 这些表不在冒烟固定清单里，但"造出来的行"同样要能被同一份水位线清掉。
+        Map<String, Object> extra = new LinkedHashMap<>();
+        if (extraArg != null && !extraArg.trim().isEmpty()) {
+            for (String t : extraArg.split(",")) {
+                String spec = t.trim();
+                if (spec.isEmpty()) {
+                    continue;
+                }
+                if (tableExists(c, spec.split(":")[0])) {
+                    extra.put(spec, tableWatermark(c, spec));
+                }
+                else {
+                    REPORT.add("额外表不存在，跳过：" + spec);
+                }
+            }
+        }
+        doc.put("extraTables", extra);
 
         List<Object> snaps = new ArrayList<>();
         snaps.add(snapshot(c, "llmall-user", "user", "username = " + q(userName)));
@@ -265,18 +287,19 @@ public class SmokeRollback {
         Map<String, Object> derived = map(doc.get("derivedTables"));
         all.putAll(tables);
         all.putAll(derived);
+        all.putAll(map(doc.get("extraTables")));
 
         c.setAutoCommit(false);
         try {
             for (Map.Entry<String, Object> e : all.entrySet()) {
-                String[] st = split(e.getKey());
-                if (!tableExists(c, e.getKey())) {
+                String[] st = split(e.getKey().split(":")[0]);
+                if (!tableExists(c, e.getKey().split(":")[0])) {
                     REPORT.add("| " + e.getKey() + " | - | 跳过（表不存在） |");
                     continue;
                 }
                 Map<String, Object> w = map(e.getValue());
                 long maxId = num(w.get("maxId"));
-                long n = deleteAbove(c, st[0], st[1], maxId);
+                long n = deleteAbove(c, st[0], st[1], keyColumnOf(w), maxId);
                 totalDeleted += n;
                 REPORT.add("| " + e.getKey() + " | " + maxId + " | " + n + " |");
             }
@@ -295,7 +318,7 @@ public class SmokeRollback {
                 cols.addAll(map(snap.get("values")).keySet());
             }
             for (Map.Entry<String, List<String>> e : wantCols.entrySet()) {
-                String[] st = split(e.getKey());
+                String[] st = split(e.getKey().split(":")[0]);
                 loadColumnTypes(c, st[0], st[1], e.getValue());
             }
             for (Object o : list(doc.get("snapshots"))) {
@@ -341,15 +364,16 @@ public class SmokeRollback {
         Map<String, Object> all = new LinkedHashMap<>();
         all.putAll(map(doc.get("tables")));
         all.putAll(map(doc.get("derivedTables")));
+        all.putAll(map(doc.get("extraTables")));
         for (Map.Entry<String, Object> e : all.entrySet()) {
-            String[] st = split(e.getKey());
-            if (!tableExists(c, e.getKey())) {
+            String[] st = split(e.getKey().split(":")[0]);
+            if (!tableExists(c, e.getKey().split(":")[0])) {
                 REPORT.add("| " + e.getKey() + " | - | - | - | 跳过（表不存在） |");
                 continue;
             }
             Map<String, Object> w = map(e.getValue());
             long maxId = num(w.get("maxId"));
-            long above = count(c, st[0], st[1], "id > " + maxId);
+            long above = count(c, st[0], st[1], quote(keyColumnOf(w)) + " > " + maxId);
             long rows = count(c, st[0], st[1], null);
             String verdict;
             if (above > 0) {
@@ -393,17 +417,38 @@ public class SmokeRollback {
 
     // SQL 辅助方法
 
+    /**
+     * 取一张表的水位线。表名可以写成 {@code 库.表} 或 {@code 库.表:键列}：
+     * 不是每张表都有 id（例如 llmall-user.user_info 的主键是 user_id），
+     * 键列缺省为 id，写成 user_info:user_id 即可按 user_id 记水位线。
+     */
     static Map<String, Object> tableWatermark(Connection c, String spec) throws SQLException {
-        String[] st = split(spec);
+        String key = keyColumnOf(spec);
+        String[] st = split(spec.split(":")[0]);
         Map<String, Object> w = new LinkedHashMap<>();
         try (Statement s = c.createStatement();
-             ResultSet rs = s.executeQuery("SELECT COUNT(*), IFNULL(MAX(id),0) FROM "
+             ResultSet rs = s.executeQuery("SELECT COUNT(*), IFNULL(MAX(" + quote(key) + "),0) FROM "
                      + quote(st[0]) + "." + quote(st[1]))) {
             rs.next();
             w.put("rows", rs.getLong(1));
             w.put("maxId", rs.getLong(2));
+            if (!"id".equals(key)) {
+                w.put("key", key);
+            }
         }
         return w;
+    }
+
+    /** 从 "库.表:键列" 里取键列，缺省 id */
+    static String keyColumnOf(String spec) {
+        int i = spec.indexOf(':');
+        return i < 0 ? "id" : spec.substring(i + 1).trim();
+    }
+
+    /** 取水位线条目里记录的键列（老水位线文件没有 key 字段，按 id 处理） */
+    static String keyColumnOf(Map<String, Object> w) {
+        Object k = w.get("key");
+        return k == null ? "id" : String.valueOf(k);
     }
 
     static Map<String, Object> snapshot(Connection c, String db, String tb, String where) throws SQLException {
@@ -498,9 +543,9 @@ public class SmokeRollback {
         return new Object[]{db + "." + tb + " " + where, (long) n, cols.size() + " 列", shown.toString()};
     }
 
-    static long deleteAbove(Connection c, String db, String tb, long maxId) throws SQLException {
+    static long deleteAbove(Connection c, String db, String tb, String key, long maxId) throws SQLException {
         try (Statement s = c.createStatement()) {
-            return s.executeUpdate("DELETE FROM " + quote(db) + "." + quote(tb) + " WHERE id > " + maxId);
+            return s.executeUpdate("DELETE FROM " + quote(db) + "." + quote(tb) + " WHERE " + quote(key) + " > " + maxId);
         }
     }
 

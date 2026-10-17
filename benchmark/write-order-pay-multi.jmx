@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  写路径压测（多账号版）：每个线程用自己的压测账号走「下单 → 申请支付单 → 余额支付」。
+
+  为什么需要这一份：
+    上一轮的写压测让 50 个线程**共用 Jack 一个账号**，等于让 50 个并发去抢同一行余额记录 ——
+    测出来的 POST /pay-orders 延迟（Avg 1156ms / P99 2332ms）里混着行锁竞争，不能直接当"接口慢"。
+    这份计划把"账号"这个混淆因素拿掉：线程 i 用 bench<i>，各自扣自己的余额，
+    与 write-order-pay.jmx（单账号）跑同一组参数即可做 A/B 对照。
+
+  账号与地址的约定（由压测准备脚本一次性造好，随水位线清理）：
+    第 i 个账号：username = bench<i>，password = 123456，pay_password = 888888
+    第 i 个账号的地址：id = addressBase + i（默认 addressBase=900000）
+    线程数必须 ≤ 账号数，否则会用到不存在的账号。
+
+  运行：
+    jmeter -n -t benchmark/write-order-pay-multi.jmx -Jthreads=50 -Jduration=60 -JaddressBase=900000 \
+           -l logs/benchmark/write-multi-t50.jtl -Jjmeter.save.saveservice.output_format=csv
+-->
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="写路径 · 多账号下单到支付" enabled="true">
+      <stringProp name="TestPlan.comments">每线程一个账号，消除单账号余额行锁竞争这一混淆因素</stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+        <collectionProp name="Arguments.arguments">
+          <elementProp name="host" elementType="Argument">
+            <stringProp name="Argument.name">host</stringProp>
+            <stringProp name="Argument.value">${__P(host,localhost)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="port" elementType="Argument">
+            <stringProp name="Argument.name">port</stringProp>
+            <stringProp name="Argument.value">${__P(port,8080)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="addressBase" elementType="Argument">
+            <stringProp name="Argument.name">addressBase</stringProp>
+            <stringProp name="Argument.value">${__P(addressBase,900000)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="itemId" elementType="Argument">
+            <stringProp name="Argument.name">itemId</stringProp>
+            <stringProp name="Argument.value">${__P(itemId,900013)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="itemPrice" elementType="Argument">
+            <stringProp name="Argument.name">itemPrice</stringProp>
+            <stringProp name="Argument.value">${__P(itemPrice,25600)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+        </collectionProp>
+      </elementProp>
+      <stringProp name="TestPlan.user_define_classpath"></stringProp>
+    </TestPlan>
+    <hashTree>
+
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="写 · 每线程一账号" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">-1</stringProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(threads,50)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(ramp,10)}</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.duration">${__P(duration,60)}</stringProp>
+        <stringProp name="ThreadGroup.delay">0</stringProp>
+      </ThreadGroup>
+      <hashTree>
+
+        <OnceOnlyController guiclass="OnceOnlyControllerGui" testclass="OnceOnlyController" testname="每线程只登录一次（bench${__threadNum}）" enabled="true"/>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /users/login（bench${__threadNum}）" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="参数" enabled="true">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{&quot;username&quot;:&quot;bench${__threadNum}&quot;,&quot;password&quot;:&quot;${__P(password,123456)}&quot;}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                  <boolProp name="HTTPArgument.use_equals">true</boolProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${host}</stringProp>
+            <stringProp name="HTTPSampler.port">${port}</stringProp>
+            <stringProp name="HTTPSampler.protocol">http</stringProp>
+            <stringProp name="HTTPSampler.path">/users/login</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="JSON 头" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Content-Type</stringProp>
+                  <stringProp name="Header.value">application/json;charset=UTF-8</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="提取本线程的 accessToken" enabled="true">
+              <stringProp name="JSONPostProcessor.referenceNames">token</stringProp>
+              <stringProp name="JSONPostProcessor.jsonPathExprs">$.accessToken</stringProp>
+              <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+              <stringProp name="JSONPostProcessor.defaultValues">NOT_FOUND</stringProp>
+            </JSONPostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /orders（创建订单）" enabled="true">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="参数" enabled="true">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{&quot;addressId&quot;:${__intSum(${addressBase},${__threadNum})},&quot;paymentType&quot;:3,&quot;details&quot;:[{&quot;itemId&quot;:${itemId},&quot;num&quot;:1}]}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+                <boolProp name="HTTPArgument.use_equals">true</boolProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${host}</stringProp>
+          <stringProp name="HTTPSampler.port">${port}</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.path">/orders</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="JSON + 本线程令牌" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">application/json;charset=UTF-8</stringProp>
+              </elementProp>
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">authorization</stringProp>
+                <stringProp name="Header.value">${token}</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+          <RegexExtractor guiclass="RegexExtractorGui" testclass="RegexExtractor" testname="提取 orderId" enabled="true">
+            <stringProp name="RegexExtractor.useHeaders">false</stringProp>
+            <stringProp name="RegexExtractor.refname">orderId</stringProp>
+            <stringProp name="RegexExtractor.regex">(\d{9,})</stringProp>
+            <stringProp name="RegexExtractor.template">$1$</stringProp>
+            <stringProp name="RegexExtractor.default">NOT_FOUND</stringProp>
+            <stringProp name="RegexExtractor.match_number">1</stringProp>
+          </RegexExtractor>
+          <hashTree/>
+        </hashTree>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /pay-orders（申请支付单）" enabled="true">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="参数" enabled="true">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{&quot;bizOrderNo&quot;:${orderId},&quot;amount&quot;:${itemPrice},&quot;payChannelCode&quot;:&quot;balance&quot;,&quot;payType&quot;:5,&quot;orderInfo&quot;:&quot;bench-multi&quot;}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+                <boolProp name="HTTPArgument.use_equals">true</boolProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${host}</stringProp>
+          <stringProp name="HTTPSampler.port">${port}</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.path">/pay-orders</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="JSON + 本线程令牌" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">application/json;charset=UTF-8</stringProp>
+              </elementProp>
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">authorization</stringProp>
+                <stringProp name="Header.value">${token}</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+          <RegexExtractor guiclass="RegexExtractorGui" testclass="RegexExtractor" testname="提取 payId" enabled="true">
+            <stringProp name="RegexExtractor.useHeaders">false</stringProp>
+            <stringProp name="RegexExtractor.refname">payId</stringProp>
+            <stringProp name="RegexExtractor.regex">(\d{9,})</stringProp>
+            <stringProp name="RegexExtractor.template">$1$</stringProp>
+            <stringProp name="RegexExtractor.default">NOT_FOUND</stringProp>
+            <stringProp name="RegexExtractor.match_number">1</stringProp>
+          </RegexExtractor>
+          <hashTree/>
+        </hashTree>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /pay-orders/{id}（余额支付）" enabled="true">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="参数" enabled="true">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{&quot;pw&quot;:&quot;${__P(payPassword,888888)}&quot;}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+                <boolProp name="HTTPArgument.use_equals">true</boolProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${host}</stringProp>
+          <stringProp name="HTTPSampler.port">${port}</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.path">/pay-orders/${payId}</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="JSON + 本线程令牌" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">application/json;charset=UTF-8</stringProp>
+              </elementProp>
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">authorization</stringProp>
+                <stringProp name="Header.value">${token}</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+        </hashTree>
+
+      </hashTree>
+
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

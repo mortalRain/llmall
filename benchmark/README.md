@@ -127,6 +127,40 @@
 > 触发条件：新环境首次部署后 `POST /search/view/rebuild` 建好读模型但漏了 `POST /search/index/rebuild`；
 > 或索引被误删后只重建了空索引。届时搜索页"什么都搜不到"，而 `esDocs:0` 是唯一的线索。
 
+### C-02 · 修复与复测（2026-10-17 第二轮）：**已修**
+
+选了"检索侧降级"而不是"建索引时自动 reindex"，原因很直接：
+**建索引那一刻读模型通常还是空的**（全新库的顺序是"建索引 → 起服务 → /search/view/rebuild 才灌读模型"），
+自动 reindex 会写出 0 条，缺口的实际触发条件（索引空、读模型非空）并不会被消除；
+而检索侧判定与"索引怎么变空的"无关，覆盖全部路径。
+
+实现（`SearchServiceImpl#doSearch`）：
+- ES 命中 0 条时，再判定"**索引里一条文档都没有（esDocs=0）且 MySQL 读模型有数据**"才回落 MySQL；
+  纯粹"关键词没有门店命中"仍然返回空结果，不会被误判成故障；
+- 判定结果缓存，且**任何一次命中非 0 条的检索都会把缓存清零** —— 于是"原来有数据、随后被清空"这一
+  最常见的变化会在**下一次检索就立刻**被识别；持续 0 命中的场景最多等一个缓存周期（10 秒）；
+- `engine=es`（不回落）语义不变：该模式下依然不回落，保证"纯 ES"观测口径不被污染。
+
+复测证据（同一台容器 ES，同一关键词）：
+
+| 状态 | 修复前 | 修复后 |
+|---|---|---|
+| 索引有 30 条 | `total=2` | `total=2` |
+| 索引存在但为空（0 条） | `total=0`（静默空结果） | **`total=2`**（回落 MySQL），日志 `[ES] 索引为空但读模型非空（esDocs=0），该次检索回落 MySQL 读模型` |
+| 索引有 30 条、关键词无命中 | `total=0` | `total=0`（负例仍然正确，没有误降级） |
+
+空索引状态下的 50 并发 × 60 秒复测（`read-c02-search.jmx`）：
+
+| 指标 | 修复前（空索引） | 修复后（空索引，走 MySQL 回落） |
+|---|---|---|
+| 请求数 | 255,935 | 117,194 |
+| 吞吐 | 4,271 rps | 1,956 rps |
+| P95 / P99 | 18 / 22 ms | 43 / 54 ms |
+| 错误率 | 0% | 0% |
+
+代价是吞吐降一半多、P99 翻倍 —— 这正是"空索引"这个故障态该有的代价：**能查到结果，比查得快更重要**。
+正常状态（索引有数）的读性能不受影响，因为新判定只在"命中 0 条"时才触发。
+
 ### F-06 / F-07 · 写路径：**50 并发下零重复扣款、并发双击只扣一次**
 
 50 并发 × 60 秒、共 1,403 次完整下单→支付循环之后的账实核对：
@@ -157,9 +191,52 @@ ERR|400 ×19      ← 其余全部被拒（交易已支付或关闭）
 
 1. **`POST /pay-orders` 是整条写链路里最慢的一步**：Avg 1156 ms、P99 2332 ms，比创建订单（72 ms）慢一个数量级。
    整链路 68.6 req/s ≈ 23 单/秒，瓶颈在这里，不在下单。
+   ⚠️ 第一次测这组数字时**50 个线程共用 Jack 一个账号**，混进了"50 并发抢同一行余额"的锁竞争，
+   所以第二轮专门做了多账号对照（见下一节），结论是：**慢是真的，但锁竞争只解释了其中一小部分**。
 2. **`itemPage` 的 Sentinel 规则把商品列表钉死在 200 QPS**：10 并发就已达 3000+ QPS 尝试量，
    超出即 400。这是**设计内**行为（不是故障），但它意味着"商品列表的容量上限 = 限流阈值"，
    调容量时应先看这条规则而不是先加机器。
+
+---
+
+## 五·补、P-01 多账号对照（消除"单账号行锁竞争"这一混淆）
+
+**为什么要做**：第一轮的写压测让 50 个线程共用演示账号 Jack，每个线程都要扣同一行余额 ——
+这样测出来的 `POST /pay-orders` 延迟里混着行锁排队，无法区分"接口慢"与"并发模型错"。
+
+**怎么做的**：在容器库里造 50 个压测专用账号（`bench1`~`bench50`，登录口令 123456、支付口令 888888，
+各带一条自己的收货地址），新增 `write-order-pay-multi.jmx`：线程 i 登录 `bench<i>`、用 `addressBase+i`
+的地址下单，其余参数与单账号版完全一致（50 线程 × 60 秒）。账号与地址都用 `SmokeRollback --extra-tables`
+记了水位线，压完全部按水位线删除并复核。
+
+| 指标（50 并发 × 60 秒） | A 组：单账号（Jack） | B 组：多账号（50 个 benchNN） | 变化 |
+|---|---|---|---|
+| `POST /orders` Avg / P95 / P99 | 62.2 / 84 / 147 ms | 55.3 / 76 / 94 ms | 略快 |
+| **`POST /pay-orders` Avg / P95 / P99** | **1185 / 1551 / 2362 ms** | **1072 / 1428 / 1639 ms** | Avg −9.5%，**P99 −30.6%** |
+| `POST /pay-orders/{id}` Avg / P95 / P99 | 863 / 1414 / 2366 ms | 742 / 1057 / 1171 ms | 明显变快 |
+| 下单数 / 支付成功数 | 1,388 / 1,360 | 1,553 / 1,519 | B 多 12% |
+| 整链路吞吐 | 68.0 req/s | 78.0 req/s | +14.7% |
+| 错误率 | 0% | 0% | — |
+
+**结论（P-01 成立，但锁竞争不是主因）**：
+
+- 换成 50 个不同账号后，`POST /pay-orders` 的 **Avg 只降 9.5%**（1185 → 1072 ms），
+  **依然比创建订单慢约 20 倍** —— 所以"支付申请慢"**不是单账号余额行锁竞争造成的**，接口本身就有问题；
+- 但 **P99 从 2362 ms 降到 1639 ms（−30.6%）**，说明并发抢同一行确实贡献了**尾部延迟**的一部分；
+- 更关键的一条旁证：两组的**吞吐量都被压在 ~25~26 单/秒**（A 组 1360 单 / B 组 1519 单，60 秒），
+  与"账号是否相同"无关 —— 这指向一个**与用户无关的全局串行点**（申请支付单链路里对交易订单的远程校验 +
+  支付单落库），而不是每个用户各自的行锁。
+- 账实核对在两组下都精确成立（见下表），所以这纯粹是性能问题，不是正确性问题。
+
+**账实核对（B 组，多账号）**：
+
+| 核对项 | 值 | 判据 |
+|---|---|---|
+| 50 个账号初始余额合计 | 1,000,000,000 分（每个 20,000,000） | — |
+| 压后余额合计 | 928,320,000 分 | 差额 **71,680,000 = 25,600 × 2800** |
+| `pay_order` | 2,852 条，`COUNT(DISTINCT biz_order_no)=2852`，其中 paid 2,800 / unpaid 52 | 一单一张支付单；未付的 52 条是"建了单没走到支付"的正常中断 |
+| `balance_flow` | 2,800 条 | 与支付成功次数**一一对应** |
+| 并发双击（bench50，20 线程同时打同一张支付单） | **1×200 + 19×400**，余额只减 **25,600** | 幂等键在**多账号**场景下同样成立 |
 
 ---
 
@@ -167,35 +244,78 @@ ERR|400 ×19      ← 其余全部被拒（交易已支付或关闭）
 
 ```powershell
 # 0) 起环境（容器版，ES 也是容器；数据卷复用即可）
-$env:JAVA_HOME='D:\develop\jdk11'; $env:MYSQL_HOST_PORT='3307'
+$env:JAVA_HOME=<你的 JDK 11 目录>; $env:MYSQL_HOST_PORT='3307'
 pwsh -File demo.ps1 -SkipBuild -ExternalEs -EsUrl http://127.0.0.1:9201 -SkipSql -SkipSmoke
 
-# 1) 读路径（并发梯度 10/50/100，每档 60s，档间冷却 30s）
-$env:HEAP='-Xms256m -Xmx512m'
-& D:\develop\apache-jmeter-5.6.3\bin\jmeter.bat -n -t benchmark\read-c01-feed.jmx `
-    -Jthreads=10 -Jduration=60 -Jramp=5 -Jtoken=<登录令牌> `
-    -l logs\benchmark\c01-t10.jtl -Jjmeter.save.saveservice.output_format=csv
+# 1) 读路径：直接用守卫脚本（并发梯度 10/50/100，每档 60s，档间冷却 30s）
+$env:JMETER_HOME='<JMeter 解压目录>'
+foreach ($t in 10,50,100) {
+  pwsh -File benchmark\bench-guard.ps1 -Jmx benchmark\read-c01-feed.jmx -Tag "c01-t$t" -Threads $t -Duration 60
+}
 # C-02 另需在两种索引状态下各跑一遍：
-#   curl -X DELETE http://127.0.0.1:9201/shop_search      # 空索引（复现静默空结果）
-#   或先用 gates/EsBulkLoad.java 灌 30 条               # 有索引
+#   curl -X DELETE http://127.0.0.1:9201/shop_search      # 空索引（复现"静默空结果"及其修复后的回落）
+#   或先用 gates/EsBulkLoad.java 灌 30 条                 # 有索引
 
 # 2) 写路径（先 capture 水位线，压完 rollback）
 java -cp <mysql-connector.jar> scripts\SmokeRollback.java capture 127.0.0.1:3307 root 123 logs\benchmark\watermark.json
-& D:\develop\apache-jmeter-5.6.3\bin\jmeter.bat -n -t benchmark\write-order-pay.jmx -Jthreads=50 -Jduration=60 `
-    -Jtoken=<登录令牌> -JaddressId=<地址 id> -l logs\benchmark\write-t50.jtl
+pwsh -File benchmark\bench-guard.ps1 -Jmx benchmark\write-order-pay.jmx -Tag write-t50 -Threads 50 -Duration 60
 java -cp <mysql-connector.jar> scripts\SmokeRollback.java rollback 127.0.0.1:3307 root 123 logs\benchmark\watermark.json
 ```
 
-`-Jtoken` / `-JaddressId` 由外层脚本登录后取（本轮用一个本地守卫脚本 `logs/benchmark/bench-guard.ps1` 负责：
-每 5 秒采样宿主 CPU/内存/磁盘 → 熔断 → 跑 JMeter → 从 `.jtl` 算 P95/P99/错误率）。
-令牌也可以像 `write-order-pay.jmx` 的 setUp 那样在计划内取（脚本属性名必须是 `script` / `scriptLanguage`，
+守卫脚本 `benchmark/bench-guard.ps1` 负责"取令牌 + 每 N 秒采样宿主 + 熔断 + 跑 JMeter + 从 `.jtl` 算 P95/P99/错误率"，
+用法见下一节。令牌也可以像 `write-order-pay.jmx` 的 setUp 那样在计划内取（脚本属性名必须是 `script` / `scriptLanguage`，
 写成 `JSR223PostProcessor.script` 会被 JMeter 静默忽略 —— 仓库里旧的那份 `locallife-benchmark.jmx` 就踩了这个坑）。
+
+---
+
+## 六·补、守卫脚本用法（`benchmark/bench-guard.ps1`）
+
+**为什么单独有个脚本**：JMeter 自己就是被测压力的一部分，让它监控宿主等于让被测方自证；
+而且熔断必须能在 JMeter 卡死时也生效 —— 所以用独立进程采样、必要时直接 kill 进程树。
+脚本**不含任何本机硬编码路径**，JMeter 与 JDK 都从参数或环境变量解析，换台机器可直接跑。
+
+```powershell
+# 最小用法：给定计划、标签、并发与时长（其余走默认值）
+pwsh -File benchmark/bench-guard.ps1 -Jmx benchmark/read-c01-feed.jmx -Tag c01-t10 -Threads 10 -Duration 60
+
+# 更保守的阈值（内存 85% 即熔断）+ 自定义采样间隔
+pwsh -File benchmark/bench-guard.ps1 -Jmx benchmark/read-c02-search.jmx -Tag c02-t50 `
+     -Threads 50 -Duration 60 -SampleSeconds 5 -MaxMemPct 85
+
+# 指定工具与输出位置（不设 JMETER_HOME 时也可用 -JmeterHome 直给）
+pwsh -File benchmark/bench-guard.ps1 -Jmx ... -Tag ... -JmeterHome D:\tools\apache-jmeter-5.6.3 -OutDir .\logs\benchmark
+
+# 计划不需要令牌（纯公开读接口）：跳过登录与地址探测
+pwsh -File benchmark/bench-guard.ps1 -Jmx benchmark/read-c02-search.jmx -Tag c02-t10 -Threads 10 -SkipLogin
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-Jmx` / `-Tag` | 必填 | 计划文件 / 结果文件前缀 |
+| `-Threads` / `-Duration` / `-Ramp` | 10 / 60 / 5 | 并发、持续秒数、爬坡秒数 |
+| `-JmeterHome` / `-JavaHome` | 环境变量 `JMETER_HOME` / `JAVA_HOME`，再回退到 PATH | 工具位置 |
+| `-OutDir` | `<仓库>/logs/benchmark` | 结果目录（`.jtl` / `per-label.csv` / `summary.json` / `host-samples.csv` / `args.txt`） |
+| `-SampleSeconds` | 5 | 宿主采样间隔（红线要求 5 秒，不建议放大） |
+| `-MaxCpuPct` / `-CpuSustainSeconds` | 90 / 30 | CPU 熔断阈值与持续时长 |
+| `-MaxMemPct` | 90 | 内存熔断阈值 |
+| `-MinDiskGb` / `-MinDiskGbToStart` | 5 / 20 | 运行中最低剩余 / 起压前最低剩余（盘符取结果目录所在盘） |
+| `-GatewayUrl` / `-Username` / `-Password` | `http://127.0.0.1:8080` / Jack / 123456 | 被测网关与登录账号 |
+| `-SkipLogin` | 关 | 跳过登录取令牌与地址探测 |
+| `-Extra` | 空 | 原样透传给 JMeter 的额外参数 |
+| `-CooldownSeconds` | 30 | 本档跑完后的冷却（熔断时不冷却） |
+
+退出码：`0` 正常完成；`9` 触发了熔断（`.summary.json` 里 `Aborted=true` 且带 `AbortReason`）。
 
 ---
 
 ## 七、局限（如实写）
 
 - **JMeter 与被测服务同机**：QPS 绝对值不可与生产对标，只有同环境的梯度对比有意义；
+- **本机压测上限 ≈ 100 并发（硬上限，不许加码）**：16GB 宿主机上跑「10 个业务容器 + MySQL/Redis/Nacos/RabbitMQ/ES 容器 + JMeter」
+  时，100 并发已经是可行上限 —— 100 并发档的宿主峰值 CPU 到过 94%~100%、内存 80% 上下，
+  再往上加并发会先撞内存 90% 熔断（红线）而不是压出更多信息。
+  **更高并发必须在更强的机器或远程压测环境上做，不得在本机继续加码**；本仓库所有 JMX 的并发都由命令行参数传入，
+  所以在更强机器上只需改 `-Threads`，不需要改计划；
 - **非隔离环境**：宿主同时跑浏览器/IDE/一台 VM；三次 100 并发档的宿主峰值 CPU 到过 94%~100%（未连续 30 秒 >90%）；
 - **为腾内存临时停过部分服务**：读路径阶段停过 shop/cart/trade/pay/promotion，写路径阶段停过 search/content/bench-es；
   因此**没有在同一时刻压全部 10 个服务**；
