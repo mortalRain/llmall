@@ -21,6 +21,22 @@ import java.time.Duration;
 public class MallE2E {
 
     static final String BASE = "http://localhost:8080";
+
+    /**
+     * 演示账号 Jack 的支付口令（不是登录口令）。
+     *
+     * 【为什么不是登录口令那个 123456】服务端有一条「首次支付前强制改密」的拦截：当前
+     * pay_password 仍等于初始口令时，扣款在密码校验通过之后还会被拒（UserServiceImpl 里
+     * INITIAL_PASSWORD 那个分支，错误信息「请先修改支付密码」）。而修改支付密码的接口
+     * POST /users/pay-password 要求短信验证码，冒烟脚本无法自给，所以走不通"脚本内改密"这条路。
+     *
+     * 【所以】演示库里把 Jack 的 pay_password 预置成 888888 的 bcrypt 哈希，让冒烟走
+     * "这个账号已经改过支付密码"的正常路径。生产安全语义完全不变 —— 被绕开的只是
+     * "演示账号从未改过密"这一个状态，不是那条拦截本身。
+     *
+     * 【登录口令仍是 123456，不要动】见下方 login 那行。
+     */
+    static final String DEMO_PAY_PW = "888888";
     static final ObjectMapper M = new ObjectMapper();
     static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10)).build();
@@ -114,7 +130,7 @@ public class MallE2E {
 
         long balanceBefore = get("/users/me", true).path("balance").asLong();
         int creditsBefore = get("/users/me", true).path("credits").asInt(0);
-        post("/pay-orders/" + pay1, "{\"pw\":\"123456\"}", true);
+        post("/pay-orders/" + pay1, "{\"pw\":\"" + DEMO_PAY_PW + "\"}", true);
         sleep(6000);
         JsonNode paid = get("/orders/" + orderId, true);
         JsonNode me = get("/users/me", true);
@@ -191,7 +207,7 @@ public class MallE2E {
         String paidOrderId = String.valueOf(orderId);
         String repeatErr = "";
         try {
-            post("/pay-orders/" + pay1, "{\"pw\":\"123456\"}", true);
+            post("/pay-orders/" + pay1, "{\"pw\":\"" + DEMO_PAY_PW + "\"}", true);
         } catch (Exception e) {
             repeatErr = e.getMessage();
         }
