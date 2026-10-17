@@ -87,7 +87,7 @@ public class PointsServiceImpl implements IPointsService {
                 userInfoMapper.insert(new UserInfo()
                         .setUserId(event.getUserId())
                         .setCredits(points)
-                        .setLevel(0)
+                        .setLevel(UserInfo.LEVEL_NOT_OPENED)
                         .setFans(0)
                         .setFollowee(0)
                         .setGender(0));
@@ -124,3 +124,4 @@ public class PointsServiceImpl implements IPointsService {
                 .last("LIMIT " + size));
     }
 }
+

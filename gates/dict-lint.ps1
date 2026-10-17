@@ -1,13 +1,19 @@
-﻿# 字典与跨库引用一致性闸门
+# 字典与跨库引用一致性闸门
 #
 # 为什么需要它：注释里最有杀伤力的一类错误是**状态字典漂移** —— DDL 的 COMMENT 声明的取值
 # 与 Java 代码对不上。本仓库出过真实事故：`user.status` 注释写「1 正常 2 冻结」而枚举是
 # FROZEN(0)/NORMAL(1)，按注释写库会让「冻结」静默失效。人工核对 280 个文件不可持续，
 # 所以把它变成机器检查。
 #
-# 四项检查（前两项与第四项可自动裁决，第二项是候选清单）：
+# 四项检查（第一、第三、第四项可自动裁决，第二项输出候选清单）：
 #   ① 取值冲突   —— 同一字段名 + 同一标签，在 DDL 与 Java 里的取值不同
-#   ② 字典孤值   —— DDL 声明的取值，在 Java 侧找不到同标签（疑似死状态；含少量噪声，需人工判断）
+#   ② 字典孤值   —— DDL 声明的取值，在 Java 侧找不到同标签。分两桶输出：
+#                   ②-真候选   ：Java 侧确实没有对应取值，需要人工决定改注释还是改代码；
+#                   ②-口径误报 ：DDL/Java 其实一致，只是写法没被解析器认出来 ——
+#                                否定句（"不存在 2 已回滚"）、长度上限（"≤128 字"）、
+#                                全角括号（"置 1（有效）"）、噪声词（"0 表示未开通"）。
+#                   分桶的理由很直接：不分的话 2 条真问题会被 10 条误报淹没，人就不看了。
+#                   两桶都逐条打印、总数不变，只是标签与颜色不同 —— 不隐藏任何候选。
 #   ③ 库名指向   —— 注释里的 `X.Y`：Y 是真实表名，但该表不在 X 库（多库同名表已按集合处理）
 #   ④ 同表同列表述不一 —— 同一 `表.列` 在不同 SQL 文件里的字典写法不同（改一处忘另一处）
 #
@@ -36,10 +42,22 @@ function Normalize-Db {
 
 # ---------------------------------------------------------------- 收集 Java 侧字典
 $javaDict = @()   # @{ File; Owner; Field; Value; Label; Kind }
+# 「Java 侧其实写了、只是解析器没认出来」的两种写法，单独收集：用于把 ② 的口径误报与真候选分开。
+#   ① 全角括号：`状态置 1（有效）` —— 解析器只认空格/冒号/逗号分隔，括号里的标签会被漏掉；
+#   ② 噪声词前缀：`0 表示未开通` —— 标签以"表示/为/即/是/含/见"开头时按噪声整条丢弃。
+# 这两种都属于"同一件事有两种写法，闸门只认其中一种"，属于口径问题，不是字典不一致。
+$javaFullwidthPairs = @{}
+$javaNoisePairs = @{}
 $javaFiles = Get-ChildItem $root -Recurse -File -Filter *.java | Where-Object { $_.FullName -notlike '*\target\*' }
 foreach ($f in $javaFiles) {
     $rel = $f.FullName.Replace("$root\", '')
     $text = [System.IO.File]::ReadAllText($f.FullName)
+    foreach ($m in [regex]::Matches($text, '(\d+)\s*[（(]\s*([\u4e00-\u9fa5]{1,8})')) {
+        $javaFullwidthPairs[$m.Groups[1].Value + '|' + $m.Groups[2].Value] = $true
+    }
+    foreach ($m in [regex]::Matches($text, '(\d+)\s*[：:，,、\s]\s*(?:表示|为|即|是|含|见)\s*([\u4e00-\u9fa5]{1,8})')) {
+        $javaNoisePairs[$m.Groups[1].Value + '|' + $m.Groups[2].Value] = $true
+    }
     # PO 的表名：用于把「同名字段」限定在**同一张表**内比对（否则各处都有的 status 会跨表误配）
     $tbl = ''
     if ($text -match '@TableName\(\s*"([^"]+)"\s*\)') { $tbl = $matches[1] }
@@ -128,17 +146,67 @@ Write-Host ''
 
 # ---------------------------------------------------------------- ② DDL 取值在 Java 侧无同标签（候选）
 Write-Host '【②】DDL 声明的取值在 Java 侧找不到同标签（疑似死状态，需人工确认）' -ForegroundColor Yellow
-$noise = '^(表示|为一级|为无|为|即|含|见|单位|超出|范围|默认|之间|以上|以下|元|分|天|小时|分钟|秒)'
+$noiseLabels = '^(表示|为一级|为无|为|即|含|见|单位|超出|范围|默认|之间|以上|以下|元|分|天|小时|分钟|秒)'
+
+# 判定一条 ② 候选是不是"解析口径误报"：命中则返回原因字符串，否则返回空（=真候选）。
+# 四类规则都要求**同一条候选**能给出具体依据，不做"看着像误报就放过"的模糊判断：
+#   否定句   —— DDL 原句把该取值写成"不存在 / 无 / 没有 / 不含 / 非"，取值不是被声明的状态；
+#   长度限制 —— 取值后面紧跟"字 / 位 / 条 / 个字符 / 字节"等单位，并带 ≤、<、上限 之类的界限词；
+#   全角括号 —— Java 侧写成 `1（有效）`，标签在全角括号里，解析器只认半角分隔；
+#   噪声词   —— Java 侧写成 `0 表示未开通`，标签以"表示/为/即/是"开头，被噪声过滤整条丢弃。
+function Get-DictLintMisparseReason {
+    param($Candidate)
+    $raw = [string]$Candidate.Raw
+    $value = [string]$Candidate.Value
+    $label = [string]$Candidate.Label
+
+    # 标签本身就是否定词（"改回 1，无 4 已退款" 会切出 `1(无)`）
+    if ($label -match '^(无|没有|不存在|非)$') { return '否定句（标签是否定词）' }
+
+    # 取值在 DDL 原文里的位置之前 8 个字符内出现否定词
+    $idx = $raw.IndexOf($value, [System.StringComparison]::Ordinal)
+    if ($idx -ge 0) {
+        $from = [Math]::Max(0, $idx - 8)
+        $before = $raw.Substring($from, $idx - $from)
+        if ($before -match '(不存在|没有|不含|不是|非|无)') { return '否定句（原文写明该取值不存在）' }
+    }
+
+    # 长度/数量上限：取值后面紧跟单位，且前面有界限标记（≤ < 上限 最多 不超过）
+    if ($raw -match ('((≤|<|不超过|最多|上限)\s*' + [regex]::Escape($value) + '\s*(字|位|条|个字符|字节))')) {
+        return '长度限制（是长度上限，不是枚举取值）'
+    }
+
+    if ($javaFullwidthPairs.ContainsKey($value + '|' + $label)) { return '全角括号（Java 写成 1（有效））' }
+    if ($javaNoisePairs.ContainsKey($value + '|' + $label)) { return '噪声词（Java 写成 0 表示未开通）' }
+    return ''
+}
+
+$realCandidates = @()
+$misparseCandidates = @()
 foreach ($s in $sqlDict) {
-    if ($s.Label -match $noise) { continue }
+    if ($s.Label -match $noiseLabels) { continue }
     $found = $false
     foreach ($j in $javaDict) {
         if (($j.Label -ceq $s.Label) -or ($j.Label.Length -ge 2 -and $s.Label.Contains($j.Label)) -or ($s.Label.Length -ge 2 -and $j.Label.Contains($s.Label))) { $found = $true; break }
     }
     if (-not $found) {
         $script:Hit2++
-        Write-Host ("  [孤值] " + $s.Column + " = " + $s.Value + "(" + $s.Label + ")   " + $s.File + ":" + $s.Line + "  表 " + $s.Table)
+        $reason = Get-DictLintMisparseReason $s
+        $row = [pscustomobject]@{ Column = $s.Column; Value = $s.Value; Label = $s.Label; File = $s.File; Line = $s.Line; Table = $s.Table; Raw = $s.Raw; Reason = $reason }
+        if ($reason) { $misparseCandidates += $row } else { $realCandidates += $row }
     }
+}
+
+# 真候选与口径误报分开呈现，各自计数：2 条真问题不会再被 10 条误报淹没
+Write-Host ("  ── ②-真候选（需要人工决定改注释还是改代码）: " + $realCandidates.Count + " 条 ──") -ForegroundColor Yellow
+foreach ($c in $realCandidates) {
+    Write-Host ("  [真候选] " + $c.Column + " = " + $c.Value + "(" + $c.Label + ")   " + $c.File + ":" + $c.Line + "  表 " + $c.Table)
+}
+if ($realCandidates.Count -eq 0) { Write-Host '  OK 无真候选' -ForegroundColor Green }
+Write-Host ""
+Write-Host ("  ── ②-口径误报（解析器把非字典写法当成字典，不计入待办）: " + $misparseCandidates.Count + " 条 ──") -ForegroundColor DarkGray
+foreach ($c in $misparseCandidates) {
+    Write-Host ("  [误报·" + $c.Reason + "] " + $c.Column + " = " + $c.Value + "(" + $c.Label + ")   " + $c.File + ":" + $c.Line) -ForegroundColor DarkGray
 }
 if ($script:Hit2 -eq 0) { Write-Host '  OK' -ForegroundColor Green }
 Write-Host ''
@@ -197,11 +265,14 @@ Write-Host ''
 
 # ---------------------------------------------------------------- 汇总
 Write-Host ('=' * 62)
-Write-Host ("① 取值冲突 " + $script:Hit1 + "   ② 疑似死状态 " + $script:Hit2 + "（候选）   ③ 库名指向错误 " + $script:Hit3 + "   ④ 同列表述不一 " + $script:Hit4)
+Write-Host ("① 取值冲突 " + $script:Hit1 + "   ② 疑似死状态 " + $script:Hit2 + "（真候选 " + $realCandidates.Count + " / 口径误报 " + $misparseCandidates.Count + "）   ③ 库名指向错误 " + $script:Hit3 + "   ④ 同列表述不一 " + $script:Hit4)
 $decisive = $script:Hit1 + $script:Hit3 + $script:Hit4
 if ($decisive -gt 0) {
-    Write-Host ('结论: 待处理 —— ①③④ 可直接判定（每一条都要人工决定改注释还是改代码），② 需人工筛选') -ForegroundColor Red
+    Write-Host ('结论: 待处理 —— ①③④ 可直接判定（每一条都要人工决定改注释还是改代码），② 有 ' + $realCandidates.Count + ' 条真候选需人工筛选（口径误报已单独归类）') -ForegroundColor Red
     exit 1
 }
-Write-Host '结论: 通过（①③④ 无命中；② 的候选请人工过一遍）' -ForegroundColor Green
+Write-Host ('结论: 通过（①③④ 无命中；② 有 ' + $realCandidates.Count + ' 条真候选待人工确认，' + $misparseCandidates.Count + ' 条为口径误报不计入）') -ForegroundColor Green
 exit 0
+
+
+

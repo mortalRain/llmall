@@ -41,6 +41,6 @@ sql/merged/52a-orphan-pay-orders-audit.sql	95db924b5c251a0fbd8e6ec3c24bf41c77b96
 sql/merged/55-seed-core-shops.sql	a9cf51a7ac1a95c58c0565e935fcab281f0afd801f6cc88c0ea19ebc616f7091	23	69
 sql/merged/60-user-pay-password.sql	980da0f0180c2d98703e09eef8bce2e06a224dddcf7e349c36c3d2cae683a3b5	16	103
 sql/merged/61-user-weak-password-reset.sql	ffe41d69ebd99582ed0f6f9bf5981b922d31dce646658211bf750dc5020ec141	48	232
-sql/merged/62-align-dict-comments.sql	1f3f5447871928f34f842702ab3a356ebf4730872f3ff9ea638313dedcfa0fb2	21	99
+sql/merged/62-align-dict-comments.sql	c269479ff746df3849e4933f91505e66abba39352051dd0ab961212e773dd25d	15	99
 sql/merged/63-user-demo-pay-password.sql	777e96763eb7f7cbf8d38bc8c31baaa84c29397df18aaff186ff05afce87dd79	22	108
 sql/merged/99-migrate-dianping-data.sql	967cf63a8b1635741327e31e46b437fe34c42414ec10a89187d84b2972c42998	16	112

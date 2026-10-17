@@ -80,7 +80,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .setContent(form.getContent())
                 .setImages(StrUtil.blankToDefault(form.getImages(), ""))
                 .setScore(form.getScore())
-                .setLiked(0)
+                .setLiked(BlogComments.INITIAL_LIKED)
                 .setComments(0)
                 .setStatus(STATUS_PUBLISHED);
         save(blog);
@@ -310,8 +310,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .setContent(content)
                 .setParentId(parentId == null ? 0L : parentId)
                 .setAnswerId(answerId == null ? 0L : answerId)
-                .setLiked(0)
-                .setStatus(0);
+                .setLiked(BlogComments.INITIAL_LIKED)
+                .setStatus(BlogComments.STATUS_NORMAL);
         blogCommentsMapper.insert(comments);
         lambdaUpdate().eq(Blog::getId, blogId).setSql("comments = comments + 1").update();
         return comments.getId();
@@ -339,3 +339,4 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         return value == null ? 0 : value;
     }
 }
+

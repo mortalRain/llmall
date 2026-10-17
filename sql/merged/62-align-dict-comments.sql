@@ -1,9 +1,9 @@
 -- =====================================================================
 -- 62-align-dict-comments.sql
--- 62 · 存量库字典注释对齐：把 7 个列的 COMMENT 改到与代码事实一致
+-- 62 · 存量库字典注释对齐：把 5 个列的 COMMENT 改到与代码事实一致（另外 2 列的口径只保留在建表定义里，本脚本不再抄写）
 --
 -- ============================ 一、功能 ============================
--- 用 ALTER TABLE ... MODIFY COLUMN 修正 7 个列的注释（覆盖 8 项已登记的漂移问题），
+-- 用 ALTER TABLE ... MODIFY COLUMN 修正 5 个列的注释（覆盖 6 项已登记的漂移问题），
 -- 消除"按 DDL 注释写库会踩坑"的风险。
 -- 【只改 COMMENT】列类型、可空性、默认值、索引与数据一律不动，本脚本不含任何 DML/DDL 之外的内容。
 --
@@ -14,25 +14,24 @@
 -- 6 交易结束），而本项目实际只用 1 / 2 / 5 / 7 —— DBA 按注释写库会产生"永远查不出来"的状态。
 --
 -- ============================ 三、影响面 ============================
---   · 受影响：7 个列的 COMMENT 文本（item 1 处 / promotion 2 处 / pay 2 处 / trade 2 处）。
+--   · 受影响：5 个列的 COMMENT 文本（promotion 1 处 / pay 2 处 / trade 2 处）。
 --   · 不受影响：列类型、可空性、默认值、索引、全部数据行 —— MODIFY 只替换列定义中的 COMMENT。
 --   · 不受影响：全新初始化的库 —— 源文件已同步改为同一口径（见"五、前置依赖"），新部署可跳过本脚本。
 --
 -- ============================ 四、执行步骤 ============================
---   1) 执行前核对当前定义（不可跳过）：本脚本的列定义按 2026-10-15 的**实测值**编写
+--   1) 执行前核对当前定义（不可跳过）：本脚本的列定义按 2026-10-15 的实测值编写
 --      （information_schema.COLUMNS）；若你的库结构不同，请以 SHOW CREATE TABLE 为准调整：
---        SHOW CREATE TABLE `llmall-item`.`stock_flow`;
+--        SHOW CREATE TABLE `llmall-promotion`.`voucher`;
 --   2) 执行：mysql -uroot -p < 62-align-dict-comments.sql
---   3) 复核（期望 7 行，且 COMMENT 与脚本内目标文本逐字一致）：
+--   3) 复核（期望 5 行，且 COMMENT 与脚本内目标文本逐字一致）：
 --        SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,COLUMN_COMMENT
 --          FROM information_schema.COLUMNS
---         WHERE (TABLE_SCHEMA='llmall-item' AND TABLE_NAME='stock_flow' AND COLUMN_NAME='status')
---            OR (TABLE_SCHEMA='llmall-promotion' AND TABLE_NAME IN ('voucher','user_voucher') AND COLUMN_NAME='status')
+--         WHERE (TABLE_SCHEMA='llmall-promotion' AND TABLE_NAME='voucher' AND COLUMN_NAME='status')
 --            OR (TABLE_SCHEMA='llmall-pay' AND TABLE_NAME='pay_order' AND COLUMN_NAME IN ('pay_type','status'))
 --            OR (TABLE_SCHEMA='llmall-trade' AND TABLE_NAME IN ('order','message_log') AND COLUMN_NAME='status');
 --
 -- ============================ 五、前置依赖 ============================
---   · 需要下列建表脚本已执行：11-item-alter.sql（stock_flow）、20-promotion.sql（voucher/user_voucher）、
+--   · 需要下列建表脚本已执行：20-promotion.sql（voucher）、
 --     sql/llmall-pay.sql（pay_order）、sql/llmall-trade.sql（order）、02-shared-infra.sql（message_log）。
 --   · 顺序反了会怎样：表未建就执行报 ERROR 1146 Unknown table，属正常（该库没有这张表）；
 --     已建库上执行只对齐注释，无副作用。
@@ -50,11 +49,12 @@
 -- 幂等性：可重复执行，第二次结果与第一次完全相同。
 -- =====================================================================
 
--- D-01 · llmall-item.stock_flow.status
--- 代码事实：扣减与回补都写 1；回补是新增一条正数 changeNum 的流水，没有任何写 2 的路径。
-ALTER TABLE `llmall-item`.`stock_flow`
-  MODIFY COLUMN `status` tinyint NOT NULL DEFAULT 1
-    COMMENT '1 有效（回补以新增正数流水表达，不存在 2 已回滚）';
+-- D-01 · llmall-item.stock_flow.status —— 本脚本不再改这一列
+-- 口径原文只维护一处：sql/merged/11-item-alter.sql 的 stock_flow 建表语句（status 列定义）。
+-- 全新初始化的库在建表时已经是这个口径，本脚本再抄一遍等于同一字典两个出处：改一处忘另一处时两处会打架，
+-- 字典一致性闸门也会把同一列算成两条候选（一条原文 + 一条抄写）。
+-- 存量库若与建表定义不一致，按 11-item-alter.sql 里该列的定义对齐一次即可，不需要在这里复制文本。
+-- 代码事实不变：扣减与回补都写 1（StockFlow.STATUS_VALID），回补是新增一条正数 changeNum 的流水，没有写 2 的路径。
 
 -- D-02 · llmall-promotion.voucher.status
 -- 代码事实：Voucher 只有 STATUS_ON=1 / STATUS_OFF=2，VoucherVO 同。
@@ -62,12 +62,10 @@ ALTER TABLE `llmall-promotion`.`voucher`
   MODIFY COLUMN `status` tinyint unsigned NOT NULL DEFAULT 1
     COMMENT '1 上架 2 下架';
 
--- D-03 + D-03b · llmall-promotion.user_voucher.status
--- 代码事实：Java 三处（UserVoucher / UserVoucherVO / api UserVoucherDTO）都是「1 未使用 2 已使用 3 已过期」；
+-- D-03 + D-03b · llmall-promotion.user_voucher.status —— 本脚本不再改这一列
+-- 口径原文只维护一处：sql/merged/20-promotion.sql 的 user_voucher 建表语句（status 列定义）。
+-- 代码事实不变：Java 三处（UserVoucher / UserVoucherVO / api UserVoucherDTO）都是「1 未使用 2 已使用 3 已过期」，
 -- 退款走"状态改回 1"，没有 4；值 2 的统一叫法是「已使用」而不是「已核销」。
-ALTER TABLE `llmall-promotion`.`user_voucher`
-  MODIFY COLUMN `status` tinyint unsigned NOT NULL DEFAULT 1
-    COMMENT '1 未使用 2 已使用 3 已过期（退款为改回 1，无 4 已退款）';
 
 -- D-04 · llmall-pay.pay_order.pay_type
 -- 代码事实：PayType = JSAPI(1,网页支付JS) / MINI_APP(2,小程序) / APP(3,APP支付) / NATIVE(4,扫码支付) / BALANCE(5,余额支付)。
@@ -96,3 +94,5 @@ ALTER TABLE `llmall-trade`.`order`
 ALTER TABLE `llmall-trade`.`message_log`
   MODIFY COLUMN `status` tinyint NOT NULL DEFAULT 0
     COMMENT '0 待发送 1 已投递 2 已完成(下游确认已处理) 3 失败待重试';
+
+

@@ -195,7 +195,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
                 .setChangeNum(changeNum)
                 .setBizType(bizType)
                 .setBizId(dto.getBizId())
-                .setStatus(1);
+                .setStatus(StockFlow.STATUS_VALID);
         try {
             stockFlowMapper.insert(flow);
             return true;
@@ -205,3 +205,4 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         }
     }
 }
+

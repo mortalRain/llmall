@@ -23,6 +23,15 @@ public class StockFlow implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    /**
+     * 流水状态「有效」，也是写入路径唯一的取值。
+     *
+     * 【为什么要有这个名字】写入点若直接写 {@code setStatus(1)}，库里注释说"1 有效"、代码里只有一个魔数 1，
+     * 两者靠人脑对齐。提成常量后，"写的是什么状态"在代码里可读，字典一致性闸门也不必再把 1 当成孤值候选。
+     * 【注意】回补不靠改本字段表达，而是新增一条正数 changeNum 的流水 —— 所以不存在"已回滚"状态。
+     */
+    public static final int STATUS_VALID = 1;
+
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
@@ -45,3 +54,4 @@ public class StockFlow implements Serializable {
 
     private LocalDateTime createTime;
 }
+
