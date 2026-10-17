@@ -52,6 +52,9 @@ mysql -uroot -p < 03b-seata-server-1.5.2-upgrade.sql
 
 # ── 5) 各域建表 / 改造 ──
 mysql -uroot -p < 10-shop.sql                   # 5.1  门店域建表（shop / shop_type / shop_stat）
+mysql -uroot -p < 55-seed-core-shops.sql        # 5.1b ★必须先于 50：补齐 14 家核心门店（id 1~14）与类型 1/2
+                                                #     这批门店原本只来自 99 号点评迁移（依赖仓库外的库），
+                                                #     不补则门店只有 16 家、套餐只有 80 个，MallE2E 直接红
 mysql -uroot -p < 11-item-alter.sql             # 5.2  商品域改造（item 加 shop_id/type + 索引，建 stock_flow）
 mysql -uroot -p < 20-promotion.sql              # 5.3  营销域建表（voucher / seckill_voucher / user_voucher）
 mysql -uroot -p < 21-user-alter.sql             # 5.4  用户域改造（user 加 nick_name/icon + uk_phone，建 user_info/user_sign/points_flow）
@@ -76,7 +79,7 @@ mysql -uroot -p < 51-seed-more-data.sql         # 6.2  补齐 8 个缺失类型�
 mysql -uroot -p < 50-seed-local-life-data.sql   # 6.3  ★再跑一遍 50：为 51 新增的门店生成套餐与评价
 mysql -uroot -p < 51-seed-more-data.sql         # 6.4  ★再跑一遍 51：补齐依赖"评价"的聚合数据（评论/点赞/Feed）
 mysql -uroot -p < 52-fix-orphan-pay-orders.sql  # 6.5  清理前端 Number() 精度丢失产生的孤儿支付单并退款
-mysql -uroot -p < 63-user-demo-pay-password.sql # 6.6  ★演示 / 冒烟环境专用：把 Jack 的支付口令预置成 888888
+mysql -uroot -p < 63-user-demo-pay-password.sql # 6.6  ★演示 / 冒烟环境专用：Jack 支付口令预置 888888、登录口令预置 123456
 #      ⚠️ 必须在 60 号之后执行（依赖 pay_password 列）；⛔ 生产库与任何对外开放的库都不得执行
 #      ⚠️ 52a 是 52 之前的只读清点，不改数据，位置见「已知偏差台账」；本清单不含 52a 的调用
 # 跑完调一次接口：POST /search/view/rebuild 与 POST /shops/cache/geo/rebuild
@@ -139,6 +142,7 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 | 03b | `03b-seata-server-1.5.2-upgrade.sql` | **house style 出处**：`@c` + `IF()` + `PREPARE/EXECUTE/DEALLOCATE`；种子用 `INSERT IGNORE`；`CONVERT TO CHARACTER SET` 本身可重复执行 |
 | 10 | `10-shop.sql` | `CREATE TABLE IF NOT EXISTS` ×3 |
 | 11 | `11-item-alter.sql` | **新增守卫**：`COLUMNS`×1 + `STATISTICS`×2（并修掉 "ALTER TABLE item 表名后多一个 r" 的语法错） |
+| 55 | `55-seed-core-shops.sql` | **演示数据（核心门店）**：`INSERT IGNORE` 14 家核心门店（id 1~14）与类型 1 / 2。**必须排在 50 之前**（50 号按 shop 表全量生成套餐）。用 `INSERT IGNORE` 而不是 `ON DUPLICATE KEY UPDATE`：已存在的行整行跳过，不会把长期演示库里跑出来的售量/评价数/热度打回种子值。**⚠️ 仅演示库** |
 | 20 | `20-promotion.sql` | `CREATE TABLE IF NOT EXISTS` ×3 |
 | 21 | `21-user-alter.sql` | **新增守卫**：`COLUMNS`×1（nick_name/icon）+ `STATISTICS`×1（uk_phone） |
 | 04 | `04-balance-flow.sql` | `CREATE TABLE IF NOT EXISTS`（余额变动流水 + `uk_biz(biz_type,biz_no)` 幂等键；B2 资金一致性，脚本号小于 10 但依赖 21 建好的 user 表，故排在其后） |
@@ -156,7 +160,7 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 | 60 | `60-user-pay-password.sql` | **新增守卫**：`COLUMNS` 判断 `pay_password` 是否已存在。`ADD COLUMN ... NOT NULL DEFAULT '123456'` 会把**既有行**一并填充，故存量账号余额支付行为不变。**⚠️ 必须早于应用发布** |
 | 61 | `61-user-weak-password-reset.sql` | 存量弱口令重置：第 1 段清点、第 2 段 `UPDATE`（**默认注释，需人工启用**）、第 3 段校验。`WHERE password = '<初始哈希>'` 保证幂等且不误伤已改密账号 |
 | 62 | `62-align-dict-comments.sql` | **存量库注释对齐（全新初始化可跳过）**：7 条纯 `ALTER TABLE ... MODIFY COLUMN ... COMMENT`，把 `stock_flow` / `voucher` / `user_voucher` / `pay_order`(×2) / `order` / `message_log` 的字典型注释改成与代码事实一致。**只改 COMMENT，不动类型/可空性/默认值/数据；可重复执行**。源文件已同步为同一口径，故新库无需执行 |
-| 63 | `63-user-demo-pay-password.sql` | **演示 / 冒烟环境专用**：把演示账号 Jack 的 `pay_password` 从 60 号写入的"初始口令哈希"改成"888888 的哈希"，使冒烟脚本（`scripts/MallE2E.java`）能走过余额支付 —— 否则会被"首次支付前强制改密"那条拦截（`UserServiceImpl#deductMoney`）挡下。幂等：`WHERE username='Jack' AND pay_password='<初始口令哈希>'`，第二遍命中 0 行；已自行改过支付密码的账号不受影响。列不存在时只打印提示、不报错。**⛔ 生产库不得执行** |
+| 63 | `63-user-demo-pay-password.sql` | **演示 / 冒烟环境专用**：把演示账号 Jack 的两个口令列收敛成"冒烟能直接用"的状态 —— `pay_password` 从 60 号写入的初始口令哈希改成 888888 的哈希（否则被"首次支付前强制改密"拦下，见 `UserServiceImpl#deductMoney`）；`password` 从原商城导出的那条哈希改成 123456 的哈希（否则 `MallE2E` 第一步登录就红）。幂等：两段 `UPDATE` 都只命中"仍是已知旧值"的行，第二遍命中 0 行；已自行改过口令的账号不受影响。列不存在时只打印提示、不报错。**⛔ 生产库不得执行** |
 | 99 | `99-migrate-dianping-data.sql` | `INSERT ... ON DUPLICATE KEY UPDATE` + `UPDATE ... WHERE hot_score = 0` |
 
 ### 3.1 守卫模板（统一写法）

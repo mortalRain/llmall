@@ -27,7 +27,10 @@ services:
       MYSQL_ROOT_PASSWORD: "123"           # 【注意】须与各服务 llmall.db.pw 一致
       TZ: Asia/Shanghai
     ports:
-      - "3306:3306"
+      # 宿主端口可用 MYSQL_HOST_PORT 覆盖：本机已装原生 MySQL 服务（占着 3306）时设
+      # MYSQL_HOST_PORT=3307 再 up 即可，不必停掉那套 MySQL。容器内端口恒为 3306，
+      # 应用容器之间仍按容器名 + 3306 互访，不受影响；demo.ps1 的 -DbHostPort 是同一口径。
+      - "${MYSQL_HOST_PORT:-3306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     mem_limit: 512m
@@ -36,18 +39,24 @@ services:
   redis:
     image: redis:7.2
     container_name: redis
-    command:
-      - redis-server
+    # 一个容器里同时跑 redis 主节点与 3 个哨兵（26379/26380/26381），原因见 ./redis/entrypoint.sh 头部：
+    # nacos-config/shared-redis.yaml 把哨兵地址写成 ${llmall.redis.host}:26379..26381，
+    # 即"哨兵与 redis 同机"。VM / 生产就是原生同机部署；容器里要沿用这份配置，
+    # 哨兵就必须与 redis 同主机名同 IP —— 拆成独立容器会让应用连 redis:26379 落空。
+    # 口令、内存上限、关闭持久化等原来写在 command 里的参数，全部搬进了 entrypoint 脚本。
+    entrypoint: ["/bin/sh", "/usr/local/bin/redis-entrypoint.sh"]
+    environment:
       # 【注意】口令须与各服务 application-local.yaml / Nacos 的 llmall.redis.pw 一致：
       # VM 上为 123456（不是 123），写错表现为启动即 Redis 连接失败。
-      - --requirepass ${REDIS_PASSWORD:-123456}
-      - --maxmemory 96mb                   # 内存上限，避免无界增长
-      - --maxmemory-policy allkeys-lru
-      - --save ""                          # 开发环境关闭 RDB 持久化，省内存与 IO
-      - --appendonly no
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-123456}
+    volumes:
+      - ./redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     ports:
       - "6379:6379"
-    mem_limit: 160m
+      - "26379:26379"                      # 三个哨兵端口映射到宿主，便于排障（应用走容器网络）
+      - "26380:26380"
+      - "26381:26381"
+    mem_limit: 224m
     restart: unless-stopped
 
   nacos:
@@ -76,21 +85,25 @@ services:
       RABBITMQ_DEFAULT_USER: llmall
       RABBITMQ_DEFAULT_PASS: "123"
       RABBITMQ_DEFAULT_VHOST: /llmall
-      # 【注意】延迟消息插件：trade 的超时未支付自动关单依赖 x-delayed-message 交换机，
-      # 镜像内已预装但默认不启用，启用状态写在容器层的 /etc/rabbitmq/enabled_plugins（不在数据卷里），
-      # 容器一重建即失效，症状是 trade-service 启动即报 NOT_FOUND / Failed to declare queue(s):[trade.delay.order.queue]。
-      # 故把启用文件放进数据卷，并在初始化后执行一次：
-      #   docker exec mq sh -c "rabbitmq-plugins enable rabbitmq_delayed_message_exchange && \
-      #                         cp /etc/rabbitmq/enabled_plugins /var/lib/rabbitmq/enabled_plugins"
+      # 【注意】延迟消息插件：trade 的超时未支付自动关单依赖 x-delayed-message 交换机。
+      # 官方镜像不含这个社区插件（它属于社区插件，不在 rabbitmq 官方镜像里），且从 v3.12.0 起才提供 .ez 发行物，故把插件文件随仓库带在
+      # mq-plugins/ 下并挂进容器（容器重建后仍在），启用状态写进数据卷里的 enabled_plugins：
+      #   docker exec mq rabbitmq-plugins enable rabbitmq_management rabbitmq_delayed_message_exchange
+      # demo.ps1 在 infra 起来后会自动执行这一步（幂等）；漏了它 trade-service 起不来，
+      # 症状是 NOT_FOUND / Failed to declare queue(s):[trade.delay.order.queue]。
       RABBITMQ_ENABLED_PLUGINS_FILE: /var/lib/rabbitmq/enabled_plugins
-      # 内存水位：达 40% 时阻塞生产者，避免被 OOM 杀掉
-      RABBITMQ_VM_MEMORY_HIGH_WATERMARK: "0.4"
+      # 内存水位不再用 RABBITMQ_VM_MEMORY_HIGH_WATERMARK 设置：RabbitMQ 3.11 起该环境变量已废弃，
+      # 设了它容器会直接以 "deprecated environment variables detected" 退出（restart 循环）。
+      # 默认相对水位就是 0.4（达 40% 阻塞生产者），与这里想要的"达阈值即阻塞生产者"语义一致，故留空即可；
+      # 真要改就挂配置文件，别再用这个变量。
       TZ: Asia/Shanghai                    # 时区统一 CST；仅设 TZ 不够，还需挂载宿主时区文件（见下）
     volumes:
       # 镜像不带 tzdata：只设 TZ 时日志仍为 UTC，必须挂载宿主时区文件
       - /etc/localtime:/etc/localtime:ro
       # mnesia 数据（vhost/用户/队列/交换机/消息）须落卷，否则容器一删全丢
       - mq-data:/var/lib/rabbitmq
+      # 延迟消息插件（.ez）：挂进镜像自带的插件目录，容器重建后不用重新 docker cp
+      - ./mq-plugins/rabbitmq_delayed_message_exchange-3.12.0.ez:/opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange-3.12.0.ez:ro
     ports:
       - "5672:5672"
       - "15672:15672"

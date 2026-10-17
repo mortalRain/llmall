@@ -40,7 +40,7 @@ services:
   gateway:
     <<: *app
     container_name: gateway
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-gateway.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-gateway.jar" ]
     ports:
       - "8080:8080"
     profiles: [ "core", "full" ]
@@ -48,55 +48,55 @@ services:
   llmall-user-service:
     <<: *app
     container_name: llmall-user-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-user-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-user-service.jar" ]
     profiles: [ "core", "full" ]
 
   llmall-shop-service:
     <<: *app
     container_name: llmall-shop-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-shop-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-shop-service.jar" ]
     profiles: [ "core", "full" ]
 
   llmall-item-service:
     <<: *app
     container_name: llmall-item-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-item-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-item-service.jar" ]
     profiles: [ "core", "full" ]
 
   llmall-content-service:
     <<: *app
     container_name: llmall-content-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-content-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-content-service.jar" ]
     profiles: [ "core", "full" ]
 
   llmall-trade-service:
     <<: *app
     container_name: llmall-trade-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-trade-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-trade-service.jar" ]
     profiles: [ "full" ]
 
   llmall-cart-service:
     <<: *app
     container_name: llmall-cart-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-cart-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-cart-service.jar" ]
     profiles: [ "full" ]
 
   llmall-pay-service:
     <<: *app
     container_name: llmall-pay-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-pay-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-pay-service.jar" ]
     profiles: [ "full" ]
 
   llmall-promotion-service:
     <<: *app
     container_name: llmall-promotion-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-promotion-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-promotion-service.jar" ]
     profiles: [ "full" ]
 
   llmall-search-service:
     <<: *app
     container_name: llmall-search-service
-    command: [ "sh", "-c", "exec java $JAVA_OPTS -jar /app/llmall-search-service.jar" ]
+    command: [ "sh", "-c", "exec java $$JAVA_OPTS -jar /app/llmall-search-service.jar" ]
     profiles: [ "full" ]
 
 networks:

@@ -50,10 +50,13 @@ WHERE o.id IS NULL
 ORDER BY p.biz_user_id, p.id;
 
 -- 3) 一句话结论（核心判据：非 user1 的已支付孤儿单是否真的存在）
+-- 【注意】三列都必须套 IFNULL：没有孤儿单时整个结果集是 0 行聚合，SUM(...) 返回 NULL 而不是 0，
+-- 于是 `NULL = 0` 求值为 NULL（被当成假）→ 全新库会打印"危险"这类与实际相反的结论。
+-- 这是本脚本最容易误导人的一处 —— 判据列与 verdict 列必须用同一个 IFNULL 口径。
 SELECT
-  SUM(CASE WHEN p.status = 3 AND p.biz_user_id <> 1 THEN 1 ELSE 0 END)                      AS non_user1_paid_orphans,
+  IFNULL(SUM(CASE WHEN p.status = 3 AND p.biz_user_id <> 1 THEN 1 ELSE 0 END), 0)                      AS non_user1_paid_orphans,
   IFNULL(SUM(CASE WHEN p.status = 3 AND p.biz_user_id <> 1 THEN p.amount ELSE 0 END), 0)    AS non_user1_paid_cents,
-  CASE WHEN SUM(CASE WHEN p.status = 3 AND p.biz_user_id <> 1 THEN 1 ELSE 0 END) = 0
+  CASE WHEN IFNULL(SUM(CASE WHEN p.status = 3 AND p.biz_user_id <> 1 THEN 1 ELSE 0 END), 0) = 0
        THEN '安全：52 号脚本按现状执行不会漏退款'
        ELSE '危险：存在非 user1 的已支付孤儿单，执行 52 会关单不退款，请先统一口径'
   END                                                                                       AS verdict

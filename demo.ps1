@@ -52,6 +52,7 @@ param(
     [switch]$WithDianpingMigration, # 额外执行 99-migrate-dianping-data.sql（需要外部库 dianping_src）
     [switch]$ExternalEs,            # ES 已在别处跑着（宿主原生安装 / VM），不起 addon 容器
     [string]$EsUrl = 'http://127.0.0.1:9200',
+    [int]$DbHostPort = 0,           # 宿主上 mysql 容器映射的端口；0 = 取 $env:MYSQL_HOST_PORT，再缺省 3306
     [string]$Profile = 'full',      # core | full
     [int]$TimeoutMinutes = 30
 )
@@ -67,6 +68,14 @@ $GatewayUrl = 'http://127.0.0.1:8080'
 $DbUser     = 'root'
 $DbPw       = '123'                                          # docker/docker-compose-infra-lite.yml 的 MYSQL_ROOT_PASSWORD
 $DbName     = 'llmall-search'                                # EsBulkLoad 的读模型来源库
+
+# 宿主上 mysql 容器映射的端口：传 0 时按 MYSQL_HOST_PORT 环境变量解析，再缺省 3306。
+# 与 docker-compose-infra-lite.yml 的 ${MYSQL_HOST_PORT:-3306} 是同一口径 —— 本机若已装着
+# 原生 MySQL 服务占住 3306，设 MYSQL_HOST_PORT=3307 就能整套跑在容器里，不必停掉那套 MySQL。
+# 容器内的服务之间仍按容器名 + 3306 互访，跟这个宿主端口无关。
+if ($DbHostPort -le 0) {
+    $DbHostPort = if ($env:MYSQL_HOST_PORT) { [int]$env:MYSQL_HOST_PORT } else { 3306 }
+}
 
 $InfraCompose = Join-Path $RepoRoot 'docker\docker-compose-infra-lite.yml'
 $AddonCompose = Join-Path $RepoRoot 'docker\docker-compose-addon.yml'
@@ -130,14 +139,14 @@ function Assert-Docker {
 
 # 跑一条 docker / docker compose 命令。默认非 0 退出即失败；-AllowFail 只告警。
 function Invoke-Docker {
-    param([string[]]$Args, [switch]$AllowFail, [switch]$Quiet, [int]$Tail = 0)
+    param([string[]]$DockerArgs, [switch]$AllowFail, [switch]$Quiet, [int]$Tail = 0)
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Fail '找不到 docker' }
-    if (-not $Quiet) { Write-Info ('> docker ' + ($Args -join ' ')) }
-    $out = & docker @Args 2>&1
+    if (-not $Quiet) { Write-Info ('> docker ' + ($DockerArgs -join ' ')) }
+    $out = & docker @DockerArgs 2>&1
     $code = $LASTEXITCODE
     if ($Tail -gt 0) { $out | Select-Object -Last $Tail | ForEach-Object { Write-Info ('  ' + $_) } }
     elseif (-not $Quiet) { $out | ForEach-Object { Write-Info ('  ' + $_) } }
-    if ($code -ne 0 -and -not $AllowFail) { Fail ("docker " + ($Args -join ' ') + " 退出码 $code") }
+    if ($code -ne 0 -and -not $AllowFail) { Fail ("docker " + ($DockerArgs -join ' ') + " 退出码 $code") }
     return [pscustomobject]@{ Code = $code; Output = @($out) }
 }
 
@@ -149,6 +158,10 @@ function Invoke-SqlFile {
     $line = 'docker exec -i mysql mysql -uroot -p' + $DbPw + ' --default-character-set=utf8mb4 < "' + $Path + '"'
     $out = & cmd.exe /c $line 2>&1
     $code = $LASTEXITCODE
+    # 统一成字符串数组：PowerShell 7 会把 stderr 里的行收成 ErrorRecord 对象（这里就是 mysql 的
+    # [Warning] Using a password ...），下游按行处理（.Trim() / -match / -split）时会在 ErrorRecord
+    # 上直接炸 —— 报错还落在解析逻辑里，看起来像 SQL 出错。字符串化只影响展示，不影响判定。
+    $out = @($out | ForEach-Object { [string]$_ })
     # mysql 会把 "Using a password on the command line interface can be insecure" 写到 stderr，不算错误
     $errs = @($out | Where-Object { $_ -match 'ERROR \d+ \(' })
     if ($code -ne 0 -or $errs.Count -gt 0) {
@@ -165,27 +178,45 @@ function Invoke-SqlText {
     $flags += @('-e', $Sql)
     $out = & docker @flags 2>&1
     if ($LASTEXITCODE -ne 0) { Fail "SQL 执行失败：$Sql" }
-    return @($out | Where-Object { $_ -notmatch 'Using a password' })
+    return @($out | ForEach-Object { [string]$_ } | Where-Object { $_ -notmatch 'Using a password' })
 }
 
 function Wait-Http {
     param([string]$Url, [string]$Name, [int]$Seconds = 180, [string]$Contains)
     Write-Info "等待 $Name 就绪：$Url"
     $deadline = (Get-Date).AddSeconds($Seconds)
+    $last = ''
     while ((Get-Date) -lt $deadline) {
         try {
             $r = Invoke-WebRequest -Uri $Url -TimeoutSec 5 -UseBasicParsing
             if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 300) {
-                if (-not $Contains -or ($r.Content -match $Contains)) {
+                if (-not $Contains -or (Get-HttpText $r) -match $Contains) {
                     Write-Info "  $Name 就绪"
                     return $true
                 }
+                $last = "HTTP $($r.StatusCode)，响应体不含期望内容 $Contains"
             }
+            else { $last = "HTTP $($r.StatusCode)" }
         }
-        catch { }
+        catch { $last = $_.Exception.Message }
         Start-Sleep -Seconds 3
     }
+    if ($last) { Write-Info "  最后一次探测：$last" }
     Fail "$Name 在 $Seconds 秒内未就绪（$Url）"
+}
+
+# 取 HTTP 响应体文本。为什么不能直接用 $r.Content：
+# PowerShell 7 在响应头没有带 charset 时把 .Content 给成 **byte[]**（Spring Boot 的
+# /actuator/health 返回 application/vnd.spring-boot.actuator.v3+json，没有 charset），
+# 而 Windows PowerShell 5.1 给的是字符串。于是在 pwsh 7 上 $r.Content -match '"status":"UP"'
+# 是对字节数组做匹配 —— 恒不命中、还不报错，表现为"服务明明起来了，脚本一直说没就绪"。
+function Get-HttpText {
+    param($Response)
+    if ($null -eq $Response) { return '' }
+    if ($Response.Content -is [byte[]]) {
+        return [System.Text.Encoding]::UTF8.GetString($Response.Content)
+    }
+    return [string]$Response.Content
 }
 
 function Wait-MySql {
@@ -198,6 +229,37 @@ function Wait-MySql {
         Start-Sleep -Seconds 3
     }
     Fail "MySQL 在 $Seconds 秒内未就绪"
+}
+
+# RabbitMQ 就绪 + 启用两个插件。两个都是必需的：
+#   rabbitmq_management                 —— 管理台 15672，排障时看队列/交换机
+#   rabbitmq_delayed_message_exchange   —— trade 的超时未支付自动关单用它声明的 x-delayed-message 交换机
+# 为什么放在脚本里而不是靠镜像默认：compose 把 enable 清单指向了数据卷里的 enabled_plugins 文件
+# （为了容器重建后启用状态不丢），而该文件初始为空 —— 空清单会把 -management 镜像的默认启用项也一起关掉。
+# 本步骤幂等：已经启用过再跑一遍只会打印 already enabled。
+function Initialize-MqPlugins {
+    param([int]$Seconds = 180)
+    Write-Info '等待 RabbitMQ 就绪（rabbitmq-diagnostics ping）'
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    $alive = $false
+    while ((Get-Date) -lt $deadline) {
+        $out = & docker exec mq rabbitmq-diagnostics -q ping 2>&1
+        if (($out -join ' ') -match 'Ping succeeded') { $alive = $true; break }
+        Start-Sleep -Seconds 3
+    }
+    if (-not $alive) {
+        Write-Info ((& docker ps -a --filter 'name=^mq$' --format '{{.Status}}') -join ' ')
+        Fail "RabbitMQ 在 $Seconds 秒内未就绪（看 docker logs mq）"
+    }
+    Write-Info '  RabbitMQ 就绪；启用 rabbitmq_management + rabbitmq_delayed_message_exchange'
+    $r = & docker exec mq rabbitmq-plugins enable rabbitmq_management rabbitmq_delayed_message_exchange 2>&1
+    $r | ForEach-Object { Write-Info ('  ' + $_) }
+    if ($LASTEXITCODE -ne 0) { Fail 'rabbitmq-plugins enable 失败（插件文件是否已挂进容器？见 docker/mq-plugins/）' }
+    $list = (& docker exec mq rabbitmq-plugins list 2>&1) -join "`n"
+    if ($list -notmatch '\[E\*\]\s+rabbitmq_delayed_message_exchange') {
+        Fail '延迟消息插件没有处于启用状态（[E*] 标记缺失），trade-service 会声明不了 x-delayed-message 交换机'
+    }
+    Write-Info '  延迟消息插件已启用'
 }
 
 # 从已构建的 fat jar 里取依赖 jar（MallE2E 要 jackson，EsBulkLoad 要 mysql-connector）。
@@ -245,7 +307,7 @@ function Invoke-ComposeDown {
         # --profile full 必须显式给：不带 profile 时 down 不会碰 profile 作用域内的服务
         $a = @('compose', '-f', $f, '--profile', 'full', 'down', '--remove-orphans')
         if ($RemoveVolumes) { $a += '-v' }
-        Invoke-Docker -Args $a -AllowFail -Quiet
+        Invoke-Docker -DockerArgs $a -AllowFail -Quiet
     }
 }
 
@@ -253,13 +315,13 @@ if ($Reset) {
     Write-Step 'Reset：停容器 + 删卷 + 删网络'
     Assert-Docker | Out-Null
     Invoke-ComposeDown -RemoveVolumes
-    Invoke-Docker -Args @('network', 'rm', $Network) -AllowFail -Quiet
+    Invoke-Docker -DockerArgs @('network', 'rm', $Network) -AllowFail -Quiet
     # compose 之外手工起的同名容器（历史上存在过）也要清掉，否则端口会被占住
     foreach ($n in @('gateway', 'llmall-user-service', 'llmall-shop-service', 'llmall-item-service',
                      'llmall-content-service', 'llmall-trade-service', 'llmall-cart-service',
                      'llmall-pay-service', 'llmall-promotion-service', 'llmall-search-service',
                      'mysql', 'redis', 'nacos', 'mq', 'es', 'seata-server', 'kibana')) {
-        Invoke-Docker -Args @('rm', '-f', $n) -AllowFail -Quiet
+        Invoke-Docker -DockerArgs @('rm', '-f', $n) -AllowFail -Quiet
     }
     Write-Host ''
     Write-Host 'Reset 完成。下一步：pwsh -File demo.ps1' -ForegroundColor Green
@@ -270,7 +332,7 @@ if ($Down) {
     Write-Step 'Down：收尾'
     Assert-Docker | Out-Null
     Invoke-ComposeDown -RemoveVolumes:$Volumes
-    if ($Volumes) { Invoke-Docker -Args @('network', 'rm', $Network) -AllowFail -Quiet }
+    if ($Volumes) { Invoke-Docker -DockerArgs @('network', 'rm', $Network) -AllowFail -Quiet }
     Write-Host ''
     Write-Host ("Down 完成$(if($Volumes){'（含数据卷）'}else{'（数据卷保留，加 -Volumes 一并删）'})") -ForegroundColor Green
     exit 0
@@ -330,7 +392,7 @@ foreach ($probe in @(
 $dockerVer = Get-DockerState
 if ($dockerVer) {
     Write-Info ("Docker : server " + $dockerVer)
-    $dc = Invoke-Docker -Args @('compose', 'version', '--short') -Quiet
+    $dc = Invoke-Docker -DockerArgs @('compose', 'version', '--short') -Quiet
     if ($dc.Code -ne 0) { Note-Problem 'docker compose 插件不可用' }
     else { Write-Info ("Compose: v" + ($dc.Output -join ' ')) }
 }
@@ -380,23 +442,24 @@ try {
         if ($mvnCode -ne 0) { Fail "mvn package 失败（退出码 $mvnCode）" }
         Add-Summary 'mvn package：BUILD SUCCESS'
 
-        Invoke-Docker -Args @('build', '-f', 'deploy/Dockerfile', '-t', $ImageTag, '.') -Tail 12 | Out-Null
+        Invoke-Docker -DockerArgs @('build', '-f', 'deploy/Dockerfile', '-t', $ImageTag, '.') -Tail 12 | Out-Null
         Add-Summary "docker build：$ImageTag"
     }
 
     # ------------------------------------------------------------ 2. 网络 + 中间件
     Write-Step '中间件：infra-lite + ES addon'
-    Invoke-Docker -Args @('network', 'create', $Network) -AllowFail -Quiet
-    Invoke-Docker -Args @('compose', '-f', $InfraCompose, 'up', '-d') | Out-Null
+    Invoke-Docker -DockerArgs @('network', 'create', $Network) -AllowFail -Quiet
+    Invoke-Docker -DockerArgs @('compose', '-f', $InfraCompose, 'up', '-d') | Out-Null
     # ES 只在 addon 里且不带 profile；infra-lite 的 ES 属于 profile full，不传 profile 就不会起，两者不冲突。
     # -ExternalEs 时不动容器：ES 已在宿主原生装好（本机就是这种拓扑），起容器反而会抢 9200 端口。
     if ($ExternalEs) { Write-Info "ES 用外部实例：$EsUrl（不起 addon 容器）" }
-    else { Invoke-Docker -Args @('compose', '-f', $AddonCompose, 'up', '-d', 'elasticsearch') | Out-Null }
+    else { Invoke-Docker -DockerArgs @('compose', '-f', $AddonCompose, 'up', '-d', 'elasticsearch') | Out-Null }
 
     Wait-MySql
     Wait-Http -Url "$NacosUrl/nacos/v1/console/health/readiness" -Name 'Nacos' -Seconds 240
+    Initialize-MqPlugins
     if (-not $SkipEs) { Wait-Http -Url "$EsUrl/_cluster/health" -Name 'Elasticsearch' -Seconds 300 -Contains '"status"' }
-    Add-Summary ("中间件：mysql / redis / nacos / mq 已起" + $(if ($ExternalEs) { "；ES 用外部实例 $EsUrl" } else { "；ES 用 addon 容器" }))
+    Add-Summary ("中间件：mysql / redis / nacos / mq 已起（mq 已启用延迟消息插件）" + $(if ($ExternalEs) { "；ES 用外部实例 $EsUrl" } else { "；ES 用 addon 容器" }))
 
     # ------------------------------------------------------------ 3. 建库与灌数
     # 顺序照抄 sql/merged/README.md：两处刻意破数字序（23 在 30 之后；50/51 连跑两遍），
@@ -417,6 +480,10 @@ try {
             @{ F = "$SqlMerged\03-seata-server.sql";               Why = 'Seata 1.5.2 全量建表' }
             @{ F = "$SqlMerged\03b-seata-server-1.5.2-upgrade.sql"; Why = 'Seata 1.4.2→1.5.2 增量' }
             @{ F = "$SqlMerged\10-shop.sql";                       Why = '门店域建表' }
+            # 55 必须紧跟 10-shop、排在 50 之前：50 号按 shop 表全量生成套餐，
+            # 而 id 1~14 这 14 家核心门店原本只活在演示库（点评迁移的产物），
+            # 没有它们则门店只有 16 家、套餐只有 80 个，MallE2E 的 /items/900013 与"150 个套餐"直接红。
+            @{ F = "$SqlMerged\55-seed-core-shops.sql";            Why = '14 家核心门店 + 类型 1/2（MallE2E 依赖门店 id 1~14）' }
             @{ F = "$SqlMerged\11-item-alter.sql";                 Why = '商品域改造 + stock_flow' }
             @{ F = "$SqlMerged\20-promotion.sql";                  Why = '营销域建表' }
             @{ F = "$SqlMerged\21-user-alter.sql";                 Why = '用户域改造' }
@@ -488,7 +555,7 @@ try {
         foreach ($f in $files) {
             $getUrl = "$NacosUrl/nacos/v1/cs/configs?dataId=$([System.Uri]::EscapeDataString($f.Name))&group=DEFAULT_GROUP"
             $remote = $null
-            try { $remote = (Invoke-WebRequest -Uri $getUrl -TimeoutSec 20 -UseBasicParsing).Content } catch { $remote = $null }
+            try { $remote = Get-HttpText (Invoke-WebRequest -Uri $getUrl -TimeoutSec 20 -UseBasicParsing) } catch { $remote = $null }
             $local = ([System.IO.File]::ReadAllText($f.FullName) -replace "`r`n", "`n").Trim()
             if ($null -eq $remote -or "$remote".Trim() -eq '') {
                 Write-Info ("  " + $f.Name + " : Nacos 上不存在 → 将导入")
@@ -527,7 +594,7 @@ try {
             # 回读校验同样用原始文本（理由见上）。Nacos 的 GET 有读缓存，故规范化换行后比对。
             Start-Sleep -Milliseconds 300
             $getUrl = "$NacosUrl/nacos/v1/cs/configs?dataId=$([System.Uri]::EscapeDataString($f.Name))&group=DEFAULT_GROUP"
-            $back = (Invoke-WebRequest -Uri $getUrl -TimeoutSec 30 -UseBasicParsing).Content
+            $back = Get-HttpText (Invoke-WebRequest -Uri $getUrl -TimeoutSec 30 -UseBasicParsing)
             $a = ($content -replace "`r`n", "`n").Trim()
             $b = ("$back" -replace "`r`n", "`n").Trim()
             if ($a -ne $b) {
@@ -568,19 +635,10 @@ try {
                   "curl -X DELETE $indexUrl")
         }
         Write-Info ("  索引 mapping 复核通过（name.analyzer=" + $analyzer + "，本次" + $(if ($created) { '新建' } else { '复用' }) + "）")
-
-        $libDir = Join-Path $WorkDir 'libs-es'
-        Get-LibsFromFatJar -JarPath (Join-Path $RepoRoot 'llmall-search-service\target\llmall-search-service.jar') `
-            -Patterns @('mysql-connector*.jar') -Dest $libDir | Out-Null
-        $javaExe = Get-GateJava
-        Write-Info '> EsBulkLoad（MySQL 读模型 → ES _bulk）'
-        $bulkOut = & $javaExe -cp (Join-Path $libDir '*') (Join-Path $RepoRoot 'gates\EsBulkLoad.java') `
-            '127.0.0.1' $DbUser $DbPw $DbName $EsUrl 'shop_search' 2>&1
-        $bulkOut | ForEach-Object { Write-Info ('  ' + $_) }
-        if ($LASTEXITCODE -ne 0) { Fail 'EsBulkLoad 失败' }
-        if (($bulkOut | Out-String) -match 'errors"\s*:\s*true') { Fail 'EsBulkLoad 的 _bulk 响应里 errors=true' }
-        $cnt = Invoke-RestMethod -Method Get -Uri "$EsUrl/shop_search/_count" -TimeoutSec 15
-        Add-Summary ("ES：shop_search 文档数 " + $cnt.count)
+        # 灌数不在这里做：EsBulkLoad 读的是 MySQL 读模型表 llmall-search.shop_search_doc，
+        # 而这张表由 /search/view/rebuild 在应用起来之后生成 —— 此刻它还是空的，
+        # _bulk 会拿到空 body 被 ES 以 400 request body is required 拒掉。灌数挪到 rebuild 之后。
+        Write-Info '  灌数放在应用就绪 + /search/view/rebuild 之后（读模型此刻还是空的）'
     }
 
     # ------------------------------------------------------------ 6. 应用
@@ -597,20 +655,57 @@ try {
             Write-Info '已由 .env.example 生成 deploy/.env（Redis/MQ 指向容器名 redis / mq）'
         }
         else { Write-Info 'deploy/.env 已存在，沿用（不改动你的配置）' }
-        Invoke-Docker -Args @('compose', '-f', 'docker-compose-apps.yml', '--profile', $Profile, 'up', '-d') | Out-Null
+        Invoke-Docker -DockerArgs @('compose', '-f', 'docker-compose-apps.yml', '--profile', $Profile, 'up', '-d') | Out-Null
     }
     finally { Pop-Location }
 
     Wait-Http -Url "$GatewayUrl/actuator/health" -Name '网关' -Seconds 420 -Contains '"status":"UP"'
     Add-Summary ("应用：profile $Profile 已起，网关 /actuator/health = UP")
 
-    # 种子数据灌完后要重建一次视图与 GEO 缓存（README 第 6 步）
-    foreach ($ep in @('/search/view/rebuild', '/shops/cache/geo/rebuild')) {
-        try {
-            $r = Invoke-WebRequest -Method Post -Uri ($GatewayUrl + $ep) -TimeoutSec 60 -UseBasicParsing
-            Write-Info ("  POST $ep -> " + $r.StatusCode)
-        }
-        catch { Write-Warn2 ("POST $ep 未成功（" + $_.Exception.Message + "），不阻断流程") }
+    # 种子数据灌完后要重建一次视图与 GEO 缓存（README 第 6 步）。
+    # 【注意】这两个都是 POST（写方法），网关的鉴权只对 GET/HEAD/OPTIONS 走只读白名单，
+    # 写方法一律必须带令牌 —— 裸 POST 会得到 401（Unauthorized），看着像"接口不存在"。
+    # 所以先按演示账号登录拿令牌，再带着 authorization 头调用（与 MallE2E 一样的裸令牌写法）。
+    $demoToken = ''
+    try {
+        $loginResp = Invoke-RestMethod -Method Post -Uri ($GatewayUrl + '/users/login') `
+            -Body '{"username":"Jack","password":"123456"}' -ContentType 'application/json' -TimeoutSec 20
+        $demoToken = [string]$loginResp.accessToken
+    }
+    catch { Fail ("登录演示账号失败（重建类接口需要令牌）：" + $_.Exception.Message) }
+    if (-not $demoToken) { Fail '登录演示账号没拿到 accessToken（种子数据里的演示账号或口令对不上？）' }
+    Write-Info ("  已登录演示账号，令牌 " + $demoToken.Length + " 字符")
+
+    # /search/view/rebuild 是硬检查：紧接着的 ES 灌数读的就是它生成的 llmall-search.shop_search_doc，
+    # 它没跑成则灌数一定读到 0 行，后面所有"搜索"类断言都失去了数据基础。
+    try {
+        $rb = Invoke-WebRequest -Method Post -Uri ($GatewayUrl + '/search/view/rebuild') `
+            -Headers @{ authorization = $demoToken } -TimeoutSec 120 -UseBasicParsing
+        Write-Info ("  POST /search/view/rebuild -> " + $rb.StatusCode)
+    }
+    catch { Fail ("POST /search/view/rebuild 失败：" + $_.Exception.Message + "（ES 灌数依赖它生成的 MySQL 读模型）") }
+    try {
+        $rb2 = Invoke-WebRequest -Method Post -Uri ($GatewayUrl + '/shops/cache/geo/rebuild') `
+            -Headers @{ authorization = $demoToken } -TimeoutSec 120 -UseBasicParsing
+        Write-Info ("  POST /shops/cache/geo/rebuild -> " + $rb2.StatusCode)
+    }
+    catch { Write-Warn2 ("POST /shops/cache/geo/rebuild 未成功（" + $_.Exception.Message + "），不阻断流程") }
+
+    # ------------------------------------------------------------ 6.5 ES 灌数（读模型 → ES）
+    if (-not $SkipEs) {
+        Write-Step 'ES：灌数（MySQL 读模型 → shop_search）'
+        $libDir = Join-Path $WorkDir 'libs-es'
+        Get-LibsFromFatJar -JarPath (Join-Path $RepoRoot 'llmall-search-service\target\llmall-search-service.jar') `
+            -Patterns @('mysql-connector*.jar') -Dest $libDir | Out-Null
+        $javaExe = Get-GateJava
+        Write-Info '> EsBulkLoad（MySQL 读模型 → ES _bulk）'
+        $bulkOut = & $javaExe -cp (Join-Path $libDir '*') (Join-Path $RepoRoot 'gates\EsBulkLoad.java') `
+            ("127.0.0.1:" + $DbHostPort) $DbUser $DbPw $DbName $EsUrl 'shop_search' 2>&1
+        $bulkOut | ForEach-Object { Write-Info ('  ' + $_) }
+        if ($LASTEXITCODE -ne 0) { Fail 'EsBulkLoad 失败' }
+        if (($bulkOut | Out-String) -match 'errors"\s*:\s*true') { Fail 'EsBulkLoad 的 _bulk 响应里 errors=true' }
+        $cnt = Invoke-RestMethod -Method Get -Uri "$EsUrl/shop_search/_count" -TimeoutSec 15
+        Add-Summary ("ES：shop_search 文档数 " + $cnt.count)
     }
 
     # ------------------------------------------------------------ 7. 冒烟 + 峰值内存
