@@ -125,6 +125,21 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
                     + "return 1",
             Long.class);
 
+    /**
+     * 黑名单只读校验：命中返回 0，未命中返回 1（与 AUTH_CHECK_SCRIPT 的"0 = 拒绝"口径一致）。
+     *
+     * 【为什么黑名单不能复用 AUTH_CHECK_SCRIPT】那条脚本是给 refresh 白名单校验用的，第二段
+     * `if not v then return 0 end` 判定的是"refresh key 是否存在"。主流程手里只有 access token，
+     * 它的 jti 与 refresh 的 jti 是两个不同的值（签发时各自 newJti()，见 TokenServiceImpl 的令牌对签发），
+     * 而白名单 key 是 `auth:refresh:{refreshJti}` —— 所以 `auth:refresh:{accessJti}` 永远不存在。
+     * 若给 KEYS[2] 传一个恒不存在的哨兵 key，脚本就会恒定走 `if not v then return 0`，
+     * 而调用方把 0 判成"命中黑名单"，后果是每个 access token 都被判为已吊销、所有带鉴权的请求 401。
+     * 黑名单本来就只该问"这个 jti 是否被吊销"，refresh 的存在性是另一条路径（{@link #tryRefresh}）的事。
+     */
+    private static final DefaultRedisScript<Long> BLACKLIST_CHECK_SCRIPT = new DefaultRedisScript<>(
+            "if redis.call('exists', KEYS[1]) == 1 then return 0 end return 1",
+            Long.class);
+
     /** 主流程 KEYS[2] 用的哨兵 key：带 {@code \0} 前缀、按命名约定不可能被业务写入，保证恒不存在 */
     private static final String NO_REFRESH_KEY = "auth:\u0000no-such-key";
 
@@ -407,12 +422,19 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
             log.warn("access token 缺少 jti，无法校验黑名单，按拒绝处理: userId={}", payload.getUserId());
             return Mono.just(Boolean.TRUE);
         }
-        // 主流程用哨兵 refreshKey：此时脚本的 KEYS[2] 恒不存在，返回 0 即等价于"黑名单命中"（见 AUTH_CHECK_SCRIPT 注释）
-        return checkAuthState(payload.getJti(), NO_REFRESH_KEY, "0")
-                // 脚本返回 0 = 命中黑名单（注销/踢人后立即失效）；-1 在本调用中不可能出现（哨兵 key 无 value），
-                // 真出现也按"不在黑名单"处理
+        // 只判"该 jti 是否在吊销黑名单里"。不能借道 refresh 白名单（jti 不同源，理由见 BLACKLIST_CHECK_SCRIPT 注释）
+        String blacklistKey = AuthConstants.REDIS_BLACKLIST + payload.getJti();
+        return redisTemplate.execute(BLACKLIST_CHECK_SCRIPT, Collections.singletonList(blacklistKey))
+                .next()
+                .map(Long::valueOf)
+                // 脚本返回 0 = 命中黑名单（注销/踢人后立即失效），其余按"未吊销"处理
                 .map(code -> code != null && code == 0L)
-                .defaultIfEmpty(Boolean.FALSE);
+                .defaultIfEmpty(Boolean.FALSE)
+                .onErrorResume(e -> {
+                    // 【鉴权降级 · fail-open】口径与 checkAuthState 一致：Redis 故障不整站 401
+                    log.error("【鉴权降级】查询令牌黑名单失败，本次请求按未命中黑名单放行: jti={}", payload.getJti(), e);
+                    return Mono.just(Boolean.FALSE);
+                });
     }
 
     /**
