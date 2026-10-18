@@ -19,10 +19,11 @@
 **改配色**：改 `theme.css` 的 `:root`，再用下面命令重新注入 `index.html`（保持单文件）：
 
 ```powershell
+# 在本目录（frontend/）下执行；$PSScriptRoot 保证路径相对本文件，clone 到任何机器都能跑
 $enc = New-Object System.Text.UTF8Encoding($false)
-$fe = 'D:\dsh\frontend\index.html'
+$fe = Join-Path $PSScriptRoot 'index.html'
 $html = [System.IO.File]::ReadAllText($fe, $enc)
-$block = "<style>`r`n" + [System.IO.File]::ReadAllText('D:\dsh\frontend\theme.css', $enc) + "</style>"
+$block = "<style>`r`n" + [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'theme.css'), $enc) + "</style>"
 [System.IO.File]::WriteAllText($fe, [regex]::Replace($html, '(?s)<style>.*?</style>', { param($m) $block }), $enc)
 ```
 ## 打开方式（三选一）
@@ -30,7 +31,7 @@ $block = "<style>`r`n" + [System.IO.File]::ReadAllText('D:\dsh\frontend\theme.cs
 | 方式 | 做法 | 说明 |
 |---|---|---|
 | **最简单** | 直接双击 `index.html` | 浏览器以 `file://` 打开；网关已开 CORS，可直接调接口 |
-| 走 nginx | 把本目录丢到 nginx 的 html 下（或用 `frontend-legacy` 里的 nginx.exe） | 与课程前端同一套 nginx 即可 |
+| 走 nginx | 把本目录丢到任意 nginx 的 html 下 | 也可用任意静态服务器 |
 | 本地静态服务 | 任意静态服务器指向本目录 | 例如 IDEA 的 "Open in Browser" |
 
 ## 前置：后端要跑起来
@@ -77,9 +78,8 @@ fetch('http://localhost:8080/shops/cache/geo/rebuild', {
 **2）页面提示"连接不上后端"？**
 说明网关没起或地址不对：先确认 `GatewayApplication` 已启动（8080），再点右上角「⚙ 接口」核对地址。
 
-## 与课程旧前端的关系
+## 与旧前端的关系
 
-`../frontend-legacy/` 是课程自带的 nginx + 静态页（已把课程品牌字样全部替换掉），可作为备用；
-它的问题：① 页面是"商城"形态，**演示不了门店/评价/热度榜**；② 它的搜索页调 `/search/list`，与当前 llmall-search-service 的 `/search?keyword=` 不兼容。
+本项目由一个通用商城模板演化而来。该模板自带的 nginx + 静态页前端**不在本仓库内**，也未随仓库发布：它是「商城」形态，演示不了门店/评价/热度榜，且其搜索页调 `/search/list`，与本项目的 `/search?keyword=` 不兼容。
 
-本前端是为此项目重写的：**贴合「同城生活电商」主题**，并且**没有课程品牌痕迹**。
+本前端是为此项目重写的：**贴合「同城生活电商」主题**，没有任何模板遗留痕迹。
