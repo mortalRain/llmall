@@ -8,9 +8,12 @@
 #   pwsh -File gates\gate.ps1 -Snapshot          # 重建「非 Java/YAML」基线（全项目）
 #
 # 基线（2026-10-15 本轮优化前快照）:
-#   baseline\java.round2.txt   280 个 Java 文件：FP1(token流) FP2(代码行序列) + 注释/代码行数
-#   baseline\yaml.round2.txt    41 个 YAML 文件：同构指纹
-#   baseline\any.round2.txt     其它语言（Lua/SQL/PS1/SH/JS/Dockerfile）：剥注释后代码行序列 SHA256
+#   baseline\java.round2.txt   受保护 Java 文件清单：FP1(token流) FP2(代码行序列) + 注释/代码行数
+#   baseline\yaml.round2.txt   受保护 YAML 文件清单：同构指纹
+#   baseline\any.round2.txt    其它语言（Lua/SQL/PS1/SH/JS/Dockerfile）：剥注释后代码行序列 SHA256
+#
+# 三份清单各受保护多少个文件，以文件本身为准 —— 不在这段注释里写死数量，
+# 因为基线一增删文件，写死的数字立刻变成错的。要核数直接数基线行数。
 #
 # 退出码 0 = 通过；1 = 存在代码差异（必须还原代码后重做）。
 param(

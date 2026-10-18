@@ -16,8 +16,8 @@
 #   1 = 硬闸门失败 —— 有未登记的问题或闸门本身出错，**必须修**，不得继续
 #   2 = 硬闸门全过，但台账闸门报出**已登记**的待处理偏差（见《已知偏差台账》），可继续但要知道
 #
-# 硬闸门（必须绿）：① Java 指纹 ② YAML 指纹 ③ Lua/SQL/脚本指纹 ④ 内容质量 ⑤ 闸门自校验
-# 台账闸门（允许红，红的每一条都必须能在台账里找到）：⑥ 字典一致性 ⑦ Feign 一致性
+# 硬闸门（必须绿）：① Java 指纹 ② YAML 指纹 ③ Lua/SQL/脚本指纹 ④ 内容质量 ⑤ 闸门自校验 ⑥ 文档引用
+# 台账闸门（允许红，红的每一条都必须能在台账里找到）：⑦ 字典一致性 ⑧ Feign 一致性
 
 param(
     [switch]$SkipBuild,
@@ -62,49 +62,68 @@ function Record($name, $kind, $code) {
     }
 }
 
+# 基线文件里一行一个受保护文件，首列是相对路径。数量一律现读，
+# 不写死 —— 写死的数字会在基线增删文件后变成错的，而它恰恰是这些小节标题里唯一的数字。
+function Get-BaselineCount($name) {
+    $f = Join-Path $base $name
+    if (-not (Test-Path -LiteralPath $f)) { return '?' }
+    return @(Get-Content -LiteralPath $f -Encoding UTF8 | Where-Object { ($_ -split "`t")[0].Trim() -ne '' }).Count
+}
+
 if (-not $LedgerOnly) {
-    Section '1/7' 'Java 去注释指纹（280 文件）'
+    Section '1/8' ("Java 去注释指纹（" + (Get-BaselineCount 'java.round2.txt') + " 文件）")
     & $java -cp $cp CommentFingerprint verify $RepoRoot "$base\java.round2.txt" 2>&1 |
         Where-Object { $_ -match 'FP1|FP2|新增|删除|注释行|结论|被改动' }
     Record 'Java 指纹' '硬' $LASTEXITCODE
 
-    Section '2/7' 'YAML 去注释指纹（41 文件）'
+    Section '2/8' ("YAML 去注释指纹（" + (Get-BaselineCount 'yaml.round2.txt') + " 文件）")
     & $java -cp $cp YamlFingerprint verify $RepoRoot "$base\yaml.round2.txt" 2>&1 |
         Where-Object { $_ -match 'FP1|FP2|新增|删除|注释行|结论|被改动' }
     Record 'YAML 指纹' '硬' $LASTEXITCODE
 
-    Section '3/7' 'Lua / SQL / 脚本指纹（剥注释后逐行比对）'
+    Section '3/8' 'Lua / SQL / 脚本指纹（剥注释后逐行比对）'
     $paths = Get-Content -Encoding UTF8 "$base\any.round2.txt" | ForEach-Object { ($_ -split "`t")[0] } | Where-Object { $_ -ne '' }
     $r = Invoke-GateScript -Script (Join-Path $GateRoot 'gate.ps1') -Arguments $paths
     $r.Output | Where-Object { $_ -match '代码被改动|无基线|不存在|结论' }
     Record 'Lua/SQL/脚本指纹' '硬' $r.ExitCode
 
-    Section '4/7' '注释内容质量（11 条规则）'
+    Section '4/8' '注释内容质量（11 条规则）'
     $r = Invoke-GateScript -Script (Join-Path $GateRoot 'lint-comments.ps1')
     $r.Output | Select-Object -Last 16
     Record '内容质量' '硬' $r.ExitCode
 
-    Section '5/7' '闸门自校验（29+ 用例：剥离规则 / 内容规则 / 端到端指纹）'
+    Section '5/8' '闸门自校验（剥离规则 / 内容规则 / 端到端指纹 / Feign 重试运行时对照）'
     $r = Invoke-GateScript -Script (Join-Path $GateRoot 'selftest.ps1')
     $r.Output | Select-Object -Last 6
     Record '闸门自校验' '硬' $r.ExitCode
+
+    Section '6/8' '文档引用有效性（简历索引 / 问答手册里的 文件:行）'
+    $r = Invoke-GateScript -Script (Join-Path $GateRoot 'check-doc-refs.ps1') -Arguments @('-Root', $RepoRoot)
+    $r.Output | Select-Object -Last 10
+    # 退出码 1 = 有引用失效（硬失败）；2 = 只有行号漂移且已给出新行号，属于可继续但要知道，按台账通道记。
+    $docKind = $(if ($r.ExitCode -eq 2) { '台账' } else { '硬' })
+    Record '文档引用' $docKind $r.ExitCode
 }
 else {
     Write-Host '（-LedgerOnly：跳过硬闸门）' -ForegroundColor DarkGray
 }
 
-Section '6/7' '字典与跨库引用一致性【台账闸门：允许红，红项须在台账内】'
+Section '7/8' '字典与跨库引用一致性【台账闸门：允许红，红项须在台账内】'
 $r = Invoke-GateScript -Script (Join-Path $GateRoot 'dict-lint.ps1') -Arguments @('-Root', $RepoRoot)
 $r.Output | Select-Object -Last 20
 Record '字典一致性' '台账' $r.ExitCode
 
-Section '7/7' 'Feign 禁重试一致性【台账闸门：允许红，红项须在台账内】'
+Section '8/8' 'Feign 禁重试一致性【台账闸门：允许红，红项须在台账内】'
 $r = Invoke-GateScript -Script (Join-Path $GateRoot 'feign-lint.ps1') -Arguments @('-Root', $RepoRoot)
 $r.Output | Select-Object -Last 14
 Record 'Feign 一致性' '台账' $r.ExitCode
 
 if (-not $SkipBuild) {
-    Section 'BUILD' '全量编译（13 模块）'
+    # 模块数同样现读：这里只统计根 pom 的 <module> 声明
+    $moduleCount = '?'
+    $pomPath = Join-Path $RepoRoot 'pom.xml'
+    if (Test-Path -LiteralPath $pomPath) { $moduleCount = @(Select-String -LiteralPath $pomPath -Pattern '<module>').Count }
+    Section 'BUILD' ("全量编译（" + $moduleCount + " 模块）")
     $mvn = Get-GateMaven
     if (-not $mvn) {
         Write-Host '找不到 mvn —— 请设置 MAVEN_BIN，或把 maven 放进 PATH' -ForegroundColor Red

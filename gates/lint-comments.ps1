@@ -1,4 +1,4 @@
-﻿# 注释内容质量闸门：扫描 Java / YAML 注释里"不该再出现"的表述。
+# 注释内容质量闸门：扫描 Java / YAML 注释里"不该再出现"的表述。
 #
 # 指纹闸门（gate.ps1）只能证明"没改代码"，
 # 本脚本负责证明"该删的确实删干净了" —— 两者互补，缺一不可。
@@ -79,7 +79,8 @@ else {
     #      只会逼着工具源码放弃 JavaDoc 排版，属于规则用错了地方。
     #   ② 闸门工具的"代码有没有被改"由第 ① 道闸门（CommentFingerprint）覆盖，且 gates 下的
     #      Java 文件**照常纳入 java.round2.txt 基线** —— 只是注释风格这一项不适用。
-    # 【可核对】排除前后本闸门扫到的项目文件数完全一致（323 个），项目侧的覆盖范围没有被缩小。
+    # 【可核对】排除的只是 gates 目录自身，项目侧的扫描范围没有因此缩小；
+    #      要核数就把下面 $files 那行管道复制到控制台数一遍，别信注释里写死的数字。
     # 需要单独校验 gates 下的某个文件时，用 -Path 显式指定即可（-Path 模式不受此排除影响）。
     $files = Get-ChildItem $root -Recurse -File -Include *.java,*.yaml,*.yml |
         Where-Object { $_.FullName -notlike '*\target\*' -and $_.FullName -notlike (Join-Path $GateRoot '*') }
