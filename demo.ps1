@@ -102,27 +102,66 @@ function Initialize-DeployEnv {
     }
     else { Write-Info 'deploy/.env 已存在，沿用（不改动你的配置）' }
 
-    # 内部凭证（x-internal-token）等价于"可伪造任意用户身份"的钥匙：示例值故意留空，这里补一个随机的。
-    # 随机源必须加密安全 —— Get-Random 是伪随机且可预测，不能用。
-    # 幂等：键已存在且非空 → 直接返回，连写盘都不做。
-    if (Get-EnvFileValue $EnvFile 'LLMALL_INTERNAL_TOKEN') { return }
+    # 【逐键回填】历史上出现过这样的事故：`.env` 生成得比 `.env.example` 早，于是 example 后来新增的键在 .env 里
+    # 根本没有；而本轮把凭据改成 `${VAR:?}`（缺失即报错）之后，这种"缺键"会让 compose 直接起不来。
+    # 规则：键缺失或值为空 → 按 example 回填；键已存在且非空 → 一个字都不动（保持幂等，不覆盖用户手改的值）。
+    # 【安全语义】回填的是 example 里的「演示值」，因此必须打显眼 WARN 并要求对外部署前替换 ——
+    # 便利不能吞掉"这是演示值"这个事实。
+    if (-not (Test-Path $EnvExample)) {
+        Write-Warn2 "找不到 $EnvExample，跳过逐键回填（缺键时 compose 会因 :=? 直接报错）"
+        return
+    }
+    $examplePairs = @()
+    foreach ($line in ([System.IO.File]::ReadAllText($EnvExample) -split "`n")) {
+        if ($line -match '^([A-Z_][A-Z0-9_]*)=(.*)$') {
+            $examplePairs += [pscustomobject]@{ Key = $matches[1]; Value = $matches[2].Trim() }
+        }
+    }
+    $missing = @($examplePairs | Where-Object { -not (Get-EnvFileValue $EnvFile $_.Key) })
+    if ($missing.Count -eq 0) { return }
 
-    $bytes = New-Object byte[] 16
+    # 内部凭证例外：example 里它故意留空，回填时必须是加密安全随机源现生成的 32 位 hex，不能给可预测的示例串。
+    $tokenKey = 'LLMALL_INTERNAL_TOKEN'
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-    $token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+    $values = @()
+    try {
+        foreach ($m in $missing) {
+            $v = $m.Value
+            if ($m.Key -eq $tokenKey) {
+                $bytes = New-Object byte[] 16
+                $rng.GetBytes($bytes)
+                $v = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+            }
+            $values += [pscustomobject]@{ Key = $m.Key; Value = $v }
+        }
+    }
+    finally { $rng.Dispose() }
 
     $text = [System.IO.File]::ReadAllText($EnvFile)
-    if ($text -match '(?m)^LLMALL_INTERNAL_TOKEN=') {
-        $text = $text -replace '(?m)^LLMALL_INTERNAL_TOKEN=.*$', ('LLMALL_INTERNAL_TOKEN=' + $token)
+    $appended = @()
+    foreach ($kv in $values) {
+        $pattern = '(?m)^' + [regex]::Escape($kv.Key) + '=.*$'
+        if ($text -match $pattern) {
+            # 键存在但值为空：原地替换，避免同一键出现两行
+            $text = $text -replace $pattern, ($kv.Key + '=' + $kv.Value)
+        }
+        else { $appended += ($kv.Key + '=' + $kv.Value) }
     }
-    else {
+    if ($appended.Count -gt 0) {
         if (-not $text.EndsWith("`n")) { $text += "`n" }
-        $text += ('LLMALL_INTERNAL_TOKEN=' + $token + "`n")
+        $text += "`n# 下列键由 demo.ps1 按 deploy/.env.example 回填补齐（缺键会让 compose 因 :=? 报错）`n"
+        $text += (($appended -join "`n") + "`n")
     }
     [System.IO.File]::WriteAllText($EnvFile, $text, (New-Object System.Text.UTF8Encoding($false)))
-    # 不打印值本身：它一旦进终端/日志就等于没加密。
-    Write-Info '已为 deploy/.env 生成 LLMALL_INTERNAL_TOKEN（32 位 hex；值不打印，需要请看 deploy/.env）'
+
+    $demoKeys = @($values | Where-Object { $_.Key -ne $tokenKey } | ForEach-Object { $_.Key })
+    if ($demoKeys.Count -gt 0) {
+        Write-Warn2 ("以下键按「演示值」回填，对外部署前必须替换：" + ($demoKeys -join ', '))
+    }
+    if (@($values | Where-Object { $_.Key -eq $tokenKey }).Count -gt 0) {
+        Write-Info '已为 deploy/.env 生成 LLMALL_INTERNAL_TOKEN（32 位 hex，加密安全随机；值不打印）'
+    }
+    Write-Info ("回填完成，共 " + $values.Count + " 个键：" + (($values | ForEach-Object { $_.Key }) -join ', '))
 }
 $DbName     = 'llmall-search'                                # EsBulkLoad 的读模型来源库
 
