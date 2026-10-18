@@ -1,7 +1,7 @@
-# M0 · 环境搭建说明（Seata + ES + Kibana）
+# ES / Seata / Kibana 环境搭建说明
 
-> 目标：在你现有 VM（`192.168.189.128`，Docker 里已有 MySQL/Nacos/RabbitMQ/Redis）上补齐 **Seata** 与 **Elasticsearch**，并让 11 个服务后续能连上。
-> 验收标准：`curl http://192.168.189.128:9200` 返回集群信息；Kibana 可访问；**Nacos 服务列表里能看到 seata-server**。
+> 目标：在你现有 VM（`<vm-ip>`，Docker 里已有 MySQL/Nacos/RabbitMQ/Redis）上补齐 **Seata** 与 **Elasticsearch**，并让 10 个服务后续能连上。
+> 验收标准：`curl http://<vm-ip>:9200` 返回集群信息；Kibana 可访问；**Nacos 服务列表里能看到 seata-server**。
 
 ---
 
@@ -30,7 +30,7 @@ docker network create local-life     # 只需建一次
 `docker/.env` 里只需保留 VM 地址（网络名保持一致，需要时再覆盖）：
 ```properties
 APP_NETWORK=local-life
-VM_IP=192.168.189.128
+VM_IP=<vm-ip>
 ```
 > 互通验证：`docker exec -it seata-server ping nacos`。
 >
@@ -84,7 +84,7 @@ registry {
   type = "nacos"
   nacos {
     application = "seata-server"
-    serverAddr = "192.168.189.128:8848"
+    serverAddr = "<vm-ip>:8848"
     group = "SEATA_GROUP"
     namespace = ""
     cluster = "default"
@@ -93,7 +93,7 @@ registry {
 config {
   type = "nacos"
   nacos {
-    serverAddr = "192.168.189.128:8848"
+    serverAddr = "<vm-ip>:8848"
     group = "SEATA_GROUP"
     namespace = ""
     dataId = "seataServer.properties"
@@ -117,8 +117,8 @@ config {
    ```
 3. 验证：
    ```bash
-   curl http://192.168.189.128:9200
-   curl -X POST "http://192.168.189.128:9200/_analyze" -H 'Content-Type: application/json' \
+   curl http://<vm-ip>:9200
+   curl -X POST "http://<vm-ip>:9200/_analyze" -H 'Content-Type: application/json' \
      -d '{"analyzer":"ik_max_word","text":"望京小腰烧烤店"}'
    ```
    能分出中文词就成功。

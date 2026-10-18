@@ -2,11 +2,11 @@
 
 本目录是「只改注释、代码零改动」这件事的**可复现证据链**，随仓库一起交付。
 
-它原先放在仓库外的 `D:\dsh\.verify\comment-opt\`（被 `.gitignore` 排除），后果是：
+它原先放在仓库外的 `gates/\`（被 `.gitignore` 排除），后果是：
 换台机器、换个 clone 目录，闸门全线失效 —— 而"闸门失效"和"闸门报错"在退出码上分不出来。
 现在工具集、现行基线、自校验依赖都在仓库内，**clone 下来就能复现**。
 
-> 原始工作区 `D:\dsh\.verify\` **没有搬走**：那是迁移，不是搬家。历史快照（`pre-*`、`backup/`、
+> 原始工作区 `本地工作区\` **没有搬走**：那是迁移，不是搬家。历史快照（`pre-*`、`backup/`、
 > `pre-codeopt/` 等）留在原处，因为它们不是交付物，也不需要被 clone。
 
 ---
@@ -24,8 +24,8 @@
 环境变量（都不设也能跑）：
 
 ```powershell
-$env:JAVA_HOME      = 'D:\develop\jdk11'                              # 不设则从 PATH 上的 java 反推
-$env:MAVEN_BIN      = 'D:\develop\apache-maven-3.9.6\bin\mvn.cmd'      # 不设则从 PATH 找
+$env:JAVA_HOME      = '<JDK11>'                              # 不设则从 PATH 上的 java 反推
+$env:MAVEN_BIN      = '<maven-home>\bin\mvn.cmd'      # 不设则从 PATH 找
 $env:MAVEN_SETTINGS = 'D:\Maven\settings.xml'                          # 不设则用 ~/.m2/settings.xml，仍没有就不传 -s
 ```
 
@@ -152,7 +152,7 @@ OK 模板残留           0 处
   （加 -Detail 看具体条目）
 
   --------------------------------------------------------------------
-  引用总数 487 ｜ 通过 482 ｜ 平移 0 ｜ 失效 0 ｜ 跳过 5
+  引用总数 480 ｜ 通过 476 ｜ 平移 0 ｜ 失效 0 ｜ 跳过 4
   通过分两档：与成文时逐行一致 482 条（强通过）；只保证行号有效 0 条
   另外，通过项里有 361 条是区间引用：区间只验「区间内有内容」，指到的究竟是不是那段代码要靠人看
 
@@ -279,12 +279,12 @@ gates/
 | 未迁入 | 原因 |
 |---|---|
 | `check.ps1`、`accept.ps1` | 第一轮的一次性入口，已被 `gate.ps1` / `verify-all.ps1` 完全覆盖 |
-| `pre-phase3/`、`pre-codeopt/`、`backup/`、`pre-*` 快照 | 工作痕迹（改动前快照），不是交付物；留在 `D:\dsh\.verify\` |
+| `pre-phase3/`、`pre-codeopt/`、`backup/`、`pre-*` 快照 | 工作痕迹（改动前快照），不是交付物；留在 `本地工作区\` |
 | `java.baseline.txt`、`yaml.baseline.txt`、`*.pre-*.txt` | 历史基线。基线只保留**现行**一份，否则会出现"两份都在、不知以谁为准" |
 | `classes/`、`a.txt` / `b.txt` / `tmp/` / `batches.txt` / `now.txt` 等 | 构建产物与临时文件；class 由 `gate-env.ps1` 现场编译到 `gates/build/`（已 gitignore） |
 | `backup/sql/llmall-item.sql`（36MB） | 数据导出，非脚本；工作痕迹 |
 
-> `AuditQuery.java` / `AuditQuery2.java` 是 `docs/52-孤儿单清点报告-2026-10-15.md` 里写明的复现路径，
+> `AuditQuery.java` / `AuditQuery2.java` 是 `docs/internal/52-孤儿单清点报告-2026-10-15.md` 里写明的复现路径，
 > 不一起迁入那份报告就无法按文档复跑，故一并入库。
 
 ---
@@ -412,6 +412,6 @@ pwsh -File gates\gate.ps1 -Snapshot
 | `docs/注释规范.md` | 写什么、为什么（八类注释 + 各模块口径） |
 | `docs/注释验收清单-2026-10-15.md` | 逐条验收结论 |
 | `docs/已知偏差台账-2026-10-15.md` | 台账闸门（字典一致性 / Feign 一致性）允许红的每一条都在这里登记 |
-| `docs/Feign禁重试治理清单-2026-10-15.md` | 第 8 道闸门对应的治理清单 |
-| `docs/字典与口径漂移清单-2026-10-15.md`、`docs/DDL字典对齐工单-2026-10-15.md` | 第 7 道闸门对应的清单与工单 |
-| `docs/52-孤儿单清点报告-2026-10-15.md` | `tools/AuditQuery*.java` 的产出 |
+| `docs/internal/Feign禁重试治理清单-2026-10-15.md` | 第 8 道闸门对应的治理清单 |
+| `docs/internal/字典与口径漂移清单-2026-10-15.md`、`docs/internal/DDL字典对齐工单-2026-10-15.md` | 第 7 道闸门对应的清单与工单 |
+| `docs/internal/52-孤儿单清点报告-2026-10-15.md` | `tools/AuditQuery*.java` 的产出 |

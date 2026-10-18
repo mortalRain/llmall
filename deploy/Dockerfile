@@ -1,9 +1,9 @@
 # ============================================================================
-# 本地生活到店服务平台 · 全服务镜像（单镜像多服务）
+# 同城生活电商平台 · 全服务镜像（单镜像多服务）
 #
 # 为什么用"单镜像多 jar"而不是"一个服务一个镜像"：
-#   11 个服务各建一次镜像意味着 11 次 Maven 构建 + 11 层依赖下载，本地/小服务器上极其耗时；
-#   打成"一个镜像内含全部 jar"，容器只换启动命令即可，构建一次、复用 11 次。
+#   10 个服务各建一次镜像意味着 10 次 Maven 构建 + 10 层依赖下载，本地/小服务器上极其耗时；
+#   打成"一个镜像内含全部 jar"，容器只换启动命令即可，构建一次、复用 10 次。
 #   （生产上若各服务独立发布节奏不同，再拆成一服务一镜像。）
 #
 # 构建（在仓库根目录执行，即 D:\dsh\llmall）：
@@ -69,7 +69,7 @@ COPY --from=build /src/llmall-promotion-service/target/llmall-promotion-service.
 COPY --from=build /src/llmall-content-service/target/llmall-content-service.jar     /app/
 COPY --from=build /src/llmall-search-service/target/llmall-search-service.jar       /app/
 
-# 低内存运行的默认 JVM 参数（16G 机器 / 4G 云服务器都适用，详见 ../资源受限运行方案.md）
+# 低内存运行的默认 JVM 参数（16G 机器 / 4G 云服务器都适用，详见 ../docs/internal/资源受限运行方案.md）
 ENV JAVA_OPTS="-Xms64m -Xmx192m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dspring.jmx.enabled=false -Dfile.encoding=UTF-8"
 ENV TZ=Asia/Shanghai
 

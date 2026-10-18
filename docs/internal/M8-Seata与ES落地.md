@@ -1,4 +1,4 @@
-# M8 施工单：Seata + Elasticsearch 落地（进度板）
+# M8 Seata + Elasticsearch 落地（进度记录）
 
 > 这是操作单，不是给人看的汇报。拓扑：**Seata 跑在 VM 的 Docker**（占 VM 512M），
 > **ES 跑在 Windows 宿主**（占宿主 ~1.2G，服务在 IDEA 里直连 localhost:9200）。
@@ -11,7 +11,7 @@
 | Seata · 业务侧接线 | ✅ 已完成 | 3 个 pom 加依赖（trade=TM，item/promotion=RM）+ 3 个 `application.yaml` 加 seata 配置 + `OrderServiceImpl#createOrder` 加 `@GlobalTransactional`，**默认 `seata.enabled=false`（注解惰性，项目照常跑）** |
 | Seata · 服务端启动 | ⏳ 等你在 VM 上执行 | 拉镜像 → 建 seata 三张表 → `up -d seata`（见第 3 节） |
 | Seata · 验证与对照 | ⏳ 未开始 | 需服务端就绪 |
-| ES · 服务端 | 🔄 下载中 | ES 7.17.10（Windows zip）+ IK 7.17.10，放 `D:\develop\` |
+| ES · 服务端 | 🔄 下载中 | ES 7.17.10（Windows zip）+ IK 7.17.10，放 `<tools>\` |
 | ES · 业务侧接线 | ✅ 已完成 | 5 个新类 + 3 个文件改动，见第 4 节 |
 | ES · 启动与验证 | ⏳ 未开始 | 下载完我解压、配堆、启动、验收 |
 
@@ -36,7 +36,7 @@ docker exec -i mysql mysql -uroot -p123 -e "show tables from seata;"      # 期�
 
 然后把 `docker-compose-infra-lite.yml` 与 `docker/seata/` 传到 VM 的 `/root/llmall/`，
 `docker compose -f docker-compose-infra-lite.yml --profile full up -d seata`，
-验收：`docker ps` Up + Nacos 服务列表出现 `seata-server` + `http://192.168.189.128:7091` 可开。
+验收：`docker ps` Up + Nacos 服务列表出现 `seata-server` + `http://<vm-ip>:7091` 可开。
 
 ## 四、ES 已完成代码（llmall-search-service）
 
@@ -86,7 +86,7 @@ docker exec -i mysql mysql -uroot -p123 -e "show tables from seata;"      # 期�
 - `SortBuilders.geoDistanceSort(String, double, double)`（**参数顺序是 lat, lon** → 传 y, x）/ `scoreSort()` / `fieldSort()`；
 - **`@Field` 在 4.4 没有 `fields` 属性**（多字段是 5.x 的能力）→ 已改掉，别再写 `fields = @Field(...)`。
 
-配置类改动用 snakeyaml 1.30 实际解析校验（`D:\dsh\.verify\YamlCheck.java`，43 项断言全过）。
+配置类改动用 snakeyaml 1.30 实际解析校验（`本地工作区\YamlCheck.java`，43 项断言全过）。
 
 ## 六、内存纪律
 
@@ -119,18 +119,18 @@ docker exec -i mysql mysql -uroot -p123 -e "show tables from seata;"      # 期�
 1. **堆不能用 `jvm.options` 改**：7.17 里 `-Xms/-Xmx` 是注释掉的（注释写着"heap size is
    automatically configured by Elasticsearch"），按行替换是**静默无效**的，会以默认堆起。
    正确做法：`config/jvm.options.d/heap.options` 放 `-Xms512m -Xmx512m`（官方推荐，后加载生效）。
-2. **启动必须用 `ES_JAVA_HOME`**：本机 `JAVA_HOME=D:\develop\JDK`（Java 25），ES 批处理优先用它，
+2. **启动必须用 `ES_JAVA_HOME`**：本机 `JAVA_HOME=<tools>\JDK`（Java 25），ES 批处理优先用它，
    而新 JDK 已移除 Security Manager → `Error: A command line option has attempted to allow or
    enable the Security Manager`，VM 直接起不来。指向自带 JDK（本包是 OpenJDK 20）即可。
-   已生成 `D:\develop\elasticsearch-7.17.10\start-es.ps1` 固化这个环境变量。
+   已生成 `<tools>\elasticsearch-7.17.10\start-es.ps1` 固化这个环境变量。
 3. **读模型的 x/y 是后加列**：30 行 `shop_search_doc` 是我加列之前由服务重建的，x/y 全为 NULL，
    灌进 ES 后 `location` 为空 → geo 查询 0 命中。已跨库回填（`llmall-shop.shop` → `llmall-search.shop_search_doc`，
    30/30 有了坐标）；正式做法是加列后调 `POST /search/view/rebuild`（服务会带上坐标）。
 
 ### 7.2 服务层验证（已完成，走的是完整 Java 链路）
 
-用装好的 Maven（`D:\develop\apache-maven-3.9.6`，`JAVA_HOME=jdk11`）构建：
-`mvn -s D:\Maven\settings.xml -pl llmall-search-service -am -DskipTests package` → **BUILD SUCCESS**（33s）。
+用装好的 Maven（`<tools>\apache-maven-3.9.6`，`JAVA_HOME=jdk11`）构建：
+`mvn -s <maven-settings> -pl llmall-search-service -am -DskipTests package` → **BUILD SUCCESS**（33s）。
 
 | 验证项 | 命令 | 结果 |
 |---|---|---|
@@ -171,8 +171,8 @@ docker exec -i mysql mysql -uroot -p123 -e "show tables from seata;"      # 期�
 | 配置 | `/root/seata/{registry.conf,file.conf}`；`config.type=file` + `store.mode=db`（日志有 `DruidDataSource inited` 证明 db 模式生效） |
 | 网络与启动 | **`--network local-life`**（与 mysql/nacos/mq 同一网络）、发布 8091（TC）/7091（控制台）、`--memory 512m`、`--restart unless-stopped` |
 | 容器互访 | 实测容器内 `getent hosts mysql` → 172.19.0.2、`getent hosts nacos` → 172.19.0.3：确实同网络、可按容器名互访 |
-| 注册 IP 的正确解法 | 容器加 `--hostname ubuntu-tlias --add-host ubuntu-tlias:192.168.189.128`：容器内 `/etc/hosts` 里这条**排在 Docker 自动写的那条前面**，`getLocalHost()` 因此解析到局域网 IP，注册正确；容器仍留在 local-life 里（两全） |
-| 注册 | Nacos `SEATA_GROUP/seata-server` → `192.168.189.128:8091 healthy=True`（实测；另有一条 172.19.0.5 的过期条目会自行过期） |
+| 注册 IP 的正确解法 | 容器加 `--hostname ubuntu-tlias --add-host ubuntu-tlias:<vm-ip>`：容器内 `/etc/hosts` 里这条**排在 Docker 自动写的那条前面**，`getLocalHost()` 因此解析到局域网 IP，注册正确；容器仍留在 local-life 里（两全） |
+| 注册 | Nacos `SEATA_GROUP/seata-server` → `<vm-ip>:8091 healthy=True`（实测；另有一条 172.19.0.5 的过期条目会自行过期） |
 
 > 演进记录：最初为了绕开"注册成容器内网 IP"，先用了 `--network host`（能注册对，但容器不在共享网络里）；
 > 后来发现根因是"Seata 按主机名取本机 IP + 容器内主机名指向容器 IP"，于是改成
@@ -187,7 +187,7 @@ docker exec -i mysql mysql -uroot -p123 -e "show tables from seata;"      # 期�
    这类环境变量**根本传不进 JVM**（官方文档里说的 SEATA_IP 在这版镜像上不生效）；
    ② Seata 取本机 IP 会先按**主机名**解析，而 VM 的 `/etc/hosts` 是 `127.0.1.1 ubuntu-tlias`（回环，被过滤），
    于是退化成按网卡枚举，选中了 docker0。
-   修法：把 `/etc/hosts` 里主机名指到 VM 的局域网 IP（`192.168.189.128 ubuntu-tlias`）→ 注册即正确。
+   修法：把 `/etc/hosts` 里主机名指到 VM 的局域网 IP（`<vm-ip> ubuntu-tlias`）→ 注册即正确。
    （已备份原文件；这是标准做法，对其它服务无影响。）
 2. **HOCON 语法**：`registry.conf` / `file.conf` 的字段必须用换行或逗号分隔，写成 `{ a=1 b=2 }` 会解析失败
    （typesafe-config 报错，容器反复重启）。
@@ -205,7 +205,7 @@ docker exec -i mysql mysql -uroot -p123 -e "show tables from seata;"      # 期�
 
 ```
 Begin new global transaction applicationId: llmall-trade-service, transactionServiceGroup: llmall-tx-group,
-                              transactionName: llmall-create-order, timeout:60000, xid=192.168.189.128:8091:2531855678756409345
+                              transactionName: llmall-create-order, timeout:60000, xid=<vm-ip>:8091:2531855678756409345
 Register branch successfully ... resourceId=jdbc:mysql://...llmall-item , lockKeys = item:317578;stock_flow:142
 Register branch successfully ... resourceId=jdbc:mysql://...llmall-trade, lockKeys = order_detail:102;order:2109290165633540098
 Committing global transaction is successfully done, xid = ...409345
@@ -245,7 +245,7 @@ Rollback global transaction successfully, xid=...358
 
 **结论**：Seata 的用户控制台是 **1.5.1** 才引入的，1.4.2 及更早没有这段代码。
 
-- 本文第 3 节把"`http://192.168.189.128:7091` 可开"写成验收标准 —— **在 1.4.2 上永远无法通过**，当时没真验过；
+- 本文第 3 节把"`http://<vm-ip>:7091` 可开"写成验收标准 —— **在 1.4.2 上永远无法通过**，当时没真验过；
 - `docker/docker-compose-addon.yml` 原注释"控制台端口（1.4.2 起提供）" **已改**为说明 1.5.1+；
 - 要用控制台就得**把服务端升到 1.5.x**（顺带修掉第 8.2 条记的"客户端 1.5.2 ↔ 服务端 1.4.2"错配，Seata 官方要求**服务端 ≥ 客户端**）。升 1.5.x 的代价：配置从 `registry.conf`/`file.conf` 迁到 `application.yml`，容器要重建，重建后需复验 Nacos 注册 + 一次真实下单。
 
@@ -260,7 +260,7 @@ Rollback global transaction successfully, xid=...358
 3. `mq`：rabbitmq 镜像**不带 tzdata**，把宿主 `/usr/share/zoneinfo/Asia/Shanghai` 拷进容器当 `/etc/localtime`；
 4. `seata-server`：1.4.2 是 Alpine 镜像，**`jre/lib/zi` 时区库都不存在** —— 只挂 `/etc/localtime` 时 JVM 仍然打 UTC 日志；补上 `/usr/share/zoneinfo` 并把 `jre/lib/zi` 指向它之后，JVM 日志才变成 CST。
 
-复验：VM 与四个容器 `date` 全为 CST；`nacos` 日志 `11:20:41`、`mq` 日志 `11:20:27`、`seata` 日志 `11:22:13`（此前都是 `03:xx`）；`mysql` `@@system_time_zone=CST`、`NOW()` = CST；Seata 仍以 `192.168.189.128:8091 healthy=true` 注册在 Nacos `SEATA_GROUP`。
+复验：VM 与四个容器 `date` 全为 CST；`nacos` 日志 `11:20:41`、`mq` 日志 `11:20:27`、`seata` 日志 `11:22:13`（此前都是 `03:xx`）；`mysql` `@@system_time_zone=CST`、`NOW()` = CST；Seata 仍以 `<vm-ip>:8091 healthy=true` 注册在 Nacos `SEATA_GROUP`。
 
 > ⚠️ 手工 `docker cp`/`ln` 的改动只在容器可写层：`docker restart` 与 VM 重启都在，但**容器被 recreate 就丢**。
 > 因此 `docker-compose-infra-lite.yml` 与 `docker-compose-addon.yml` 已补 `TZ` + `/etc/localtime`
@@ -290,7 +290,7 @@ Rollback global transaction successfully, xid=...358
 
 | # | 坑 | 事实与修法 |
 |---|---|---|
-| 1 | **`--hostname/--add-host` 那套注册 IP 修法在 1.5.2 失效** | 1.5.2 换成了 `io.seata.server.env.ContainerHelper` 决定注册 IP：容器启动后仍把 **172.19.0.2（容器内网）** 注册进 Nacos。正解是环境变量 **`-e SEATA_IP=<宿主IP>`**（实测：不设 → 注册 172.19.0.2；设了 → 注册 192.168.189.128，healthy=true） |
+| 1 | **`--hostname/--add-host` 那套注册 IP 修法在 1.5.2 失效** | 1.5.2 换成了 `io.seata.server.env.ContainerHelper` 决定注册 IP：容器启动后仍把 **172.19.0.2（容器内网）** 注册进 Nacos。正解是环境变量 **`-e SEATA_IP=<宿主IP>`**（实测：不设 → 注册 172.19.0.2；设了 → 注册 <vm-ip>，healthy=true） |
 | 2 | **1.5.2 的库表结构与 1.4.2 不同，直接换镜像会坏** | ① `lock_table` 新增 `status` 列 + `idx_status`/`idx_xid_and_branch_id` 两个索引；② 新增第 4 张表 **`distributed_lock`**，且**必须插 4 行种子**（AsyncCommitting / RetryCommitting / RetryRollbacking / TxTimeoutCheck，定时任务抢锁用）；③ `global_table` 索引改名；④ 字符集统一 utf8mb4。官方 DDL 已收进 `sql/merged/03-seata-server.sql`（全新安装）与 **`03b-seata-server-1.5.2-upgrade.sql`**（从 1.4.2 升级，幂等） |
 | 3 | **配置格式换代** | 1.5.0 起服务端是 Spring Boot 应用，1.4.2 的 `registry.conf`/`file.conf` **在 1.5.2 镜像里已不存在**；配置改由 `docker/seata/application.yml`（registry=nacos、store=db、console 账号）承载。旧的两个 .conf 保留仅供 1.4.2 参考，compose 已不再挂载 |
 
@@ -302,7 +302,7 @@ Rollback global transaction successfully, xid=...358
 |---|---|
 | 版本对齐 | llmall-item-service 日志：`register RM success. client version:1.5.2, **server version:1.5.2**`（此前是 server version:1.4.2） |
 | 控制台可用 | `curl -o /dev/null -w %{http_code} http://127.0.0.1:7091/` → **200**；容器内同时监听 8091 与 7091；日志有 `seata-console` 的 Tomcat + Spring Security 启动链 |
-| 注册正确 | Nacos `SEATA_GROUP/seata-server` → `instanceId=192.168.189.128#8091#default#SEATA_GROUP@@seata-server`，`healthy=true` |
+| 注册正确 | Nacos `SEATA_GROUP/seata-server` → `instanceId=<vm-ip>#8091#default#SEATA_GROUP@@seata-server`，`healthy=true` |
 | db 模式 | 启动日志 `DruidDataSource {dataSource-1} inited`；运行期会话写在 `seata.global_table/branch_table/lock_table` |
 | **AT 提交路径** | 真实下单（POST /orders，商品 317578 × 1）：<br>`Begin new global transaction ... xid=...2727`（12:32:29）<br>`Register branch successfully ... resourceId=llmall-item, lockKeys=stock_flow:145;item:317578`<br>`Register branch successfully ... resourceId=llmall-trade, lockKeys=order:2109502444081766401`<br>`Committing global transaction is successfully done`（12:32:32） |
 | 业务效果 | 订单 83 → **84**；商品库存 9998 → **9997**；库存流水 142 → **143**；提交后 `llmall-item.undo_log` / `llmall-trade.undo_log` 与 seata 三张会话表**全部归 0**（AT 的正确行为） |

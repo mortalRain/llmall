@@ -26,7 +26,7 @@
         <module>llmall-search-service</module>
         <!--
             单体遗留模块：不再参与构建，仅作为「单体 → 微服务拆分」的对照参考保留在目录里。
-            单体版已移动到 D:\dsh\legacy\legacy-monolith 作为「单体→微服务」对照素材，需要时可取消注释：<module>legacy-monolith</module>
+            单体版已移动到 独立的单体工程仓库 作为「单体→微服务」对照素材，需要时可取消注释：<module>legacy-monolith</module>
         -->
     </modules>
 

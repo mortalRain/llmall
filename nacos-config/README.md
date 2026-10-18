@@ -18,10 +18,10 @@
 
 | 占位符 | 含义 | local 值 |
 |---|---|---|
-| `${llmall.db.host}` `${llmall.db.pw}` `${llmall.db.database}` | 数据库 | 192.168.189.128 / 123 / 各服务自己的库名 |
-| `${llmall.redis.host}` `${llmall.redis.pw}` | Redis | 192.168.189.128 / **123456** |
-| `${llmall.mq.host}` | RabbitMQ | 192.168.189.128 |
-| `${llmall.es.host}` | Elasticsearch | 192.168.189.128 |
+| `${llmall.db.host}` `${llmall.db.pw}` `${llmall.db.database}` | 数据库 | <vm-ip> / 123 / 各服务自己的库名 |
+| `${llmall.redis.host}` `${llmall.redis.pw}` | Redis | <vm-ip> / **123456** |
+| `${llmall.mq.host}` | RabbitMQ | <vm-ip> |
+| `${llmall.es.host}` | Elasticsearch | <vm-ip> |
 
 > ⚠️ Redis 口令是 **123456**，不是 123（数据库才是 123）。这是实测值：
 > 8 份 `application-local.yaml` 与 `llmall-gateway/application.yaml` 里的默认值都是 `${LLMALL_REDIS_PW:123456}`。

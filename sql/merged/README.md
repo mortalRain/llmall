@@ -84,10 +84,10 @@ mysql -uroot -p < 63-user-demo-pay-password.sql # 6.6  ★演示 / 冒烟环境�
 #      ⚠️ 52a 是 52 之前的只读清点，不改数据，位置见「已知偏差台账」；本清单不含 52a 的调用
 # 跑完调一次接口：POST /search/view/rebuild 与 POST /shops/cache/geo/rebuild
 
-# ── 7) 可选：从原点评库迁移门店数据（需要外部库 dianping_src 已存在） ──
-mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS dianping_src DEFAULT CHARSET utf8mb4;"
-# dianping_src 的建表数据在 D:\dsh\legacy\dianping-src 项目里（不在本仓库内）
-mysql -uroot -p < 99-migrate-dianping-data.sql
+# ── 7) 可选：从原点评库迁移门店数据（需要外部库 上游单体工程 已存在） ──
+mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS 上游单体工程 DEFAULT CHARSET utf8mb4;"
+# 上游单体工程 的建表数据在 上游单体工程 项目里（不在本仓库内）
+mysql -uroot -p < 99-migrate-source-data.sql
 ```
 
 ### 2.1 关于顺序的三点说明
@@ -95,14 +95,14 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 1. **`50 → 51 → 50 → 51` 是有意重复的**：`51` 会新增 8 类、16 家门店（id 101~116），
    而门店套餐与探店评价由 `50` 按 `shop` 表全量生成 —— 所以 `51` 加完门店后必须再跑一次 `50`，
    再跑一次 `51` 去补那些依赖"评价"的聚合数据（评论 / 点赞 / Feed 收件箱）。
-   这正是 `docs/最终验收与交付清单.md` **7.7 节**写明的四步顺序。
+   这正是 `docs/internal/最终验收与交付清单.md` **7.7 节**写明的四步顺序。
 2. **`23` 排在 `30` 后面（破数字序）**：`23-content-image-default.sql` 改的是 `llmall-content.blog`，
    而这张表由 `30-content.sql` 的 `CREATE TABLE IF NOT EXISTS` 建立 —— 按数字序把 `23` 放在 `30` 前面，
    在全新库上会直接报 `Table 'llmall-content.blog' doesn't exist`。这是本次审计发现的一处**顺序缺陷**。
-3. **`99` 放最后**：它把 `dianping_src` 的门店 upsert 进 `llmall-shop.shop`/`shop_type`，
+3. **`99` 放最后**：它把 `上游单体工程` 的门店 upsert 进 `llmall-shop.shop`/`shop_type`，
    必须等 `10-shop.sql` 建好表、`50/51` 的演示门店就位之后再跑（`ON DUPLICATE KEY UPDATE`，可重复执行）。
 
-### 2.2 与 `docs/最终验收与交付清单.md` 的核对（reconciliation）
+### 2.2 与 `docs/internal/最终验收与交付清单.md` 的核对（reconciliation）
 
 - 7.7 节写的是**演示数据四步**：`50 → 51 → 50 → 51`。**本 README 已采纳该顺序**（第 6 步 6.1~6.4）。
 - 7.7 节之外，文档只笼统写了"按 `sql/merged/README.md` 顺序导入"（见该文档第 52、128 行），
@@ -124,7 +124,7 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 
 验收方式：把上面第二节的清单**连续跑两遍**，第二遍 `ERROR` 行数必须为 0，
 且 `information_schema` 的列数 / 索引行数 / 每表结构哈希与执行前**逐字节一致**。
-（2026-10-13 已在 192.168.189.128 的 MySQL 8 上实测：PASS2 / PASS3 / PASS4 连续三遍 `ERROR` 均为 0，
+（2026-10-13 已在 <vm-ip> 的 MySQL 8 上实测：PASS2 / PASS3 / PASS4 连续三遍 `ERROR` 均为 0，
 `llmall-%` 共 40 张表的结构哈希全部不变。）
 
 ---
@@ -161,7 +161,7 @@ mysql -uroot -p < 99-migrate-dianping-data.sql
 | 61 | `61-user-weak-password-reset.sql` | 存量弱口令重置：第 1 段清点、第 2 段 `UPDATE`（**默认注释，需人工启用**）、第 3 段校验。`WHERE password = '<初始哈希>'` 保证幂等且不误伤已改密账号 |
 | 62 | `62-align-dict-comments.sql` | **存量库注释对齐（全新初始化可跳过）**：7 条纯 `ALTER TABLE ... MODIFY COLUMN ... COMMENT`，把 `stock_flow` / `voucher` / `user_voucher` / `pay_order`(×2) / `order` / `message_log` 的字典型注释改成与代码事实一致。**只改 COMMENT，不动类型/可空性/默认值/数据；可重复执行**。源文件已同步为同一口径，故新库无需执行 |
 | 63 | `63-user-demo-pay-password.sql` | **演示 / 冒烟环境专用**：把演示账号 Jack 的两个口令列收敛成"冒烟能直接用"的状态 —— `pay_password` 从 60 号写入的初始口令哈希改成 888888 的哈希（否则被"首次支付前强制改密"拦下，见 `UserServiceImpl#deductMoney`）；`password` 从原商城导出的那条哈希改成 123456 的哈希（否则 `MallE2E` 第一步登录就红）。幂等：两段 `UPDATE` 都只命中"仍是已知旧值"的行，第二遍命中 0 行；已自行改过口令的账号不受影响。列不存在时只打印提示、不报错。**⛔ 生产库不得执行** |
-| 99 | `99-migrate-dianping-data.sql` | `INSERT ... ON DUPLICATE KEY UPDATE` + `UPDATE ... WHERE hot_score = 0` |
+| 99 | `99-migrate-source-data.sql` | `INSERT ... ON DUPLICATE KEY UPDATE` + `UPDATE ... WHERE hot_score = 0` |
 
 ### 3.1 守卫模板（统一写法）
 

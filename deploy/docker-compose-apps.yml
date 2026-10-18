@@ -1,5 +1,5 @@
 # 应用编排：11 个业务服务 + 网关，要求同一 docker 网络内已有 mysql / redis / nacos / rabbitmq。
-# 【注意】每个服务限 256M（JVM 堆 192M），全量 11 个服务约 2.2G；内存不足时只用 core profile。
+# 【注意】每个服务限 256M（JVM 堆 192M），全量 10 个服务约 2.0G；内存不足时只用 core profile。
 
 x-app: &app
   image: local-life/llmall:1.0.0

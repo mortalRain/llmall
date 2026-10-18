@@ -28,7 +28,7 @@
 | 被测形态 | `demo.ps1` 起的 **Docker 容器**：gateway + 各域服务，每服务 `mem_limit 256m` / `-Xmx192m`；MySQL 容器（宿主 3307）、Redis+3 哨兵容器、Nacos 容器、RabbitMQ 容器 |
 | ES | **容器版** `elasticsearch:7.17.10`（宿主端口 9201，挂 IK 7.17.10）；**没有**使用宿主原生 ES，也没给它发过压测流量 |
 | 数据 | 门店 30 家、到店套餐 150 个、评价 3043 条（seed 链原样） |
-| JMeter | 5.6.3（解压到 `D:\develop\apache-jmeter-5.6.3`，未改 PATH/注册表/服务），堆 `-Xmx512m` |
+| JMeter | 5.6.3（解压到 `<jmeter-home>`，未改 PATH/注册表/服务），堆 `-Xmx512m` |
 | **CPU 共享关系（关键）** | **JMeter 与被测容器跑在同一台宿主上，抢同一批物理核**。所以下表是"单机同构对比"的口径：绝对值不能与生产对标，但**同一环境下的梯度变化**（10→50→100 并发）是可信的 |
 | 隔离性 | 非隔离环境：宿主同时跑着浏览器、IDE、一台 4GB 的 VMware 虚拟机；压测期间未跑其它构建任务 |
 
@@ -37,7 +37,7 @@
 - 并发封顶 **100**；JMeter 堆 **-Xmx512m**；每 **5 秒**采样宿主 CPU/内存/C 盘剩余，写进 `logs/benchmark/*.host-samples.csv`；
 - 熔断条件：CPU 持续 >90% 达 30 秒 / 内存 >90% / C 盘剩余 <5GB → 立即停 JMeter 并标记 `Aborted`。
   本轮**没有触发熔断**（单点峰值到过 100%，但从未连续 30 秒 >90%，见下表 PeakCpu 列）；
-- 只压容器；写路径只写容器库（`127.0.0.1:3307`），**绝不写 VM 演示库 192.168.189.128**；
+- 只压容器；写路径只写容器库（`127.0.0.1:3307`），**绝不写 VM 演示库 <vm-ip>**；
 - 写压测前用 `scripts/SmokeRollback.java capture` 记水位线，压完 `rollback` 复原并复核。
 
 ---
@@ -121,7 +121,7 @@
 **索引建出来了却没有数据时**，ES 返回 `200 + 0 命中`（不抛异常），于是检索**静默返回空列表**，
 既不回落 MySQL，也不打 WARN；只有 `/search/engine` 能看出 `esDocs:0 / consistent:false`。
 
-这条与 `docs/能力缺口清单-2026-10-15.md` 第 3 条的原文（"本条结论尚未实机验证"）对应 —— 现在已验证，
+这条与 `docs/internal/能力缺口清单-2026-10-15.md` 第 3 条的原文（"本条结论尚未实机验证"）对应 —— 现在已验证，
 且给出了**比原文更精确的触发条件**：不是"索引不存在"，而是"**索引存在但为空**"。
 
 > 触发条件：新环境首次部署后 `POST /search/view/rebuild` 建好读模型但漏了 `POST /search/index/rebuild`；
@@ -283,7 +283,7 @@ pwsh -File benchmark/bench-guard.ps1 -Jmx benchmark/read-c02-search.jmx -Tag c02
      -Threads 50 -Duration 60 -SampleSeconds 5 -MaxMemPct 85
 
 # 指定工具与输出位置（不设 JMETER_HOME 时也可用 -JmeterHome 直给）
-pwsh -File benchmark/bench-guard.ps1 -Jmx ... -Tag ... -JmeterHome D:\tools\apache-jmeter-5.6.3 -OutDir .\logs\benchmark
+pwsh -File benchmark/bench-guard.ps1 -Jmx ... -Tag ... -JmeterHome <jmeter-home> -OutDir .\logs\benchmark
 
 # 计划不需要令牌（纯公开读接口）：跳过登录与地址探测
 pwsh -File benchmark/bench-guard.ps1 -Jmx benchmark/read-c02-search.jmx -Tag c02-t10 -Threads 10 -SkipLogin

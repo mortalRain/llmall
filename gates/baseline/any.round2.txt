@@ -1,5 +1,5 @@
 .dockerignore	121f8f22e1af3700c5e1ffdb5a8b052c76d78023bf4fdfb844e80fac9220f93c	17	37
-demo.ps1	1488745cf8412513bb7df8fc9d996320626c4ecaf2043cfc711a53afe99a7df4	726	932
+demo.ps1	70b0e109bb73e2a514b2e1457f141092a455633f03c36c6f74cb6cb805dd87a1	726	935
 benchmark/bench-guard.ps1	6c0195ea0043a462394e0afb938a750d8c863eac38f4e82a6d42e86179db0df0	226	311
 deploy/Dockerfile	cbb790308f8a1df42cd90f8ab570f81c2f23e502d6fdf121438c59aed6a4b4d1	36	78
 docker/es/plugins/ik/plugin-descriptor.properties	091a02c1b37ee6837d5cde84217b020fbd22cc96651171084d0511090d3cc599	6	57
@@ -43,4 +43,4 @@ sql/merged/60-user-pay-password.sql	980da0f0180c2d98703e09eef8bce2e06a224dddcf7e
 sql/merged/61-user-weak-password-reset.sql	ffe41d69ebd99582ed0f6f9bf5981b922d31dce646658211bf750dc5020ec141	48	232
 sql/merged/62-align-dict-comments.sql	c269479ff746df3849e4933f91505e66abba39352051dd0ab961212e773dd25d	15	99
 sql/merged/63-user-demo-pay-password.sql	777e96763eb7f7cbf8d38bc8c31baaa84c29397df18aaff186ff05afce87dd79	22	108
-sql/merged/99-migrate-dianping-data.sql	967cf63a8b1635741327e31e46b437fe34c42414ec10a89187d84b2972c42998	16	112
+sql/merged/99-migrate-source-data.sql	967cf63a8b1635741327e31e46b437fe34c42414ec10a89187d84b2972c42998	16	112

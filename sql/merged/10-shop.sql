@@ -28,7 +28,7 @@
 --   · 不受影响：llmall-shop 库里的 undo_log / consume_record / message_log，
 --     分别由 01-undo-log-all.sql / 02-shared-infra.sql / 05-shop-message-log.sql 建。
 --   · 建完是空表：门店数据要靠 50-seed-local-life-data.sql（演示数据）、
---     51-seed-more-data.sql（补齐 8 个类型）或 99-migrate-dianping-data.sql（从点评迁移）灌入。
+--     51-seed-more-data.sql（补齐 8 个类型）或 99-migrate-source-data.sql（从点评迁移）灌入。
 --
 -- ============================ 四、执行步骤 ============================
 --   1. 确认 00-create-databases.sql 已执行（不可跳过：llmall-shop 库由它建，
@@ -40,7 +40,7 @@
 --   4. 核对地理与热度索引已建（缺失会让"附近门店"与榜单排序全表扫）：
 --        SHOW INDEX FROM `llmall-shop`.`shop`;   -- 期望有 idx_type / idx_hot / idx_geo
 --   5. （可选，需要门店数据时执行）脚本末尾"数据迁移"段：先建好 dianping_src 库并导入点评的
---      dianping-src.sql，再取消注释执行 —— 与 99-migrate-dianping-data.sql 作用重叠，
+--      dianping-src.sql，再取消注释执行 —— 与 99-migrate-source-data.sql 作用重叠，
 --      二者选一即可（99 用 ON DUPLICATE KEY UPDATE，可重复执行，推荐用 99）。
 -- 幂等：CREATE TABLE IF NOT EXISTS，可重复执行。
 --
