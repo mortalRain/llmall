@@ -250,6 +250,19 @@ function Get-LinesAtCommit([string]$commit, [string]$rel) {
     return $arr
 }
 
+$DocLineCache = @{}
+# 文档末次提交时某一行的原文。用来判断「这条引用本身是不是刚被改过」：
+# 改过的引用不能再拿旧行号做锚点 —— 旧行号上的内容已经被作者有意识地换掉了。
+function Get-DocLineAtCommit([string]$docRel, [int]$docLine) {
+    $commit = Get-DocCommit $docRel
+    if (-not $commit) { return $null }
+    $key = $commit + '|' + $docRel
+    if (-not $DocLineCache.ContainsKey($key)) { $DocLineCache[$key] = Get-LinesAtCommit $commit $docRel }
+    $lines = $DocLineCache[$key]
+    if (-not $lines -or $docLine -lt 1 -or $docLine -gt $lines.Count) { return $null }
+    return [string]$lines[$docLine - 1]
+}
+
 # 在一份文件的行里找某段文本，多个命中时取离 fromLine 最近的。
 function Find-AnchorLine($anchorText, $lines, [int]$fromLine) {
     $t = ([string]$anchorText).Trim()
@@ -302,7 +315,9 @@ function Find-BlockShift($oldSpan, $lines) {
 #   失效     —— 什么都锚不到
 # 这个区分很重要：把「成文即空」当成「平移」会让人以为改个行号就好了，
 # 实际上那条引用想说什么只有作者知道。
-function Resolve-Drift([string]$docRel, [string]$refRel, [int]$line, $lines) {
+# SkipOld：这条引用所在行刚被作者改过，旧行号上的内容已经不再代表作者的意图，
+# 一档锚点与「成文即空」都不能用，只能退到邻近候选或直接判失效。
+function Resolve-Drift([string]$docRel, [string]$refRel, [int]$line, $lines, [bool]$SkipOld) {
     $total = $lines.Count
     $oldBlank = $false
     $oldTotal = 0
@@ -310,7 +325,7 @@ function Resolve-Drift([string]$docRel, [string]$refRel, [int]$line, $lines) {
     # 一档：用文档最后一次提交时的同一行做文本锚点，在当前文件里反查新位置。
     # 这一档给出的旧→新是可证伪的，不是猜的。
     $commit = Get-DocCommit $docRel
-    if ($commit) {
+    if ($commit -and -not $SkipOld) {
         $old = Get-LinesAtCommit $commit $refRel
         if ($old -and $line -le $old.Count) {
             $oldTotal = $old.Count
@@ -389,7 +404,7 @@ $Drift = New-Object System.Collections.ArrayList
 $Fail = New-Object System.Collections.ArrayList
 $Skips = New-Object System.Collections.ArrayList
 
-function Add-Ref([string]$docRel, [int]$docLine, [string]$raw, [int]$l1, [int]$l2, [bool]$hasExt) {
+function Add-Ref([string]$docRel, [int]$docLine, [string]$raw, [int]$l1, [int]$l2, [bool]$hasExt, [bool]$justEdited) {
     $script:Checked++
 
     $label = $raw + ':' + $l1
@@ -448,7 +463,7 @@ function Add-Ref([string]$docRel, [int]$docLine, [string]$raw, [int]$l1, [int]$l
 
     # 越界：内容只可能往上挪，所以只认文本锚点，不接受邻近候选
     if ($l1 -gt $total -or ($l2 -gt 0 -and $l2 -gt $total)) {
-        $d = Resolve-Drift $docRel $res.Rel $l1 $lines
+        $d = Resolve-Drift $docRel $res.Rel $l1 $lines $justEdited
         if ($d.Kind -eq '平移' -and $d.How -eq '文本锚点') {
             $null = $script:Drift.Add([pscustomobject]@{ Doc = $docRel; DocLine = $docLine; Ref = $label; Target = $res.Rel; Old = $l1; New = $d.New; How = $d.How; Note = $d.Note })
         }
@@ -473,7 +488,7 @@ function Add-Ref([string]$docRel, [int]$docLine, [string]$raw, [int]$l1, [int]$l
     }
 
     if (-not $nonEmpty) {
-        $d = Resolve-Drift $docRel $res.Rel $l1 $lines
+        $d = Resolve-Drift $docRel $res.Rel $l1 $lines $justEdited
         if ($d.Kind -eq '平移') {
             $null = $script:Drift.Add([pscustomobject]@{ Doc = $docRel; DocLine = $docLine; Ref = $label; Target = $res.Rel; Old = $l1; New = $d.New; How = $d.How; Note = $d.Note })
         }
@@ -489,7 +504,7 @@ function Add-Ref([string]$docRel, [int]$docLine, [string]$raw, [int]$l1, [int]$l
     # -Strict 才追加的机械判据：整行只剩闭合符号 / 分号 / 逗号
     if ($Strict -and $l2 -eq 0) {
         if (([string]$lines[$l1 - 1]) -match '^\s*[}\)\];,]+\s*$') {
-            $d = Resolve-Drift $docRel $res.Rel $l1 $lines
+            $d = Resolve-Drift $docRel $res.Rel $l1 $lines $justEdited
             if ($d.Kind -eq '平移') {
                 $null = $script:Drift.Add([pscustomobject]@{ Doc = $docRel; DocLine = $docLine; Ref = $label; Target = $res.Rel; Old = $l1; New = $d.New; How = $d.How + '·纯符号行'; Note = ((('该行只有闭合符号：' + ([string]$lines[$l1 - 1]).Trim())) + '；' + $d.Note) })
                 return
@@ -501,10 +516,12 @@ function Add-Ref([string]$docRel, [int]$docLine, [string]$raw, [int]$l1, [int]$l
     # 结构档只能保证「行号落在文件内且该处非空」，抓不到「内容整体搬走、而旧行号恰好还落在
     # 有效位置」—— 区间引用最容易出这种问题：代码整体上移一段，旧行号依然有内容，
     # 结构档全绿，可它已经指到另一段代码了。
+    # 但这条判据只对「作者没动过的引用」成立：引用本身刚被改过时，旧行号上的内容已经不是
+    # 作者想指的东西，拿它做锚点必然误报，所以直接跳过内容档，只留结构档。
     $anchored = $false
     $lEnd = $(if ($l2 -gt 0) { $l2 } else { $l1 })
     $commit = Get-DocCommit $docRel
-    if ($commit) {
+    if ($commit -and -not $justEdited) {
         $old = Get-LinesAtCommit $commit $res.Rel
         if ($old -and $lEnd -le $old.Count) {
             $oldSpan = @()
@@ -543,12 +560,18 @@ foreach ($docRel in $Docs) {
         $text = [string]$docLines[$i]
         $docLine = $i + 1
 
+        # 这一行自文档末次提交以来是否被改过：改过的行上，旧行号不再代表作者意图。
+        # 取不到旧版本（新文件 / 超出旧文件长度）时按"没改过"处理，此时也没有锚点可用。
+        $justEdited = $false
+        $oldDocLine = Get-DocLineAtCommit $docRel $docLine
+        if ($null -ne $oldDocLine -and $oldDocLine -ne $text) { $justEdited = $true }
+
         foreach ($m in $RefRx.Matches($text)) {
             $tok = $m.Groups['tok'].Value.Trim('*')
             $hasExt = $ExtRx.IsMatch($tok)
             $l1 = [int]$m.Groups['l1'].Value
             $l2 = $(if ($m.Groups['l2'].Success) { [int]$m.Groups['l2'].Value } else { 0 })
-            Add-Ref $docRel $docLine $tok $l1 $l2 $hasExt
+            Add-Ref $docRel $docLine $tok $l1 $l2 $hasExt $justEdited
 
             # 补 「、311-324」 这类并列行号
             $tail = $text.Substring($m.Index + $m.Length)
@@ -556,7 +579,7 @@ foreach ($docRel in $Docs) {
             while ($more.Success) {
                 $m1 = [int]$more.Groups['l1'].Value
                 $m2 = $(if ($more.Groups['l2'].Success) { [int]$more.Groups['l2'].Value } else { 0 })
-                Add-Ref $docRel $docLine $tok $m1 $m2 $hasExt
+                Add-Ref $docRel $docLine $tok $m1 $m2 $hasExt $justEdited
                 $tail = $tail.Substring($more.Length)
                 $more = $MoreRx.Match($tail)
             }
@@ -568,7 +591,7 @@ foreach ($docRel in $Docs) {
             # 已经是完整路径的「…台账…md:158」由上面的规则覆盖，这里只处理裸行号
             $pre = $text.Substring(0, $m.Index + 2)
             if ($pre -match '台账[\w\-]*\.md\s*$') { continue }
-            Add-Ref $docRel $docLine $LedgerRel $l1 $l2 $true
+            Add-Ref $docRel $docLine $LedgerRel $l1 $l2 $true $justEdited
         }
     }
 }
