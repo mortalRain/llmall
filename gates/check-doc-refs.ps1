@@ -133,6 +133,30 @@ function Resolve-RepoPath([string]$raw) {
     if ($ByName.ContainsKey($bn)) {
         $cand = @($ByName[$bn])
         if ($cand.Count -eq 1) { return [pscustomobject]@{ Ok = $true; Rel = $cand[0]; How = '文件名唯一' } }
+
+        # 同名多份时，如果引用本身带了目录前缀，就用目录段消歧：
+        # trade-service/application.yaml 里 trade-service 按后缀对上 llmall-trade-service，
+        # 于是不必写全 llmall-trade-service/src/main/resources/application.yaml 那么长。
+        # 只在"文件名已经撞车"这一支里启用，不影响其余引用的解析路径；
+        # 消歧后仍多份就还是歧义 —— 宁可报判不了，也不替人挑一个。
+        if ($cut -ge 0) {
+            $dirSeg = ($p.Substring(0, $cut) -split '/')[-1].ToLowerInvariant()
+            if ($dirSeg -ne '') {
+                $filtered = @($cand | Where-Object {
+                    $segs = $_.ToLowerInvariant().Split('/')
+                    $found = $false
+                    for ($k = 0; $k -lt $segs.Count - 1; $k++) {
+                        if ($segs[$k].EndsWith($dirSeg)) { $found = $true; break }
+                    }
+                    $found
+                })
+                if ($filtered.Count -eq 1) { return [pscustomobject]@{ Ok = $true; Rel = $filtered[0]; How = '目录后缀消歧' } }
+                if ($filtered.Count -gt 1) {
+                    return [pscustomobject]@{ Ok = $false; Reason = '歧义'; Detail = ('目录后缀 {0} 消歧后仍命中 {1} 份：{2}' -f $dirSeg, $filtered.Count, (($filtered | Select-Object -First 3) -join '、')) }
+                }
+            }
+        }
+
         return [pscustomobject]@{ Ok = $false; Reason = '歧义'; Detail = ('同名文件 {0} 份：{1}' -f $cand.Count, (($cand | Select-Object -First 3) -join '、')) }
     }
 
