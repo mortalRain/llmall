@@ -1,0 +1,31 @@
+flowchart LR
+    subgraph CORE["交易与资金主链"]
+        direction TB
+        CART["cart<br/>购物车"]
+        TRADE["trade<br/>订单"]
+        PAY["pay<br/>支付单"]
+        ITEM["item<br/>库存"]
+        PROMO["promotion<br/>券"]
+    end
+    subgraph SUPPORT["支撑域"]
+        direction TB
+        USER["user<br/>账号/积分"]
+        SHOP["shop<br/>门店/热度/榜单"]
+        CONTENT["content<br/>评价/Feed"]
+        SEARCH["search<br/>检索视图"]
+    end
+
+    CART -->|"下单"| TRADE
+    TRADE -->|"Feign 扣库存"| ITEM
+    TRADE -->|"Feign 核销券"| PROMO
+    TRADE -->|"创建支付单"| PAY
+    PAY -->|"回调"| TRADE
+    TRADE -.->|"order.paid"| USER
+    TRADE -.->|"order.paid"| SHOP
+    CONTENT -.->|"review.created"| SHOP
+    SHOP -.->|"shop.hot.changed"| SEARCH
+
+    classDef core fill:#e8f0fb,stroke:#4E7BA9,color:#16202E
+    classDef sup fill:#f5f9fc,stroke:#6695C4,color:#16202E
+    class CART,TRADE,PAY,ITEM,PROMO core
+    class USER,SHOP,CONTENT,SEARCH sup

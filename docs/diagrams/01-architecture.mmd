@@ -1,0 +1,47 @@
+flowchart TB
+    CLIENT["演示前端 / 压测客户端"]
+
+    subgraph EDGE["接入层"]
+        GW["llmall-gateway :8080<br/>路由 · JWT 签发与验签 · 限流 · 剥离客户端伪造头"]
+    end
+
+    subgraph BIZ["业务层 · 9 个领域服务（一服务一库）"]
+        direction LR
+        USER["llmall-user-service :8084<br/>账号 · 地址 · 积分"]
+        SHOP["llmall-shop-service :8087<br/>门店 · 热度 · 榜单 · GEO"]
+        ITEM["llmall-item-service :8081<br/>商品/套餐 · 库存"]
+        CART["llmall-cart-service :8082<br/>购物车"]
+        TRADE["llmall-trade-service :8085<br/>订单 · 本地消息表 · 对账"]
+        PAY["llmall-pay-service :8086<br/>支付单 · 回调"]
+        PROMO["llmall-promotion-service :8088<br/>优惠券 · 秒杀"]
+        CONTENT["llmall-content-service :8089<br/>评价 · 点赞 · 关注 · Feed"]
+        SEARCH["llmall-search-service :8093<br/>检索 · 热词"]
+    end
+
+    subgraph MID["异步层"]
+        MQ[("RabbitMQ<br/>领域事件 / 延迟消息 / 死信")]
+    end
+
+    subgraph INFRA["基础设施层"]
+        direction LR
+        NACOS[("Nacos<br/>注册 / 配置")]
+        MYSQL[("MySQL 8<br/>一服务一库")]
+        REDIS[("Redis<br/>缓存 / ZSet / GEO / HLL")]
+        ES[("Elasticsearch 7.17<br/>门店检索索引")]
+    end
+
+    CLIENT -->|"HTTP"| GW
+    GW -->|"lb:// 服务名"| BIZ
+    BIZ --> MQ
+    MQ --> BIZ
+    BIZ --> MYSQL
+    BIZ --> REDIS
+    SEARCH --> ES
+    BIZ -.->|"注册与拉取配置"| NACOS
+
+    classDef edge fill:#e8f0fb,stroke:#4E7BA9,stroke-width:2px,color:#16202E
+    classDef biz fill:#f5f9fc,stroke:#6695C4,color:#16202E
+    classDef inf fill:#fbf7ef,stroke:#C8912F,color:#16202E
+    class GW edge
+    class USER,SHOP,ITEM,CART,TRADE,PAY,PROMO,CONTENT,SEARCH biz
+    class MQ,MYSQL,REDIS,ES,NACOS inf

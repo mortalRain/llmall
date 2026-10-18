@@ -38,55 +38,7 @@
 客户端只认网关；业务服务之间只经 `llmall-api` 的 Feign 契约调用；跨域的写扩散一律走 MQ 事件，
 不在同一次请求里串起来。
 
-```mermaid
-flowchart TB
-    CLIENT["演示前端 / 压测客户端"]
-
-    subgraph EDGE["接入层"]
-        GW["llmall-gateway :8080<br/>路由 · JWT 签发与验签 · 限流 · 剥离客户端伪造头"]
-    end
-
-    subgraph BIZ["业务层 · 9 个领域服务（一服务一库）"]
-        direction LR
-        USER["llmall-user-service :8084<br/>账号 · 地址 · 积分"]
-        SHOP["llmall-shop-service :8087<br/>门店 · 热度 · 榜单 · GEO"]
-        ITEM["llmall-item-service :8081<br/>商品/套餐 · 库存"]
-        CART["llmall-cart-service :8082<br/>购物车"]
-        TRADE["llmall-trade-service :8085<br/>订单 · 本地消息表 · 对账"]
-        PAY["llmall-pay-service :8086<br/>支付单 · 回调"]
-        PROMO["llmall-promotion-service :8088<br/>优惠券 · 秒杀"]
-        CONTENT["llmall-content-service :8089<br/>评价 · 点赞 · 关注 · Feed"]
-        SEARCH["llmall-search-service :8093<br/>检索 · 热词"]
-    end
-
-    subgraph MID["异步层"]
-        MQ[("RabbitMQ<br/>领域事件 / 延迟消息 / 死信")]
-    end
-
-    subgraph INFRA["基础设施层"]
-        direction LR
-        NACOS[("Nacos<br/>注册 / 配置")]
-        MYSQL[("MySQL 8<br/>一服务一库")]
-        REDIS[("Redis<br/>缓存 / ZSet / GEO / HLL")]
-        ES[("Elasticsearch 7.17<br/>门店检索索引")]
-    end
-
-    CLIENT -->|"HTTP"| GW
-    GW -->|"lb:// 服务名"| BIZ
-    BIZ --> MQ
-    MQ --> BIZ
-    BIZ --> MYSQL
-    BIZ --> REDIS
-    SEARCH --> ES
-    BIZ -.->|"注册与拉取配置"| NACOS
-
-    classDef edge fill:#e8f0fb,stroke:#4E7BA9,stroke-width:2px,color:#16202E
-    classDef biz fill:#f5f9fc,stroke:#6695C4,color:#16202E
-    classDef inf fill:#fbf7ef,stroke:#C8912F,color:#16202E
-    class GW edge
-    class USER,SHOP,ITEM,CART,TRADE,PAY,PROMO,CONTENT,SEARCH biz
-    class MQ,MYSQL,REDIS,ES,NACOS inf
-```
+![系统分层架构：接入层 / 业务层 / 异步层 / 基础设施层](docs/diagrams/01-architecture.png)
 
 ### 1.2 服务与数据归属
 
@@ -104,7 +56,6 @@ flowchart TB
 | llmall-promotion-service | 8088 | llmall-promotion | 优惠券发放/领取/核销、秒杀券（Lua 原子预扣减 + 一人一单 + MQ 异步落库） |
 | llmall-content-service | 8089 | llmall-content | 评价/笔记、评论、点赞、关注、Feed |
 | llmall-search-service | 8093 | llmall-search | 门店检索（ES 与 MySQL 读模型双引擎，`engine=auto` 优先 ES、不可用时自动回落）、热词与建议、搜索历史 |
-| （规划中） | — | — | 站内信：**未实现**，仓库内无对应模块与配置 |
 
 > **端口口径**：上表是本项目**唯一**的端口来源，其余文档一律引用这里。
 > **8090 预留给 Sentinel 控制台**——注意其默认端口是 8080、会与网关冲突，启动时必须显式
@@ -118,28 +69,7 @@ flowchart TB
 
 鉴权只在网关做一次；下游靠**可信请求头 + ThreadLocal**，Feign 调用自动透传。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant C as 客户端
-    participant G as llmall-gateway
-    participant S as 业务服务
-    participant R as Redis
-
-    C->>G: 请求（authorization: access token）
-    G->>G: ① 剥离客户端自带的 user-info 头
-    G->>G: ② 验签 JWT（区分"已过期"与"非法"）
-    alt access token 已过期
-        G->>R: 校验 x-refresh-token 是否在白名单
-        R-->>G: 命中
-        G-->>C: 响应头 x-access-token（前端无感刷新）
-    end
-    G->>R: ③ 查令牌黑名单（登出后立即失效）
-    R-->>G: 未命中 → 放行
-    G->>S: 转发 + 写入可信 user-info 头
-    S->>S: 拦截器 → UserContext（ThreadLocal）
-    S->>S: Feign 调下游时自动透传该身份
-```
+![统一鉴权与身份透传时序](docs/diagrams/02-auth-sequence.png)
 
 **这一条修复过的真问题**：免鉴权路径曾可直接伪造 `user-info` 冒充任意用户（越权）。
 现在的做法是**入口无条件剥离**客户端提供的身份头，只信任网关写入的那一份。
@@ -148,24 +78,7 @@ sequenceDiagram
 
 业务成功 ⇒ 消息必在：消息表与业务数据**同一个本地事务**提交，投递失败靠重试与对账补齐。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant P as llmall-pay-service
-    participant T as llmall-trade-service
-    participant M as RabbitMQ
-    participant U as llmall-user-service
-    participant SH as llmall-shop-service
-
-    P->>T: 支付成功回调
-    T->>T: ① 条件更新订单 status 1→2（幂等）
-    T->>T: ② 同一事务写 message_log（业务成功 ⇒ 消息必在）
-    T->>M: ③ 事务提交后投递 order.paid
-    M->>U: 消费 → 加积分 + 记流水（幂等键去重）
-    M->>SH: 消费 → 累加门店销量 + 重算热度（幂等）
-    Note over T: 投递失败 → 指数退避重试 5s → … → 10min
-    Note over T: 每 5 分钟对账：问下游"处理了吗" → 未处理则补偿重发
-```
+![下单支付跨域最终一致性时序](docs/diagrams/03-pay-consistency.png)
 
 **三层幂等**：生产（`message_log` 唯一键）、消费（消费记录唯一键）、业务（业务唯一键），
 绝不假设 MQ 不重复。
@@ -174,42 +87,13 @@ sequenceDiagram
 
 门店排序从 T+1 批处理改成**事件驱动的秒级更新**：写路径一条 SQL 原子更新，读路径只读 ZSet。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as 用户
-    participant CT as llmall-content-service
-    participant M as RabbitMQ
-    participant SH as llmall-shop-service
-    participant SE as llmall-search-service
-
-    U->>CT: 发布评价（评分 1~5）
-    CT->>SH: Feign 校验门店存在
-    CT->>CT: 评价落库 + 推送粉丝 Feed
-    CT->>M: 事务提交后投递 review.created
-    M->>SH: 消费事件
-    SH->>SH: 原子更新评价数与平均分（一条 SQL，注意赋值顺序）
-    SH->>SH: 重算热度 = base × 时间衰减
-    SH->>SH: 写 DB + 更新 ZSet 榜单 + 失效详情缓存
-    SH->>M: 投递 shop.hot.changed
-    M->>SE: 更新本地检索视图（检索即按新热度排序）
-    U->>SH: 查看门店/榜单 → 排序已变化
-```
+![评价 → 门店热度 → 榜单排序时序](docs/diagrams/04-review-ranking.png)
 
 ### 2.4 订单状态机
 
 状态迁移全部靠**条件更新**（`WHERE status = 期望旧值`）实现，并发下只有一个请求能迁移成功。
 
-```mermaid
-stateDiagram-v2
-    [*] --> 待支付: 创建订单（1）
-    待支付 --> 已支付: 支付回调（1→2，条件更新）
-    待支付 --> 已取消: 超时或主动取消（1→5）
-    已支付 --> 已核销: 到店核销（2→7，团购券）
-    已支付 --> 已取消: 退款关闭（2→5）
-    已核销 --> [*]
-    已取消 --> [*]
-```
+![订单状态机](docs/diagrams/05-order-state.png)
 
 > 字典口径：`1 待支付` / `2 已支付（待发货或待核销）` / `5 已取消` / `7 已核销`，
 > 与 `Order.STATUS_*` 逐值一致（由闸门 7「字典一致性」持续校验）。
@@ -220,44 +104,7 @@ stateDiagram-v2
 
 应用与中间件跑在同一个 Docker 网络上，容器间按容器名互访；对外只发布网关端口。
 
-```mermaid
-flowchart LR
-    USERX["浏览器 / curl / JMeter"]
-
-    subgraph HOST["单台宿主机（开发机或云服务器）"]
-        direction TB
-        subgraph NET["docker network · local-life"]
-            direction TB
-            subgraph APP["应用容器 · 一容器一服务"]
-                GWC["llmall-gateway<br/>:8080"]
-                APPS["9 个业务服务<br/>:8081 ~ :8093"]
-            end
-            subgraph MIDDLE["中间件容器"]
-                MY[("mysql<br/>:3306")]
-                RD[("redis<br/>:6379")]
-                NA[("nacos<br/>:8848")]
-                MQC[("rabbitmq<br/>:5672")]
-                ESC[("elasticsearch<br/>:9200")]
-            end
-        end
-        ENVF["deploy/.env<br/>口令与地址，不入库"]
-        JKS["llmall.jks<br/>JWT 私钥，不入库"]
-    end
-
-    USERX -->|"只发布 8080"| GWC
-    APPS --> MY
-    APPS --> RD
-    APPS --> NA
-    APPS --> MQC
-    APPS --> ESC
-    ENVF -.->|"compose 注入"| APPS
-    JKS -.->|"卷挂载"| APPS
-
-    classDef app fill:#f5f9fc,stroke:#6695C4,color:#16202E
-    classDef mid fill:#fbf7ef,stroke:#C8912F,color:#16202E
-    class GWC,APPS app
-    class MY,RD,NA,MQC,ESC mid
-```
+![部署拓扑](docs/diagrams/06-deploy-topology.png)
 
 | 形态 | 适用场景 | 编排文件 |
 |---|---|---|
@@ -322,39 +169,7 @@ pwsh -File scripts/verify-auth.ps1          # 鉴权链路端到端验收
 「只改注释、代码零改动」这句话在本仓库里不是承诺，而是**可复现的机器判据**。
 闸门工具集、现行基线与自校验依赖都随仓库交付（`gates/`），clone 下来就能复现。
 
-```mermaid
-flowchart LR
-    A["一次改动"] --> B1["① Java 指纹"]
-    A --> B2["② YAML 指纹"]
-    A --> B3["③ Lua/SQL/脚本指纹"]
-    A --> B4["④ 注释内容质量"]
-    A --> B5["⑤ 闸门自校验"]
-    A --> B6["⑥ 文档引用有效性"]
-    A --> B7["⑦ 字典一致性"]
-    A --> B8["⑧ Feign 禁重试一致性"]
-    B1 --> C{"汇总判定"}
-    B2 --> C
-    B3 --> C
-    B4 --> C
-    B5 --> C
-    B6 --> C
-    B7 --> C
-    B8 --> C
-    C -->|"全部通过"| D["退出码 0 · 全绿"]
-    C -->|"硬闸门失败"| E["退出码 1 · 必须修"]
-    C -->|"仅台账闸门报已登记偏差"| F["退出码 2 · 核对台账"]
-
-    classDef hard fill:#e8f0fb,stroke:#4E7BA9,color:#16202E
-    classDef ledger fill:#fbf7ef,stroke:#C8912F,color:#16202E
-    classDef ok fill:#e9f7ef,stroke:#2E8B57,color:#16202E
-    classDef bad fill:#fdecea,stroke:#B03A2E,color:#16202E
-    classDef warn fill:#fef5e7,stroke:#B9770E,color:#16202E
-    class B1,B2,B3,B4,B5,B6 hard
-    class B7,B8 ledger
-    class D ok
-    class E bad
-    class F warn
-```
+![八道闸门流水线与三态退出码](docs/diagrams/07-gate-pipeline.png)
 
 **一条运行命令**（仓库根目录）：
 

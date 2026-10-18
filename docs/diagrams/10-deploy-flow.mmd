@@ -1,0 +1,16 @@
+flowchart LR
+    P0["0 预检<br/>docker / 端口 / 内存"] --> P1["1 构建镜像<br/>单镜像多 jar"]
+    P1 --> P2["2 起中间件<br/>infra-lite（+ addon）"]
+    P2 --> P3["3 建库建表<br/>sql/merged 按序执行"]
+    P3 --> P4["4 导 Nacos 配置<br/>shared-*.yaml + 路由"]
+    P4 --> P5["5 灌 ES 索引<br/>mapping + bulk"]
+    P5 --> P6["6 起应用容器<br/>--profile full"]
+    P6 --> P7{"7 验收"}
+    P7 -->|"通过"| OK["交付"]
+    P7 -->|"失败"| TR["按 §9 排障表定位"]
+    TR --> P6
+
+    classDef step fill:#f5f9fc,stroke:#6695C4,color:#16202E
+    classDef ok fill:#e9f7ef,stroke:#2E8B57,color:#16202E
+    class P0,P1,P2,P3,P4,P5,P6 step
+    class OK ok

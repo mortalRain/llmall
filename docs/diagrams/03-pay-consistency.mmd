@@ -1,0 +1,16 @@
+sequenceDiagram
+    autonumber
+    participant P as llmall-pay-service
+    participant T as llmall-trade-service
+    participant M as RabbitMQ
+    participant U as llmall-user-service
+    participant SH as llmall-shop-service
+
+    P->>T: 支付成功回调
+    T->>T: ① 条件更新订单 status 1→2（幂等）
+    T->>T: ② 同一事务写 message_log（业务成功 ⇒ 消息必在）
+    T->>M: ③ 事务提交后投递 order.paid
+    M->>U: 消费 → 加积分 + 记流水（幂等键去重）
+    M->>SH: 消费 → 累加门店销量 + 重算热度（幂等）
+    Note over T: 投递失败 → 指数退避重试 5s → … → 10min
+    Note over T: 每 5 分钟对账：问下游"处理了吗" → 未处理则补偿重发

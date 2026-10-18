@@ -1,0 +1,20 @@
+sequenceDiagram
+    autonumber
+    participant C as 客户端
+    participant G as llmall-gateway
+    participant S as 业务服务
+    participant R as Redis
+
+    C->>G: 请求（authorization: access token）
+    G->>G: ① 剥离客户端自带的 user-info 头
+    G->>G: ② 验签 JWT（区分"已过期"与"非法"）
+    alt access token 已过期
+        G->>R: 校验 x-refresh-token 是否在白名单
+        R-->>G: 命中
+        G-->>C: 响应头 x-access-token（前端无感刷新）
+    end
+    G->>R: ③ 查令牌黑名单（登出后立即失效）
+    R-->>G: 未命中 → 放行
+    G->>S: 转发 + 写入可信 user-info 头
+    S->>S: 拦截器 → UserContext（ThreadLocal）
+    S->>S: Feign 调下游时自动透传该身份

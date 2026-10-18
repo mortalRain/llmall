@@ -1,0 +1,17 @@
+{
+  "theme": "default",
+  "fontFamily": "Microsoft YaHei, PingFang SC, Segoe UI, sans-serif",
+  "flowchart": {
+    "htmlLabels": false,
+    "curve": "basis",
+    "useMaxWidth": true
+  },
+  "sequence": {
+    "useMaxWidth": true,
+    "mirrorActors": false
+  },
+  "themeVariables": {
+    "fontFamily": "Microsoft YaHei, PingFang SC, Segoe UI, sans-serif",
+    "fontSize": "15px"
+  }
+}

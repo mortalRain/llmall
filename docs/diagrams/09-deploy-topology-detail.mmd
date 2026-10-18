@@ -1,0 +1,45 @@
+flowchart TB
+    subgraph HOST["单台宿主机"]
+        direction TB
+        subgraph NET["docker network · local-life（external）"]
+            direction TB
+            subgraph APP["应用容器 · 镜像 local-life/llmall:1.0.0"]
+                GW["gateway<br/>:8080"]
+                S1["user :8084"]
+                S2["shop :8087"]
+                S3["item :8081"]
+                S4["cart :8082"]
+                S5["trade :8085"]
+                S6["pay :8086"]
+                S7["promotion :8088"]
+                S8["content :8089"]
+                S9["search :8093"]
+            end
+            subgraph MID["中间件容器"]
+                MY[("mysql :3306")]
+                RD[("redis :6379")]
+                NA[("nacos :8848")]
+                MQ[("rabbitmq :5672")]
+                ES[("elasticsearch :9200")]
+                SE[("seata-server :8091<br/>可选")]
+            end
+        end
+        ENV["deploy/.env · 凭据与地址（不入库）"]
+        KEEPER["llmall.jks · JWT 私钥（不入库）"]
+    end
+
+    EXT["浏览器 / curl / JMeter"] -->|"仅发布 8080"| GW
+    GW --> S1 & S2 & S3 & S4 & S5 & S6 & S7 & S8 & S9
+    APP --> MY
+    APP --> RD
+    APP --> NA
+    APP --> MQ
+    APP --> ES
+    S5 -.->|"可选：AT 分支"| SE
+    ENV -.->|"compose 注入"| APP
+    KEEPER -.->|"卷挂载"| APP
+
+    classDef app fill:#f5f9fc,stroke:#6695C4,color:#16202E
+    classDef mid fill:#fbf7ef,stroke:#C8912F,color:#16202E
+    class GW,S1,S2,S3,S4,S5,S6,S7,S8,S9 app
+    class MY,RD,NA,MQ,ES,SE mid

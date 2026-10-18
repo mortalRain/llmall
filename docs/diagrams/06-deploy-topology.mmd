@@ -1,0 +1,36 @@
+flowchart LR
+    USERX["浏览器 / curl / JMeter"]
+
+    subgraph HOST["单台宿主机（开发机或云服务器）"]
+        direction TB
+        subgraph NET["docker network · local-life"]
+            direction TB
+            subgraph APP["应用容器 · 一容器一服务"]
+                GWC["llmall-gateway<br/>:8080"]
+                APPS["9 个业务服务<br/>:8081 ~ :8093"]
+            end
+            subgraph MIDDLE["中间件容器"]
+                MY[("mysql<br/>:3306")]
+                RD[("redis<br/>:6379")]
+                NA[("nacos<br/>:8848")]
+                MQC[("rabbitmq<br/>:5672")]
+                ESC[("elasticsearch<br/>:9200")]
+            end
+        end
+        ENVF["deploy/.env<br/>口令与地址，不入库"]
+        JKS["llmall.jks<br/>JWT 私钥，不入库"]
+    end
+
+    USERX -->|"只发布 8080"| GWC
+    APPS --> MY
+    APPS --> RD
+    APPS --> NA
+    APPS --> MQC
+    APPS --> ESC
+    ENVF -.->|"compose 注入"| APPS
+    JKS -.->|"卷挂载"| APPS
+
+    classDef app fill:#f5f9fc,stroke:#6695C4,color:#16202E
+    classDef mid fill:#fbf7ef,stroke:#C8912F,color:#16202E
+    class GWC,APPS app
+    class MY,RD,NA,MQC,ESC mid

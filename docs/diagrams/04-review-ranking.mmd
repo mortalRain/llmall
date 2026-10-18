@@ -1,0 +1,19 @@
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant CT as llmall-content-service
+    participant M as RabbitMQ
+    participant SH as llmall-shop-service
+    participant SE as llmall-search-service
+
+    U->>CT: 发布评价（评分 1~5）
+    CT->>SH: Feign 校验门店存在
+    CT->>CT: 评价落库 + 推送粉丝 Feed
+    CT->>M: 事务提交后投递 review.created
+    M->>SH: 消费事件
+    SH->>SH: 原子更新评价数与平均分（一条 SQL，注意赋值顺序）
+    SH->>SH: 重算热度 = base × 时间衰减
+    SH->>SH: 写 DB + 更新 ZSet 榜单 + 失效详情缓存
+    SH->>M: 投递 shop.hot.changed
+    M->>SE: 更新本地检索视图（检索即按新热度排序）
+    U->>SH: 查看门店/榜单 → 排序已变化
