@@ -19,6 +19,10 @@ x-app: &app
     # Sentinel 控制台：控制台跑在宿主（Windows）8090，容器经 VMnet8 网关回连宿主，需要放行 8090 入站；控制台也搬进容器后改成 sentinel-dashboard:8090。
     # 【注意】规则推送是「控制台 → 客户端 8719」的反向联接：只配了地址但控制台回不到容器时，表现为"机器列表看得到、规则推不下去"。
     LLMALL_SENTINEL_DASHBOARD: ${LLMALL_SENTINEL_DASHBOARD:-192.168.189.1:8090}
+    # 服务间内部凭证：与其余凭据同口径，必须由 deploy/.env 提供（缺失即报错，不用代码里的演示默认值）。
+    # 【注意】服务 yaml 里仍保留 ${LLMALL_INTERNAL_TOKEN:...} 的默认值，那是给「IDEA 裸跑读不到 .env」的开发路径用的；
+    #   容器路径一律走这里注入，两者不要混。
+    LLMALL_INTERNAL_TOKEN: ${LLMALL_INTERNAL_TOKEN:?请在 deploy/.env 中设置 LLMALL_INTERNAL_TOKEN}
     JAVA_OPTS: "-Xms64m -Xmx192m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dspring.jmx.enabled=false -Dfile.encoding=UTF-8 -Dserver.shutdown=graceful -Dspring.lifecycle.timeout-per-shutdown-phase=30s"
   networks:
     - local-life

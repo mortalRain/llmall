@@ -451,7 +451,16 @@ curl -b cookie.txt http://localhost:8090/app/llmall-cart-service/machines.json  
   | `REDIS_PASSWORD` | 同上 | 与 `LLMALL_REDIS_PW` 保持一致（VM 上是 `123456`，不是 `123`） |
   | `SEATA_CONSOLE_PASSWORD` / `SEATA_DB_PW` | `docker/seata/application.yml`（经 compose 注入） | 控制台账号与 TC 落库口令 |
   | `LLMALL_DB_PW` / `LLMALL_REDIS_PW` | `deploy/docker-compose-apps.yml` | 注入到应用容器 |
-  | `LLMALL_JKS_PASSWORD` | 5 个服务的 `application.yaml` | **唯一的例外**：保留可覆盖的默认值——私钥文件本身不入库，口令单独泄露不构成可用凭据；克隆后 `gen-jks.ps1` 用的也是同一个默认值 |
+  | `LLMALL_INTERNAL_TOKEN` | `deploy/docker-compose-apps.yml` | 服务间内部凭证。`.env.example` 里**故意留空**，由 `demo.ps1` 首次生成 `.env` 时用加密安全随机源填 32 位 hex（幂等：已有值不动） |
+  | `LLMALL_JKS_PASSWORD` | 5 个服务的 `application.yaml` | 保留可覆盖的默认值——私钥文件本身不入库，口令单独泄露不构成可用凭据；克隆后 `gen-jks.ps1` 用的也是同一个默认值 |
+
+  > **两条服务的 `application.yaml` 里保留默认值，是有意的边界，不是漏改**：
+  > - `LLMALL_JKS_PASSWORD`：同上（私钥不入库）。
+  > - `LLMALL_INTERNAL_TOKEN`：保留 `${LLMALL_INTERNAL_TOKEN:...}` 默认值是为了**让 IDEA 里裸跑服务这条
+  >   官方支持的开发路径继续可用**（IDEA 读不到 `deploy/.env`）。若把它改成 `${...:?}` 必填，
+  >   IDEA 裸跑会直接起不来，属可用性回退。
+  >   **适用边界**：该默认值**只适用于"仅本机、仅 IDEA 调试"**；容器部署一律走 `deploy/.env` 注入，
+  >   对外或对局域网开放的部署必须先换成随机值（否则知道这个默认串的人可以伪造任意用户身份）。
 
 > **⚠️ `${VAR:?}` 拦的是「变量没定义」，不是「值还是演示值」。**
 > `deploy/.env` 是由 `.env.example` **复制**出来的，因此那些演示值会**顺利通过** `${VAR:?}` 检查、
@@ -461,3 +470,24 @@ curl -b cookie.txt http://localhost:8090/app/llmall-cart-service/machines.json  
 >
 > **一句话**：这是**演示工程**，不是生产部署模板；`deploy/.env.example` 里的是演示值，
 > 对外部署前必须替换 `deploy/.env` 中的每一项并轮换。
+
+### 10.1 历史凭据声明（重要，请先读这段再决定要不要部署）
+
+本仓库的公开历史中已包含演示环境的数据库 / Redis / 内部凭证等口令。这些值自首次提交起
+即对外可见，应视为已泄露；任何在本机以外、或对局域网开放的部署，必须先轮换全部凭据
+再启动。本仓库不提供、也不声称提供生产级凭据管理。
+
+> 为什么不再重写历史：48 个提交、1 个 tag、以及可能存在的 fork 都会被牵动，而**重写历史
+> 并不能把"已经泄露"这件事变回"没泄露"** —— 所以处置方式是「承认 + 强制轮换」，而不是改写。
+> 判断依据见 `docs/面试问答手册.md` 相关小节与台账；**任何曾经公开过的值，一律按已泄露处理**。
+
+**部署前必须轮换的六类凭据**（只写"改哪里 / 要同步几处"，不写任何实际值）
+
+| # | 凭据 | 改哪里 | 需要同步的地方 |
+|---|---|---|---|
+| 1 | MySQL root | `deploy/.env` 的 `MYSQL_ROOT_PASSWORD` | 同文件的 `LLMALL_DB_PW`；若单独改数据库账号，`docker/seata/application.yml` 的 `SEATA_DB_PW` 一处 |
+| 2 | Redis | `deploy/.env` 的 `REDIS_PASSWORD` | 同文件的 `LLMALL_REDIS_PW`；Nacos 的 `shared-redis.yaml`；以及哨兵配置（主节点 + 3 个哨兵共 4 处） |
+| 3 | Seata 控制台账号 | `deploy/.env` 的 `SEATA_CONSOLE_PASSWORD` | 只有 `docker/seata/application.yml` 经 compose 注入这一处（建议连用户名一起换） |
+| 4 | Seata TC 落库 | `deploy/.env` 的 `SEATA_DB_PW` | 若与 MySQL root 复用，随第 1 条一起换；另需同步 `docker/seata/application.yml` |
+| 5 | JKS 私钥口令 | `scripts/gen-jks.ps1 -Password`（**重新生成 jks**，不是只改口令） | 5 个服务 `application.yaml` 的 `LLMALL_JKS_PASSWORD` 默认值 / 或设同名环境变量；轮换后**所有已签发 JWT 立即失效** |
+| 6 | 服务间内部 token | `deploy/.env` 的 `LLMALL_INTERNAL_TOKEN`（32 位 hex） | 全部 10 个服务都要拿到同一个值：容器走 `docker-compose-apps.yml` 注入，IDEA 裸跑需设环境变量或改 `application.yaml` 默认值 |

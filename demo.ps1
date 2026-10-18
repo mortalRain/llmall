@@ -81,6 +81,49 @@ function Get-EnvFileValue {
 $DbPw = Get-EnvFileValue $EnvFile 'MYSQL_ROOT_PASSWORD'
 if (-not $DbPw) { $DbPw = Get-EnvFileValue $EnvExample 'MYSQL_ROOT_PASSWORD' }
 if (-not $DbPw) { $DbPw = '123' }                            # 最后兜底：正常路径走不到（两个文件都应含该键）
+
+# deploy/.env 的**唯一**生成/补全实现：中间件段与应用段都调它。
+# 【为什么抽成函数】此前两段各写了一份"从 .env.example 复制"的逻辑，改一处漏一处就会出现
+#   "infra 用新值、apps 用旧值"的错位；本轮补内部凭证时又要在两处同时生效，所以先合并再改。
+# 【为什么必须幂等】demo.ps1 会被反复执行；.env 一旦存在且键非空就一个字都不能动，
+#   否则用户手改过的口令会被下一次运行覆盖。
+function Initialize-DeployEnv {
+    param(
+        [Parameter(Mandatory = $true)][string]$EnvFile,
+        [Parameter(Mandatory = $true)][string]$EnvExample
+    )
+    if (-not (Test-Path $EnvFile)) {
+        Copy-Item $EnvExample $EnvFile
+        $envText = [System.IO.File]::ReadAllText($EnvFile)
+        $envText = $envText -replace '(?m)^LLMALL_REDIS_HOST=.*$', 'LLMALL_REDIS_HOST=redis'
+        $envText = $envText -replace '(?m)^LLMALL_MQ_HOST=.*$', 'LLMALL_MQ_HOST=mq'
+        [System.IO.File]::WriteAllText($EnvFile, $envText, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Info '已由 deploy/.env.example 生成 deploy/.env（凭据为演示默认值，对外部署前请替换）'
+    }
+    else { Write-Info 'deploy/.env 已存在，沿用（不改动你的配置）' }
+
+    # 内部凭证（x-internal-token）等价于"可伪造任意用户身份"的钥匙：示例值故意留空，这里补一个随机的。
+    # 随机源必须加密安全 —— Get-Random 是伪随机且可预测，不能用。
+    # 幂等：键已存在且非空 → 直接返回，连写盘都不做。
+    if (Get-EnvFileValue $EnvFile 'LLMALL_INTERNAL_TOKEN') { return }
+
+    $bytes = New-Object byte[] 16
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+
+    $text = [System.IO.File]::ReadAllText($EnvFile)
+    if ($text -match '(?m)^LLMALL_INTERNAL_TOKEN=') {
+        $text = $text -replace '(?m)^LLMALL_INTERNAL_TOKEN=.*$', ('LLMALL_INTERNAL_TOKEN=' + $token)
+    }
+    else {
+        if (-not $text.EndsWith("`n")) { $text += "`n" }
+        $text += ('LLMALL_INTERNAL_TOKEN=' + $token + "`n")
+    }
+    [System.IO.File]::WriteAllText($EnvFile, $text, (New-Object System.Text.UTF8Encoding($false)))
+    # 不打印值本身：它一旦进终端/日志就等于没加密。
+    Write-Info '已为 deploy/.env 生成 LLMALL_INTERNAL_TOKEN（32 位 hex；值不打印，需要请看 deploy/.env）'
+}
 $DbName     = 'llmall-search'                                # EsBulkLoad 的读模型来源库
 
 # 宿主上 mysql 容器映射的端口：传 0 时按 MYSQL_HOST_PORT 环境变量解析，再缺省 3306。
@@ -463,14 +506,7 @@ try {
     # ------------------------------------------------------------ 2. 网络 + 中间件
     Write-Step '中间件：infra-lite + ES addon'
     # 凭据来自 deploy/.env（不入库）：缺失时由 .env.example 生成，infra 与 apps 两份 compose 共用同一份。
-    if (-not (Test-Path $EnvFile)) {
-        Copy-Item $EnvExample $EnvFile
-        $envText = [System.IO.File]::ReadAllText($EnvFile)
-        $envText = $envText -replace '(?m)^LLMALL_REDIS_HOST=.*$', 'LLMALL_REDIS_HOST=redis'
-        $envText = $envText -replace '(?m)^LLMALL_MQ_HOST=.*$', 'LLMALL_MQ_HOST=mq'
-        [System.IO.File]::WriteAllText($EnvFile, $envText, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Info '已由 deploy/.env.example 生成 deploy/.env（凭据为演示默认值，对外部署前请替换）'
-    }
+    Initialize-DeployEnv -EnvFile $EnvFile -EnvExample $EnvExample
     Invoke-Docker -DockerArgs @('network', 'create', $Network) -AllowFail -Quiet
     Invoke-Docker -DockerArgs @('compose', '--env-file', $EnvFile, '-f', $InfraCompose, 'up', '-d') | Out-Null
     # ES 只在 addon 里且不带 profile；infra-lite 的 ES 属于 profile full，不传 profile 就不会起，两者不冲突。
@@ -668,16 +704,8 @@ try {
     Write-Step ("应用：docker compose --profile $Profile up -d")
     Push-Location (Join-Path $RepoRoot 'deploy')
     try {
-        # .env 缺失时按文档从 .env.example 生成，并把三处地址改成容器名（本次中间件都在 local-life 网络里）
-        if (-not (Test-Path '.env')) {
-            Copy-Item '.env.example' '.env'
-            $envText = [System.IO.File]::ReadAllText((Join-Path (Get-Location) '.env'))
-            $envText = $envText -replace '(?m)^LLMALL_REDIS_HOST=.*$', 'LLMALL_REDIS_HOST=redis'
-            $envText = $envText -replace '(?m)^LLMALL_MQ_HOST=.*$', 'LLMALL_MQ_HOST=mq'
-            [System.IO.File]::WriteAllText((Join-Path (Get-Location) '.env'), $envText, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Info '已由 .env.example 生成 deploy/.env（Redis/MQ 指向容器名 redis / mq）'
-        }
-        else { Write-Info 'deploy/.env 已存在，沿用（不改动你的配置）' }
+        # .env 缺失时按文档从 .env.example 生成（同一份实现，见 Initialize-DeployEnv）。
+        Initialize-DeployEnv -EnvFile $EnvFile -EnvExample $EnvExample
         Invoke-Docker -DockerArgs @('compose', '-f', 'docker-compose-apps.yml', '--profile', $Profile, 'up', '-d') | Out-Null
     }
     finally { Pop-Location }
