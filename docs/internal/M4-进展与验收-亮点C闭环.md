@@ -70,7 +70,7 @@ GET    /follows/feed?lastId=         我的 Feed（滚动分页）
 
 ---
 
-## 二、本轮修掉/规避的 4 个真坑（面试可直接讲）
+## 二、本轮修掉/规避的 4 个真坑（可直接展开讲）
 
 ### 1. MQ 消息转换器不认 Java 时间类型
 原实现 `new Jackson2JsonMessageConverter()` 会**自建**一个干净的 ObjectMapper，因此：
@@ -160,7 +160,7 @@ Invoke-RestMethod -Uri "$gw/shops/hot?limit=5" | ConvertTo-Json -Depth 3
 
 ---
 
-## 五、面试追问预判
+## 五、常见追问预判
 
 | 追问 | 答题要点 |
 |---|---|

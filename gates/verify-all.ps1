@@ -97,7 +97,7 @@ if (-not $LedgerOnly) {
     $r.Output | Select-Object -Last 6
     Record '闸门自校验' '硬' $r.ExitCode
 
-    Section '6/8' '文档引用有效性（简历索引 / 问答手册里的 文件:行）'
+    Section '6/8' '文档引用有效性（亮点索引 / 决策问答里的 文件:行）'
     $r = Invoke-GateScript -Script (Join-Path $GateRoot 'check-doc-refs.ps1') -Arguments @('-Root', $RepoRoot)
     $r.Output | Select-Object -Last 10
     # 退出码 1 = 有引用失效（硬失败）；2 = 只有行号漂移且已给出新行号，属于可继续但要知道，按台账通道记。
