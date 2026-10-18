@@ -1,4 +1,6 @@
 # 基础设施补充编排：只补充 Seata 与 Elasticsearch / Kibana 栈，并接入同一容器网络（local-life），避免端口与数据卷冲突。
+# 【注意·端口绑定】同上（infra-lite）：宿主端口一律绑 127.0.0.1。ES / Kibana / Seata 控制台都是运维面，
+#   没有对外暴露的需求；从另一台机器访问会连不上，这是有意为之（需要时用 ssh 端口转发）。
 
 services:
   # Seata Server 1.5.2：与 SCA 2021.0.4.0 带的 seata 客户端 1.5.2 对齐（服务端版本需 ≥ 客户端）。
@@ -7,8 +9,8 @@ services:
     image: seataio/seata-server:1.5.2
     container_name: seata-server
     ports:
-      - "8091:8091"   # Seata 服务端口（客户端连接用）
-      - "7091:7091"   # 用户控制台（1.5.1 起才有，账号见 ./seata/application.yml）
+      - "127.0.0.1:8091:8091"   # Seata 服务端口（客户端连接用）
+      - "127.0.0.1:7091:7091"   # 用户控制台（1.5.1 起才有，账号见 ./seata/application.yml）
     environment:
       # 【注意】必须显式指定注册 IP：容器默认会把 172.x 容器内网 IP 注册进 Nacos，Windows/其它机器连不上。
       - SEATA_IP=${VM_IP:-192.168.189.128}
@@ -41,8 +43,8 @@ services:
       - es-data:/usr/share/elasticsearch/data
       - ./es/plugins:/usr/share/elasticsearch/plugins   # 把 IK 分词器解压到这里（目录名必须是 ik）
     ports:
-      - "9200:9200"
-      - "9300:9300"
+      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9300:9300"
     networks:
       - infra-net
     restart: unless-stopped
@@ -56,7 +58,7 @@ services:
       - I18N_LOCALE=zh-CN
       - TZ=Asia/Shanghai
     ports:
-      - "5601:5601"
+      - "127.0.0.1:5601:5601"
     depends_on:
       - elasticsearch
     networks:

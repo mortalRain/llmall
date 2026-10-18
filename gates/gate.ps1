@@ -1,4 +1,4 @@
-﻿# 注释工程化 · 统一校验闸门（第二轮）
+# 注释工程化 · 统一校验闸门（第二轮）
 #
 # 用途：证明一次改动「只动了注释」——代码逐 token / 逐行未变。
 #       按扩展名自动分派到对应的剥离器，调用者只需传文件清单。
@@ -39,11 +39,19 @@ $anyStore = Join-Path $base 'any.round2.txt'
 function Get-AnyTargets {
     Get-ChildItem $root -Recurse -File -Force -ErrorAction SilentlyContinue |
         Where-Object {
+            # 【注意】这里刻意用了两类判据，别为了"统一"把它们合并：
+            # 1) 任意深度的目录段（target / node_modules / .git / .idea）：每个**模块**都有自己的 target，
+            #    只能按"路径段是否出现"排除，不能只看仓库根；
+            # 2) 仓库根下的运行产物目录（logs / tmp）：**按相对仓库根的路径前缀**排除。
+            #    这里不能用名字通配（'*\logs\*'）—— 那会把名叫 logs / tmp 的**模块目录**一起误伤，
+            #    而 logs/（压测与冒烟产物）、tmp/（临时脚本）本来就只是工作痕迹，从根上按前缀排除才精确。
+            $rel = ($_.FullName.Substring($root.Length) -replace '^[\\/]+', '') -replace '\\', '/'
             $_.FullName -notlike '*\target\*' -and
             $_.FullName -notlike '*\node_modules\*' -and
             $_.FullName -notlike '*\.git\*' -and
             $_.FullName -notlike '*\.idea\*' -and
             $_.FullName -notlike (Join-Path $GateRoot '*') -and
+            -not ($rel -like 'logs/*' -or $rel -like 'tmp/*') -and
             $_.Length -lt 1MB -and          # 排除 sql\llmall-item.sql（36MB 数据导出，非脚本文本）
             ($_.Extension -in '.lua', '.sql', '.ps1', '.sh', '.js', '.toml', '.properties' -or $_.Name -like 'Dockerfile*' -or $_.Name -like '*.dockerignore')
         }
@@ -56,9 +64,10 @@ if ($Snapshot) {
         $total = ([System.IO.File]::ReadAllText($f.FullName) -split "\r?\n").Count
         "{0}`t{1}`t{2}`t{3}" -f $rel, (Get-Sha $lines), $lines.Count, $total
     }
-    # 用 .NET 显式写 UTF-8 无 BOM：Set-Content -Encoding UTF8 在 Windows PowerShell 5.1 会写 BOM，
-    # 同一份基线在两个宿主下产生不同字节，diff 时看不出是真改还是宿主差异。
-    [System.IO.File]::WriteAllLines($anyStore, $rows, (New-Object System.Text.UTF8Encoding($false)))
+    # 用 .NET 显式写 UTF-8 无 BOM + 固定 LF：Set-Content -Encoding UTF8 在 Windows PowerShell 5.1 会写 BOM，
+    # 而 WriteAllLines 用的是 Environment.NewLine（Windows 上是 CRLF）—— 两者都会让"同一份基线在两个宿主/
+    # 两个平台上产生不同字节"，diff 时看不出是真改还是环境差异。这里把编码与行尾都固定下来。
+    [System.IO.File]::WriteAllText($anyStore, (($rows -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
     Write-Output "已写非 Java/YAML 基线: $anyStore ($($rows.Count) 个文件)"
     exit 0
 }

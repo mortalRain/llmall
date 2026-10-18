@@ -453,5 +453,11 @@ curl -b cookie.txt http://localhost:8090/app/llmall-cart-service/machines.json  
   | `LLMALL_DB_PW` / `LLMALL_REDIS_PW` | `deploy/docker-compose-apps.yml` | 注入到应用容器 |
   | `LLMALL_JKS_PASSWORD` | 5 个服务的 `application.yaml` | **唯一的例外**：保留可覆盖的默认值——私钥文件本身不入库，口令单独泄露不构成可用凭据；克隆后 `gen-jks.ps1` 用的也是同一个默认值 |
 
+> **⚠️ `${VAR:?}` 拦的是「变量没定义」，不是「值还是演示值」。**
+> `deploy/.env` 是由 `.env.example` **复制**出来的，因此那些演示值会**顺利通过** `${VAR:?}` 检查、
+> compose 也能正常起来 —— 这道检查只能保证"你没忘记设这个键"，**不能**保证"你已经换过口令"。
+> 所以：对外部署前必须**人工逐项替换** `deploy/.env` 里的每一个凭据键并轮换；
+> 这一步没有任何自动化闸门兜底（凭据值不进仓库，也就没有可对比的判据），只能靠部署清单。
+>
 > **一句话**：这是**演示工程**，不是生产部署模板；`deploy/.env.example` 里的是演示值，
 > 对外部署前必须替换 `deploy/.env` 中的每一项并轮换。

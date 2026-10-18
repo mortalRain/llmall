@@ -11,6 +11,12 @@
 #   且新容器使用新数据卷（库表全空）；VM 场景改为接入现役容器：
 #   docker network connect local-life mysql && docker network connect local-life nacos && docker network connect local-life mq
 # 【注意】VM 上 RabbitMQ 容器名是 mq（不是 rabbitmq），Redis 不在容器里，须用宿主 IP 访问。
+# 【注意·端口绑定】本文件所有宿主端口映射一律绑 127.0.0.1，不监听 0.0.0.0：
+#   中间件没有任何"对外提供服务"的需求，绑到所有网卡等于把 MySQL/Redis/Nacos/RabbitMQ 管理台
+#   连同它们的认证面一起暴露给同网段。应用容器之间走 local-life 网络按容器名互访，不经过宿主端口，
+#   因此收紧之后本机浏览器/本机压测全部照旧。
+#   【副作用·有意】从另一台机器发起压测会连不上（宿主的 127.0.0.1 不可远程访问）；
+#   真需要远程压测时，改回 0.0.0.0 或用 ssh 端口转发，不要把绑定改回默认值当"修复"。
 
 services:
   mysql:
@@ -32,7 +38,7 @@ services:
       # 宿主端口可用 MYSQL_HOST_PORT 覆盖：本机已装原生 MySQL 服务（占着 3306）时设
       # MYSQL_HOST_PORT=3307 再 up 即可，不必停掉那套 MySQL。容器内端口恒为 3306，
       # 应用容器之间仍按容器名 + 3306 互访，不受影响；demo.ps1 的 -DbHostPort 是同一口径。
-      - "${MYSQL_HOST_PORT:-3306}:3306"
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     mem_limit: 512m
@@ -55,10 +61,10 @@ services:
     volumes:
       - ./redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     ports:
-      - "6379:6379"
-      - "26379:26379"                      # 三个哨兵端口映射到宿主，便于排障（应用走容器网络）
-      - "26380:26380"
-      - "26381:26381"
+      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:26379:26379"                      # 三个哨兵端口映射到宿主，便于排障（应用走容器网络）
+      - "127.0.0.1:26380:26380"
+      - "127.0.0.1:26381:26381"
     mem_limit: 224m
     restart: unless-stopped
 
@@ -73,8 +79,8 @@ services:
       NACOS_AUTH_ENABLE: "false"
       TZ: Asia/Shanghai
     ports:
-      - "8848:8848"
-      - "9848:9848"                       # Nacos 2.x 客户端 gRPC 端口，缺一则客户端连不上
+      - "127.0.0.1:8848:8848"
+      - "127.0.0.1:9848:9848"                       # Nacos 2.x 客户端 gRPC 端口，缺一则客户端连不上
     mem_limit: 640m
     restart: unless-stopped
 
@@ -108,8 +114,8 @@ services:
       # 延迟消息插件（.ez）：挂进镜像自带的插件目录，容器重建后不用重新 docker cp
       - ./mq-plugins/rabbitmq_delayed_message_exchange-3.12.0.ez:/opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange-3.12.0.ez:ro
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     mem_limit: 320m
     restart: unless-stopped
 
@@ -119,8 +125,8 @@ services:
     container_name: seata-server
     profiles: ["full"]
     ports:
-      - "8091:8091"
-      - "7091:7091"                         # 用户控制台端口（1.5.1 起提供）
+      - "127.0.0.1:8091:8091"
+      - "127.0.0.1:7091:7091"                         # 用户控制台端口（1.5.1 起提供）
     environment:
       # 【注意】注册 IP 必须显式指定，否则会把容器内网 IP（172.x）注册进 Nacos，宿主上的服务连不上
       SEATA_IP: ${VM_IP:-192.168.189.128}
@@ -151,7 +157,7 @@ services:
       - es-data:/usr/share/elasticsearch/data
       - ./es/plugins:/usr/share/elasticsearch/plugins
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9200:9200"
     mem_limit: 1g
     restart: unless-stopped
     # Kibana 不再编排（省 1G），调试索引直接用 curl 或浏览器 _cat API
