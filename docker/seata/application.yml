@@ -17,7 +17,8 @@ logging:
 console:
   user:
     username: seata                       # 控制台登录账号（http://<VM_IP>:7091）
-    password: seata
+    # 【注意】口令不写死在仓库里：由 compose 从 deploy/.env 注入 SEATA_CONSOLE_PASSWORD（缺失即起不来）
+    password: ${SEATA_CONSOLE_PASSWORD}
 
 seata:
   config:
@@ -45,7 +46,8 @@ seata:
       driver-class-name: com.mysql.cj.jdbc.Driver
       url: jdbc:mysql://192.168.189.128:3306/seata?useUnicode=true&characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
       user: root
-      password: "123"
+      # 【注意】口令不写死在仓库里：由 compose 从 deploy/.env 注入 SEATA_DB_PW（缺失即起不来）
+      password: ${SEATA_DB_PW}
       min-conn: 5
       max-conn: 30
       # 【注意】distributed_lock 是 1.5.x 新增的第 4 张表（建表见 sql/merged/03b-seata-server-1.5.2-upgrade.sql），缺表会导致定时任务抢不到锁

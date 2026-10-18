@@ -66,7 +66,21 @@ $Network    = 'local-life'                                   # 三份 compose �
 $NacosUrl   = 'http://127.0.0.1:8848'
 $GatewayUrl = 'http://127.0.0.1:8080'
 $DbUser     = 'root'
-$DbPw       = '123'                                          # docker/docker-compose-infra-lite.yml 的 MYSQL_ROOT_PASSWORD
+# 凭据统一从 deploy/.env 读（.env 不入库；缺失时第 2 步会由 .env.example 生成）。
+# 【注意】compose 里已经不再写任何口令：infra 的 MYSQL_ROOT_PASSWORD / REDIS_PASSWORD、
+# 应用的 LLMALL_DB_PW / LLMALL_REDIS_PW、Seata 的控制台与落库口令，全部由同一个 .env 提供。
+$EnvFile    = Join-Path $RepoRoot 'deploy\.env'
+$EnvExample = Join-Path $RepoRoot 'deploy\.env.example'
+function Get-EnvFileValue {
+    param([string]$Path, [string]$Key)
+    if (-not (Test-Path $Path)) { return $null }
+    $hit = Select-String -Path $Path -Pattern ('^' + [regex]::Escape($Key) + '=(.*)$') -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($hit) { return $hit.Matches[0].Groups[1].Value.Trim() }
+    return $null
+}
+$DbPw = Get-EnvFileValue $EnvFile 'MYSQL_ROOT_PASSWORD'
+if (-not $DbPw) { $DbPw = Get-EnvFileValue $EnvExample 'MYSQL_ROOT_PASSWORD' }
+if (-not $DbPw) { $DbPw = '123' }                            # 最后兜底：正常路径走不到（两个文件都应含该键）
 $DbName     = 'llmall-search'                                # EsBulkLoad 的读模型来源库
 
 # 宿主上 mysql 容器映射的端口：传 0 时按 MYSQL_HOST_PORT 环境变量解析，再缺省 3306。
@@ -448,8 +462,17 @@ try {
 
     # ------------------------------------------------------------ 2. 网络 + 中间件
     Write-Step '中间件：infra-lite + ES addon'
+    # 凭据来自 deploy/.env（不入库）：缺失时由 .env.example 生成，infra 与 apps 两份 compose 共用同一份。
+    if (-not (Test-Path $EnvFile)) {
+        Copy-Item $EnvExample $EnvFile
+        $envText = [System.IO.File]::ReadAllText($EnvFile)
+        $envText = $envText -replace '(?m)^LLMALL_REDIS_HOST=.*$', 'LLMALL_REDIS_HOST=redis'
+        $envText = $envText -replace '(?m)^LLMALL_MQ_HOST=.*$', 'LLMALL_MQ_HOST=mq'
+        [System.IO.File]::WriteAllText($EnvFile, $envText, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Info '已由 deploy/.env.example 生成 deploy/.env（凭据为演示默认值，对外部署前请替换）'
+    }
     Invoke-Docker -DockerArgs @('network', 'create', $Network) -AllowFail -Quiet
-    Invoke-Docker -DockerArgs @('compose', '-f', $InfraCompose, 'up', '-d') | Out-Null
+    Invoke-Docker -DockerArgs @('compose', '--env-file', $EnvFile, '-f', $InfraCompose, 'up', '-d') | Out-Null
     # ES 只在 addon 里且不带 profile；infra-lite 的 ES 属于 profile full，不传 profile 就不会起，两者不冲突。
     # -ExternalEs 时不动容器：ES 已在宿主原生装好（本机就是这种拓扑），起容器反而会抢 9200 端口。
     if ($ExternalEs) { Write-Info "ES 用外部实例：$EsUrl（不起 addon 容器）" }

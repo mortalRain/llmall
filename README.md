@@ -323,15 +323,25 @@ ES 默认起 addon 容器；若 ES 已在本机原生安装（含 IK 插件）�
 - **逐条验收**：`docs/注释验收清单-2026-10-15.md`。
 - **改注释必须过闸门**：用去注释指纹证明「只改注释、代码零改动」，命令见上节与 `gates/README.md`。
 
-## 七、配套文档（仓库外）
+## 七、配套文档
+
+**仓库内**（可直接被面试官点开）
 
 | 文档 | 内容 |
 |---|---|
-| `设计文档-v1.1.md` | 架构与服务划分、亮点设计方案 |
-| `M1/M2/M3/M4/M5/M6-进展与验收.md` | 各阶段实现细节、缺陷修复与验收步骤 |
-| `资源受限运行方案.md` | 16G 机器怎么跑起来（VM 内存、JVM 参数、最小启动集、ES 决策） |
-| `压测方案.md` / `locallife-benchmark.jmx` | 压测场景与脚本 |
-| `简历材料.md` / `面试问答手册.md` | 简历措辞与面试题答法 |
+| `docs/简历条目索引.md` | **简历每条断言 → 代码/文档行号**的索引表 + 30 秒演示路径 + 边界速查 |
+| `docs/面试问答手册.md` | 七章问答（电梯陈述 / 架构 / 选型 / 逐接口 / 踩坑 / 工程治理 / 陷阱题），每条要点带 `文件:行` 溯源 |
+| `docs/P-01~P-03` | 三份实测报告：支付单耗时定位、商品列表容量与阈值、Seata AT on/off 对照 |
+| `docs/已知偏差台账-2026-10-15.md` | 33 行登记（行行有 owner 与触发条件），台账闸门的红项都在这里 |
+| `gates/README.md` | 七道闸门、三态退出码、基线更新流程与覆盖边界 |
+
+**仓库外**（历史里程碑材料）
+
+| 文档 | 内容 |
+|---|---|
+| `设计文档-v1.1.md` | 架构与服务划分、亮点设计方案（同一份也在 `docs/` 内） |
+| `M1~M8-进展与验收.md` | 各阶段实现细节、缺陷修复与验收步骤（`docs/` 内） |
+| `资源受限运行方案.md` | 16G 机器怎么跑起来（VM 内存、JVM 参数、最小启动集） |
 
 ## 八、演进路线
 
@@ -429,15 +439,19 @@ curl -b cookie.txt http://localhost:8090/app/llmall-cart-service/machines.json  
 
 - **不入库的东西**（`.gitignore` 保证）：`target/`、`logs/`、`.env`、`*.jks`。
   其中 `llmall.jks` 是 **JWT 签名私钥**，首次 clone 后须先跑 `scripts/gen-jks.ps1` 生成，
-  否则网关与用户服务起不来（仓库里没有私钥，所以 yaml 中的 JKS 口令默认值单独存在时不可用）。
-- **仓库里保留的**：`docker/`、`nacos-config/` 与各服务 `application.yaml` 中的**本地演示默认凭据**
-  —— 它们只对"本机 + 私有 VM 的演示环境"有意义，**任何对外部署前必须替换并轮换**：
+  否则网关与用户服务起不来。
+- **凭据已在代码层外置**：`compose` 与 `seata` 配置里**不再有任何写死的口令**，全部改成
+  `${VAR:?…}`（缺失即报错退出，不会静默用默认值把环境起歪）；实际值只放在 **`deploy/.env`**，
+  而 `.env` 不入库，仓库里只有带演示值的 `deploy/.env.example`。
+  `demo.ps1` 会自动用示例值生成 `deploy/.env`（并把 Redis/MQ 改成容器名），所以**一键 demo 依旧是零配置**。
 
-  | 凭据 | 位置 | 换法 |
+  | 凭据键 | 用在哪 | 说明 |
   |---|---|---|
-  | MySQL root | `docker/docker-compose-infra-lite.yml:27` | 改 `MYSQL_ROOT_PASSWORD`，同步 `deploy/.env` |
-  | Redis | `docker/docker-compose-infra-lite.yml:51` | `REDIS_PASSWORD`（已支持环境变量） |
-  | Seata 控制台 / DB | `docker/seata/application.yml:20、48` | 改控制台账号与 DB 口令 |
-  | JKS 口令 | 5 个服务 `application.yaml` | `LLMALL_JKS_PASSWORD`（已有环境变量兜底） |
+  | `MYSQL_ROOT_PASSWORD` | `docker/docker-compose-infra-lite.yml` | 与 `LLMALL_DB_PW` 保持一致 |
+  | `REDIS_PASSWORD` | 同上 | 与 `LLMALL_REDIS_PW` 保持一致（VM 上是 `123456`，不是 `123`） |
+  | `SEATA_CONSOLE_PASSWORD` / `SEATA_DB_PW` | `docker/seata/application.yml`（经 compose 注入） | 控制台账号与 TC 落库口令 |
+  | `LLMALL_DB_PW` / `LLMALL_REDIS_PW` | `deploy/docker-compose-apps.yml` | 注入到应用容器 |
+  | `LLMALL_JKS_PASSWORD` | 5 个服务的 `application.yaml` | **唯一的例外**：保留可覆盖的默认值——私钥文件本身不入库，口令单独泄露不构成可用凭据；克隆后 `gen-jks.ps1` 用的也是同一个默认值 |
 
-> **一句话**：这是**演示工程**，不是生产部署模板；照搬上线前请先替换全部默认凭据。
+> **一句话**：这是**演示工程**，不是生产部署模板；`deploy/.env.example` 里的是演示值，
+> 对外部署前必须替换 `deploy/.env` 中的每一项并轮换。

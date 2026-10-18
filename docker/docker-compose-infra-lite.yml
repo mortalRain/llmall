@@ -24,7 +24,9 @@ services:
       - --collation-server=utf8mb4_general_ci
       - --default-time-zone=+08:00
     environment:
-      MYSQL_ROOT_PASSWORD: "123"           # 【注意】须与各服务 llmall.db.pw 一致
+      # 【注意】口令不再硬编码：来自 deploy/.env（不入库），由 demo.ps1 以 --env-file 传入。
+      # 缺失时 compose 直接报错退出，而不是静默用某个默认值把环境起歪。
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 deploy/.env 中设置 MYSQL_ROOT_PASSWORD（示例值见 deploy/.env.example）}
       TZ: Asia/Shanghai
     ports:
       # 宿主端口可用 MYSQL_HOST_PORT 覆盖：本机已装原生 MySQL 服务（占着 3306）时设
@@ -48,7 +50,8 @@ services:
     environment:
       # 【注意】口令须与各服务 application-local.yaml / Nacos 的 llmall.redis.pw 一致：
       # VM 上为 123456（不是 123），写错表现为启动即 Redis 连接失败。
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-123456}
+      # 口令本身不写在这里：来自 deploy/.env（不入库），缺失时 compose 直接报错。
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?请在 deploy/.env 中设置 REDIS_PASSWORD（示例值见 deploy/.env.example）}
     volumes:
       - ./redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     ports:
@@ -121,6 +124,9 @@ services:
     environment:
       # 【注意】注册 IP 必须显式指定，否则会把容器内网 IP（172.x）注册进 Nacos，宿主上的服务连不上
       SEATA_IP: ${VM_IP:-192.168.189.128}
+      # 控制台账号与 TC 落库口令：来自 deploy/.env（不入库），由 seata/application.yml 以 ${...} 引用。
+      SEATA_CONSOLE_PASSWORD: ${SEATA_CONSOLE_PASSWORD:?请在 deploy/.env 中设置 SEATA_CONSOLE_PASSWORD}
+      SEATA_DB_PW: ${SEATA_DB_PW:?请在 deploy/.env 中设置 SEATA_DB_PW}
       # 【注意】时区统一 CST：镜像为 Alpine，内部无时区库，只挂 /etc/localtime 时 JVM 仍按 UTC 打日志，
       # 故需连宿主 /usr/share/zoneinfo 一起挂载，JDK 才能解析到 Asia/Shanghai。
       TZ: Asia/Shanghai
