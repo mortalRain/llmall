@@ -1,66 +1,102 @@
-# 同城生活电商平台
+# 同城生活电商平台 · llmall
 
-> **一句话定位**：**10 个服务、一服务一库**的同城生活电商后端（1 网关 + 9 业务域），跑通
-> 「逛门店 → 买套餐 → 下单支付 → 到店核销 → 写评价 → 门店热度/榜单」的完整业务闭环。
-> 亮点不是"写完了"，而是**每条都带可复现的机器判据**：八道工程闸门、端到端 34 项断言、压测 + 账实核对。
+> **一句话**：**10 个服务、一服务一库**的同城生活电商后端（1 个网关 + 9 个业务域），跑通
+> 「逛门店 → 买套餐 → 下单支付 → 到店核销 → 写评价 → 门店热度/榜单」的完整闭环。
 >
-> **技术栈**：Spring Boot 2.7 · Spring Cloud Alibaba 2021.0 · Nacos · OpenFeign · Gateway · Sentinel ·
-> RabbitMQ · Redis · Elasticsearch 7.17 · MySQL 8 · MyBatis-Plus · Seata AT（可切开关，默认关）· Docker · JMeter
+> 亮点不在于"写完了"，而在于**每条结论都带可复现的机器判据**：八道工程闸门、端到端 34 项断言、
+> 压测 + 账实核对。
 
-**三条一眼能看懂的数字**（口径与原始数据见「实测结果」、`benchmark/README.md`、`docs/P-01~P-03`）
+![Java](https://img.shields.io/badge/Java-11-informational)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.18-6DB33F)
+![Spring Cloud Alibaba](https://img.shields.io/badge/Spring%20Cloud%20Alibaba-2021.0.6.2-2F4858)
+![Docker](https://img.shields.io/badge/Docker-compose-2496ED)
+![MySQL](https://img.shields.io/badge/MySQL-8-4479A1)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-3.x-FF6600)
+![Elasticsearch](https://img.shields.io/badge/Elasticsearch-7.17-005571)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+**三条一眼能看懂的数字**（口径与原始数据见 [§6 实测数据](#6-实测数据)、`benchmark/README.md`、`docs/P-01`~`P-03`）
 
 | 维度 | 结果 |
 |---|---|
 | **资金安全** | 50 并发 × 60 秒写链路：**1,371 次支付成功 ⇔ 余额减少 35,097,600 分 = 25,600 × 1371.0**，一单一张支付单，并发双击只扣一次 |
 | **读路径性能** | Feed 收件箱 100 并发 P99 **84 ms**、**每请求恒 1.0 条 SQL**（无 N+1）；ES 检索 P99 **47 ms** |
-| **工程化** | **八道闸门 + 三态退出码 + 33 行台账**；端到端冒烟 **34 项通过 / 0 失败**；改一行配置也会被闸门精确点名 |
+| **工程化** | **八道闸门 + 三态退出码 + 39 行台账**；端到端冒烟 **34 项通过 / 0 失败**；改一行配置也会被闸门精确点名 |
+
+**目录**：[系统全景](#1-系统全景) · [核心链路](#2-核心链路) · [部署形态](#3-部署形态) ·
+[快速开始](#4-快速开始) · [工程治理](#5-工程治理八道闸门) · [实测数据](#6-实测数据) ·
+[选型取舍](#7-技术选型与取舍) · [目录结构](#8-目录结构) · [文档导航](#9-文档导航) ·
+[安全须知](#10-安全须知) · [路线图](#11-路线图)
 
 ---
 
-## 一、架构总览
+## 1. 系统全景
+
+### 1.1 分层架构
+
+客户端只认网关；业务服务之间只经 `llmall-api` 的 Feign 契约调用；跨域的写扩散一律走 MQ 事件，
+不在同一次请求里串起来。
 
 ```mermaid
-graph TB
-    Client[前端 / 压测客户端] --> GW[llmall-gateway :8080<br/>统一鉴权 · 限流 · 剥离伪造头]
+flowchart TB
+    CLIENT["演示前端 / 压测客户端"]
 
-    GW --> USER[llmall-user-service :8084<br/>账号 · 地址 · 积分/会员]
-    GW --> SHOP[llmall-shop-service :8087<br/>门店 · 热度榜 · GEO · UV]
-    GW --> ITEM[llmall-item-service :8081<br/>商品/套餐 · 库存与流水]
-    GW --> CART[llmall-cart-service :8082<br/>购物车]
-    GW --> TRADE[llmall-trade-service :8085<br/>订单 · 本地消息表 · 对账]
-    GW --> PAY[llmall-pay-service :8086<br/>支付回调]
-    GW --> PROMO[llmall-promotion-service :8088<br/>优惠券/营销]
-    GW --> CONTENT[llmall-content-service :8089<br/>评价 · 点赞 · 关注 · Feed]
-    GW --> SEARCH[llmall-search-service :8093<br/>搜索/热词]
-
-    USER -. Feign via llmall-api .-> SHOP
-    CONTENT -. 校验门店 .-> SHOP
-
-    subgraph MQ[RabbitMQ]
-        E1[content.topic<br/>review.created]
-        E2[llmall.trade.topic<br/>order.paid]
-        E3[shop.topic<br/>shop.hot.changed]
+    subgraph EDGE["接入层"]
+        GW["llmall-gateway :8080<br/>路由 · JWT 签发与验签 · 限流 · 剥离客户端伪造头"]
     end
-    CONTENT --> E1 --> SHOP
-    TRADE --> E2
-    E2 --> USER
-    E2 --> SHOP
-    SHOP --> E3 --> SEARCH
 
-    subgraph INFRA[基础设施 · Docker]
-        NACOS[(Nacos 注册/配置)]
-        REDIS[(Redis 缓存/ZSet/GEO/HLL)]
-        MYSQL[(MySQL 一服务一库)]
+    subgraph BIZ["业务层 · 9 个领域服务（一服务一库）"]
+        direction LR
+        USER["llmall-user-service :8084<br/>账号 · 地址 · 积分"]
+        SHOP["llmall-shop-service :8087<br/>门店 · 热度 · 榜单 · GEO"]
+        ITEM["llmall-item-service :8081<br/>商品/套餐 · 库存"]
+        CART["llmall-cart-service :8082<br/>购物车"]
+        TRADE["llmall-trade-service :8085<br/>订单 · 本地消息表 · 对账"]
+        PAY["llmall-pay-service :8086<br/>支付单 · 回调"]
+        PROMO["llmall-promotion-service :8088<br/>优惠券 · 秒杀"]
+        CONTENT["llmall-content-service :8089<br/>评价 · 点赞 · 关注 · Feed"]
+        SEARCH["llmall-search-service :8093<br/>检索 · 热词"]
     end
+
+    subgraph MID["异步层"]
+        MQ[("RabbitMQ<br/>领域事件 / 延迟消息 / 死信")]
+    end
+
+    subgraph INFRA["基础设施层"]
+        direction LR
+        NACOS[("Nacos<br/>注册 / 配置")]
+        MYSQL[("MySQL 8<br/>一服务一库")]
+        REDIS[("Redis<br/>缓存 / ZSet / GEO / HLL")]
+        ES[("Elasticsearch 7.17<br/>门店检索索引")]
+    end
+
+    CLIENT -->|"HTTP"| GW
+    GW -->|"lb:// 服务名"| BIZ
+    BIZ --> MQ
+    MQ --> BIZ
+    BIZ --> MYSQL
+    BIZ --> REDIS
+    SEARCH --> ES
+    BIZ -.->|"注册与拉取配置"| NACOS
+
+    classDef edge fill:#e8f0fb,stroke:#4E7BA9,stroke-width:2px,color:#16202E
+    classDef biz fill:#f5f9fc,stroke:#6695C4,color:#16202E
+    classDef inf fill:#fbf7ef,stroke:#C8912F,color:#16202E
+    class GW edge
+    class USER,SHOP,ITEM,CART,TRADE,PAY,PROMO,CONTENT,SEARCH biz
+    class MQ,MYSQL,REDIS,ES,NACOS inf
 ```
 
-**服务与数据归属（一服务一库）**
+### 1.2 服务与数据归属
+
+「一个服务 = 一个业务能力 + 独占数据 + 可独立演进」，没有跨库 JOIN，也没有共享表。
 
 | 服务 | 端口 | 独占库 | 职责 |
 |---|---|---|---|
 | llmall-gateway | 8080 | — | 路由、JWT 签发/验签、限流、剥离伪造用户头 |
 | llmall-user-service | 8084 | llmall-user | 账号（密码/验证码双通道）、地址、积分与流水、签到 |
-| llmall-shop-service | 8087 | llmall-shop | 门店/类型、缓存三兄弟、热度分、ZSet 榜单、GEO、UV |
+| llmall-shop-service | 8087 | llmall-shop | 门店/类型、缓存三件套、热度分、ZSet 榜单、GEO、UV |
 | llmall-item-service | 8081 | llmall-item | 商品/套餐、库存扣减与流水、门店套餐查询 |
 | llmall-cart-service | 8082 | llmall-cart | 购物车 |
 | llmall-trade-service | 8085 | llmall-trade | 订单（实物/团购券）、本地消息表、重试与对账 |
@@ -70,106 +106,368 @@ graph TB
 | llmall-search-service | 8093 | llmall-search | 门店检索（ES 与 MySQL 读模型双引擎，`engine=auto` 优先 ES、不可用时自动回落）、热词与建议、搜索历史 |
 | （规划中） | — | — | 站内信：**未实现**，仓库内无对应模块与配置 |
 
-> **端口 8090 留给 Sentinel 控制台**（可选部署）。注意 Sentinel Dashboard 默认端口是 **8080，会与网关冲突**，
-> 启动时必须显式指定 `-Dserver.port=8090`；10 个业务/网关服务的客户端地址已统一为
-> `${llmall.sentinel.dashboard:192.168.189.128:8090}`（见「Sentinel 控制台」一节）。
+> **端口口径**：上表是本项目**唯一**的端口来源，其余文档一律引用这里。
+> **8090 预留给 Sentinel 控制台**——注意其默认端口是 8080、会与网关冲突，启动时必须显式
+> `-Dserver.port=8090`（见 [`deploy/部署说明.md`](deploy/部署说明.md)）。
 
 ---
 
-## 二、三条核心链路
+## 2. 核心链路
 
-### 1）统一鉴权与身份透传（含防伪造加固）
+### 2.1 统一鉴权与身份透传（含防伪造加固）
+
+鉴权只在网关做一次；下游靠**可信请求头 + ThreadLocal**，Feign 调用自动透传。
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant C as 客户端
-    participant G as 网关
+    participant G as llmall-gateway
     participant S as 业务服务
-    C->>G: 请求 + authorization
-    G->>G: ① 剥离客户端伪造的 user-info 头
-    G->>G: ② 验签 JWT（区分"过期"与"非法"）
-    alt access 过期
-        G->>G: 用 x-refresh-token 校验白名单
-        G-->>C: 响应头 x-access-token（无感刷新）
+    participant R as Redis
+
+    C->>G: 请求（authorization: access token）
+    G->>G: ① 剥离客户端自带的 user-info 头
+    G->>G: ② 验签 JWT（区分"已过期"与"非法"）
+    alt access token 已过期
+        G->>R: 校验 x-refresh-token 是否在白名单
+        R-->>G: 命中
+        G-->>C: 响应头 x-access-token（前端无感刷新）
     end
-    G->>G: ③ 查令牌黑名单（登出后立即失效）
-    G->>S: 转发并写入可信 user-info
-    S->>S: 拦截器 → UserContext(ThreadLocal)
-    S->>S: Feign 调下游时自动透传
+    G->>R: ③ 查令牌黑名单（登出后立即失效）
+    R-->>G: 未命中 → 放行
+    G->>S: 转发 + 写入可信 user-info 头
+    S->>S: 拦截器 → UserContext（ThreadLocal）
+    S->>S: Feign 调下游时自动透传该身份
 ```
 
-### 2）跨域最终一致性（本地消息表 + 三层幂等 + 对账）
+**这一条修复过的真问题**：免鉴权路径曾可直接伪造 `user-info` 冒充任意用户（越权）。
+现在的做法是**入口无条件剥离**客户端提供的身份头，只信任网关写入的那一份。
+
+### 2.2 下单 → 支付 → 积分/销量（跨域最终一致性）
+
+业务成功 ⇒ 消息必在：消息表与业务数据**同一个本地事务**提交，投递失败靠重试与对账补齐。
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant P as llmall-pay-service
     participant T as llmall-trade-service
     participant M as RabbitMQ
     participant U as llmall-user-service
     participant SH as llmall-shop-service
+
     P->>T: 支付成功回调
     T->>T: ① 条件更新订单 status 1→2（幂等）
-    T->>T: ② 同一事务写 message_log（业务成功⇒消息必在）
-    T->>M: ③ 提交后投递 order.paid
-    M->>U: 加积分 + 记流水（幂等）
-    M->>SH: 累加门店销量 + 重算热度（幂等）
-    Note over T: 投递失败 → 指数退避重试（5s→…→10min）
+    T->>T: ② 同一事务写 message_log（业务成功 ⇒ 消息必在）
+    T->>M: ③ 事务提交后投递 order.paid
+    M->>U: 消费 → 加积分 + 记流水（幂等键去重）
+    M->>SH: 消费 → 累加门店销量 + 重算热度（幂等）
+    Note over T: 投递失败 → 指数退避重试 5s → … → 10min
     Note over T: 每 5 分钟对账：问下游"处理了吗" → 未处理则补偿重发
 ```
 
-### 3）评价 → 门店热度 → 榜单排序（准实时闭环）
+**三层幂等**：生产（`message_log` 唯一键）、消费（消费记录唯一键）、业务（业务唯一键），
+绝不假设 MQ 不重复。
+
+### 2.3 评价 → 门店热度 → 榜单排序（准实时闭环）
+
+门店排序从 T+1 批处理改成**事件驱动的秒级更新**：写路径一条 SQL 原子更新，读路径只读 ZSet。
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant U as 用户
     participant CT as llmall-content-service
     participant M as RabbitMQ
     participant SH as llmall-shop-service
+    participant SE as llmall-search-service
+
     U->>CT: 发布评价（评分 1~5）
     CT->>SH: Feign 校验门店存在
     CT->>CT: 评价落库 + 推送粉丝 Feed
-    CT->>M: 提交后投递 review.created
+    CT->>M: 事务提交后投递 review.created
     M->>SH: 消费事件
     SH->>SH: 原子更新评价数与平均分（一条 SQL，注意赋值顺序）
     SH->>SH: 重算热度 = base × 时间衰减
-    SH->>SH: 写 DB + ZSet 榜单 + 失效详情缓存
+    SH->>SH: 写 DB + 更新 ZSet 榜单 + 失效详情缓存
     SH->>M: 投递 shop.hot.changed
-    M->>SEARCH: 更新本地搜索视图（检索即按新热度排序）
-    U->>SH: 查看门店/榜单（排序已变化）
+    M->>SE: 更新本地检索视图（检索即按新热度排序）
+    U->>SH: 查看门店/榜单 → 排序已变化
 ```
+
+### 2.4 订单状态机
+
+状态迁移全部靠**条件更新**（`WHERE status = 期望旧值`）实现，并发下只有一个请求能迁移成功。
+
+```mermaid
+stateDiagram-v2
+    [*] --> 待支付: 创建订单（1）
+    待支付 --> 已支付: 支付回调（1→2，条件更新）
+    待支付 --> 已取消: 超时或主动取消（1→5）
+    已支付 --> 已核销: 到店核销（2→7，团购券）
+    已支付 --> 已取消: 退款关闭（2→5）
+    已核销 --> [*]
+    已取消 --> [*]
+```
+
+> 字典口径：`1 待支付` / `2 已支付（待发货或待核销）` / `5 已取消` / `7 已核销`，
+> 与 `Order.STATUS_*` 逐值一致（由闸门 7「字典一致性」持续校验）。
 
 ---
 
-## 三、快速开始（本地开发）
+## 3. 部署形态
+
+应用与中间件跑在同一个 Docker 网络上，容器间按容器名互访；对外只发布网关端口。
+
+```mermaid
+flowchart LR
+    USERX["浏览器 / curl / JMeter"]
+
+    subgraph HOST["单台宿主机（开发机或云服务器）"]
+        direction TB
+        subgraph NET["docker network · local-life"]
+            direction TB
+            subgraph APP["应用容器 · 一容器一服务"]
+                GWC["llmall-gateway<br/>:8080"]
+                APPS["9 个业务服务<br/>:8081 ~ :8093"]
+            end
+            subgraph MIDDLE["中间件容器"]
+                MY[("mysql<br/>:3306")]
+                RD[("redis<br/>:6379")]
+                NA[("nacos<br/>:8848")]
+                MQC[("rabbitmq<br/>:5672")]
+                ESC[("elasticsearch<br/>:9200")]
+            end
+        end
+        ENVF["deploy/.env<br/>口令与地址，不入库"]
+        JKS["llmall.jks<br/>JWT 私钥，不入库"]
+    end
+
+    USERX -->|"只发布 8080"| GWC
+    APPS --> MY
+    APPS --> RD
+    APPS --> NA
+    APPS --> MQC
+    APPS --> ESC
+    ENVF -.->|"compose 注入"| APPS
+    JKS -.->|"卷挂载"| APPS
+
+    classDef app fill:#f5f9fc,stroke:#6695C4,color:#16202E
+    classDef mid fill:#fbf7ef,stroke:#C8912F,color:#16202E
+    class GWC,APPS app
+    class MY,RD,NA,MQC,ESC mid
+```
+
+| 形态 | 适用场景 | 编排文件 |
+|---|---|---|
+| **本地中间件 + IDEA 跑服务** | 日常开发、单点调试 | `docker/docker-compose-infra-lite.yml` |
+| **全量容器化** | 演示环境、云服务器 | `deploy/docker-compose-apps.yml`（`core` / `full` 两个 profile） |
+| **复用外部 ES** | 本机已装 Elasticsearch + IK | 不启动 `addon`，用 `-ExternalEs` 指向现有实例 |
+
+完整步骤、内存口径、时区口径与排障表见 **[`deploy/部署说明.md`](deploy/部署说明.md)**。
+
+---
+
+## 4. 快速开始
+
+### 4.1 三条命令跑通（推荐）
+
+```powershell
+pwsh -File demo.ps1 -Reset     # 停容器 + 删卷 + 删网络（幂等）
+pwsh -File demo.ps1            # 建中间件 → 建库灌数 → 导 Nacos → 灌 ES → 起服务 → 冒烟
+pwsh -File demo.ps1 -Down      # 收尾（加 -Volumes 连数据卷一起删）
+```
+
+`demo.ps1` 只**编排仓库里既有的材料**，不重造任何东西：`mvn package` + `deploy/Dockerfile` 构建单镜像 →
+`docker/docker-compose-infra-lite.yml` + `docker/docker-compose-addon.yml` 的 `elasticsearch` 起中间件 →
+按 `sql/merged/README.md` 的顺序建库灌数（**52 冻结不执行**，执行前先跑 `52a` 只读清点并要求 verdict = 0）→
+Nacos Open API 导入 `nacos-config/*.yaml` 与 `gateway-routes.json` → `gates/EsBulkLoad.java` + `es-shop-mapping.json` 灌 ES →
+`deploy/docker-compose-apps.yml --profile full` 起应用 → `scripts/MallE2E.java` 冒烟
+（结果写进 `logs/demo/demo-report-*.md`，含 `docker stats` 峰值内存）。
+
+前置：**Docker**（缺失时脚本在预检阶段退出码 2 并给出提示）、JDK 11 与 Maven（`-SkipBuild` 可复用已有镜像）。
+只有 Windows PowerShell 5.1 的机器同样可用。`--profile` 默认 `full` 而不是 `core`：冒烟链路要
+trade/cart/pay/promotion/search，`core` 起不全必然红。
+
+### 4.2 手工起（IDEA + 本机中间件）
 
 ```bash
 # 1) 中间件（低内存版：MySQL + Redis + Nacos + RabbitMQ，约 1.6G）
 docker network create local-life
-docker compose -f ../docker/docker-compose-infra-lite.yml up -d
+docker compose -f docker/docker-compose-infra-lite.yml up -d
 
 # 2) 建库建表：按 sql/merged/README.md 的顺序导入
 # 3) 导入 Nacos 共享配置：见 nacos-config/README.md
-# 4) 启动服务（IDEA 里按里程碑最小启动集跑，别一次全起）
+# 4) 启动服务（按链路最小集启动，不要一次全起）
 #    建议 JVM 参数：-Xms64m -Xmx192m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -XX:TieredStopAtLevel=1
 
-# 5) 验证
+# 5) 生成 JWT 私钥（首次 clone 必须做，否则网关与用户服务起不来）
+pwsh -File scripts/gen-jks.ps1
+
+# 6) 验证
 curl http://localhost:8080/shops/1
-pwsh -File ../scripts/verify-auth.ps1        # 亮点 A 端到端验收
+pwsh -File scripts/verify-auth.ps1          # 鉴权链路端到端验收
 ```
 
-**部署到服务器**：见 `deploy/部署说明.md`（Dockerfile + docker-compose-apps.yml + 环境变量模板）。
-**压测**：见 `../benchmark/压测方案.md`（JMeter 计划 + 三组对比实验）。
+### 4.3 演示前端
+
+`frontend/index.html` 是单文件、零依赖的演示台，双击即可打开（需后端已起），覆盖门店热度榜、
+发布评价后榜单实时变化、登录与积分流水。详见 [`frontend/README.md`](frontend/README.md)。
 
 ---
 
-## 四、技术选型与取舍（面试重点）
+## 5. 工程治理：八道闸门
+
+「只改注释、代码零改动」这句话在本仓库里不是承诺，而是**可复现的机器判据**。
+闸门工具集、现行基线与自校验依赖都随仓库交付（`gates/`），clone 下来就能复现。
+
+```mermaid
+flowchart LR
+    A["一次改动"] --> B1["① Java 指纹"]
+    A --> B2["② YAML 指纹"]
+    A --> B3["③ Lua/SQL/脚本指纹"]
+    A --> B4["④ 注释内容质量"]
+    A --> B5["⑤ 闸门自校验"]
+    A --> B6["⑥ 文档引用有效性"]
+    A --> B7["⑦ 字典一致性"]
+    A --> B8["⑧ Feign 禁重试一致性"]
+    B1 --> C{"汇总判定"}
+    B2 --> C
+    B3 --> C
+    B4 --> C
+    B5 --> C
+    B6 --> C
+    B7 --> C
+    B8 --> C
+    C -->|"全部通过"| D["退出码 0 · 全绿"]
+    C -->|"硬闸门失败"| E["退出码 1 · 必须修"]
+    C -->|"仅台账闸门报已登记偏差"| F["退出码 2 · 核对台账"]
+
+    classDef hard fill:#e8f0fb,stroke:#4E7BA9,color:#16202E
+    classDef ledger fill:#fbf7ef,stroke:#C8912F,color:#16202E
+    classDef ok fill:#e9f7ef,stroke:#2E8B57,color:#16202E
+    classDef bad fill:#fdecea,stroke:#B03A2E,color:#16202E
+    classDef warn fill:#fef5e7,stroke:#B9770E,color:#16202E
+    class B1,B2,B3,B4,B5,B6 hard
+    class B7,B8 ledger
+    class D ok
+    class E bad
+    class F warn
+```
+
+**一条运行命令**（仓库根目录）：
+
+```powershell
+pwsh -File gates\verify-all.ps1            # 八道闸门 + 全量编译；-SkipBuild 只跑分析闸门
+```
+
+只有 Windows PowerShell 5.1 的机器同样可用：`powershell -ExecutionPolicy Bypass -File gates\verify-all.ps1 -SkipBuild`
+（闸门不要求 `PATH` 上有 `pwsh`——谁跑起闸门，子脚本就用同一个宿主跑；两种宿主下结论与退出码一致）。
+
+**八道闸门各拦什么**
+
+| # | 闸门 | 拦什么 | 判据 | 类别 |
+|---|---|---|---|---|
+| 1 | Java 指纹 | 代码语义或**书写形态**被改 | FP1（token 流）= 0 且 FP2（代码行序列）= 0，且无「未被基线覆盖」的文件 | 硬 |
+| 2 | YAML 指纹 | 配置项、缩进、结构被改 | 同上 | 硬 |
+| 3 | Lua / SQL / 脚本指纹 | 非 Java/YAML 文件的代码被改 | 剥注释后代码行序列 SHA256 逐文件一致 | 硬 |
+| 4 | 内容质量 | 11 类不该出现在注释里的东西 | HTML 标签 / 粗体 / 装饰横幅 / 历史叙述 / 实测叙述 / 口语化 / 待办标记 / 审计标签 / 迁移叙述 / 变更叙述 / 模板残留 = 全 0 | 硬 |
+| 5 | 闸门自校验 | 闸门**自己**出错 | 34 个用例全过（剥离规则、内容规则、端到端指纹、Feign 重试的运行时对照） | 硬 |
+| 6 | 文档引用 | 文档里的 `文件:行` 指不到东西 | 文件在库 + 行号不越界 + 该处非空 + 与成文时逐行一致（区间另判整块迁移）；判不了的单独计数披露 | 硬（失效为硬失败；仅行号漂移时按台账通道记 2） |
+| 7 | 字典一致性 | DDL 的取值与代码对不上 | 取值冲突 = 0、库名指向错误 = 0、同表同列表述不一 = 0 | 台账 |
+| 8 | Feign 一致性 | 有写调用的服务漏配禁重试 | 用到写方法的服务必须显式引入 `NoRetryFeignConfig` | 台账 |
+
+**三态退出码**（刻意分开，避免把「闸门失效」和「已登记偏差」混为一谈）
+
+| 退出码 | 含义 | 该怎么办 |
+|---|---|---|
+| `0` | 全绿 | — |
+| `1` | **硬闸门失败** —— 闸门失效，或出现未登记的违规 | **必须修**，不得继续 |
+| `2` | 硬闸门全过，台账闸门报出**已登记**的待处理偏差 | 逐条核对 [`docs/已知偏差台账-2026-10-15.md`](docs/已知偏差台账-2026-10-15.md) |
+
+**当前真实输出**（pwsh 7.6.6 + JDK 11，最近一次执行）
+
+```text
+运行环境
+  仓库根      : <本地仓库路径>
+  JDK         : OpenJDK 11.0.32.1 LTS
+  PowerShell  : 7.6.6 (Core)
+  Maven       : Apache Maven 3.9.6
+
+【1/8】Java 去注释指纹（298 文件）      FP1 代码语义变更 : 0   FP2 代码格式变更 : 0   结论: 通过
+【2/8】YAML 去注释指纹（42 文件）       FP1 配置内容变更 : 0   FP2 配置格式变更 : 0   结论: 通过
+【3/8】Lua / SQL / 脚本指纹             结论: 通过 —— 剥离注释后，代码逐行未变
+【4/8】注释内容质量（11 条规则）        扫描文件 : 329   11 条规则全部 0 处   结论: 通过
+【5/8】闸门自校验（34 用例）            通过 34 / 失败 0   结论: 全过
+【6/8】文档引用有效性                   引用 480 ｜ 通过 476 ｜ 平移 0 ｜ 失效 0 ｜ 跳过 4   结论: 通过
+【7/8】字典与跨库引用一致性             ① 取值冲突 0   ② 疑似死状态 6（真候选 2 / 口径误报 4）   ③ 0   ④ 0   结论: 通过
+【8/8】Feign 禁重试一致性               6 个客户端；4 个有写调用的服务全部已显式禁用   结论: 通过
+【BUILD】全量编译（13 模块）            [INFO] BUILD SUCCESS
+
+闸门汇总：八道分析闸门 + 全量编译全部 PASS，退出码 0 —— 全绿
+```
+
+完整判据、基线更新流程与覆盖边界见 [`gates/README.md`](gates/README.md)。
+
+**开发约定：注释规范**
+
+- **规范正文**：[`docs/注释规范.md`](docs/注释规范.md) —— 八类注释（类 / 方法 / 行内 / 风险警示 / 配置 / Lua / SQL / TODO）的写法，以及各模块必须写清的口径（JWT 闭环、库存口径、三态语义、会话水位等）。
+- **逐条验收**：[`docs/注释验收清单-2026-10-15.md`](docs/注释验收清单-2026-10-15.md)。
+- **改注释必须过闸门**：用去注释指纹证明「只改注释、代码零改动」。
+
+---
+
+## 6. 实测数据
+
+**口径先说清楚**：JMeter 与被测容器跑在同一台宿主机、抢同一批物理核，**QPS 绝对值不可与生产对标**；
+可信的是**同环境下的并发梯度对比**。完整环境规格与局限见 [`benchmark/README.md`](benchmark/README.md)。
+
+### 6.1 读路径
+
+| 场景 | 10 并发 | 50 并发 | 100 并发 | 补充 |
+|---|---|---|---|---|
+| Feed 收件箱 `GET /follows/feed` | P99 7 ms | P99 48 ms | P99 84 ms | 每请求**恒 1.0 条 SQL**（并发与每页条数都不改变它）→ 无 N+1 |
+| 检索 `GET /search`（ES 30 条） | P99 8 ms | P99 25 ms | P99 47 ms | 错误率 0% |
+| 商品列表 `GET /items/page` | — | — | 容量 1500~1550 QPS | 限流阈值取实测容量 × 70% = **1000 QPS**；超出即 400（设计内拒绝，不是故障） |
+
+### 6.2 写路径
+
+| 实验 | 结果 |
+|---|---|
+| 50 并发 × 60 秒下单 | 1,403 次下单 → 1,371 次支付成功；余额减少 35,097,600 分 = 25,600 × 1371.0（一次一扣） |
+| 同一支付单 20 线程并发双击 | **1 次成功 + 19 次拒绝**，只扣一次款 |
+| 故障注入（消费者停机、重复投递 1000 次） | 零丢单、零重复扣减，恢复后自动补齐 |
+
+### 6.3 强一致 vs 最终一致（做过对照实验）
+
+同一份 JMX 跑 Seata AT on/off 两态：
+
+| 指标 | AT 关闭（默认） | AT 开启 | 变化 |
+|---|---|---|---|
+| `POST /orders` 平均耗时 | 68.9 ms | 247.7 ms | **+259%** |
+| 整链路吞吐 | 73.9 rps | 58.5 rps | **−21%** |
+| 账实核对 | 精确成立 | 精确成立 | 两态都成立 |
+
+AT **全链跑通并验证了回滚**（故障注入触发 `Branch Rollbacked result: PhaseTwo_Rollbacked`，
+库存 176 →(扣 1)→ 176 不多不少，本地补偿钩子按守卫跳过、**无双回滚**）。
+结论：**默认关**，收益只在下单失败回滚时兑现；需要"券与库存不能有中间态"时再开，
+且三个 `seata.enabled` 必须同进同退。完整过程见 [`docs/P-03`](docs/P-03-Seata-AT对照-2026-10-17.md)。
+
+> **本机压测上限 ≈ 100 并发**：16GB 宿主跑「10 个业务容器 + 中间件容器 + JMeter」时，
+> 100 并发已是可行上限（该档宿主峰值 CPU 到过 94%~100%，再往上会先触发内存 90% 熔断）。
+> 更高并发需要更强的机器或远程压测环境——JMX 并发全部由参数传入，换机器只需改 `-Threads`。
+
+---
+
+## 7. 技术选型与取舍
 
 | 决策 | 选择 | 理由 / 代价 |
 |---|---|---|
 | 服务拆分粒度 | 按**领域**拆 10 个服务 | 一个服务 = 一个业务能力 + 独占数据 + 可独立演进；代价是分布式事务面变大 |
 | 鉴权位置 | **只网关验签** | 收敛重复代码、性能好；代价是内网必须可信（配合入口剥离伪造头） |
 | JWT 主动失效 | access 黑名单 + refresh 白名单 | 只对需失效部分引入状态，黑名单 TTL = 剩余寿命，不会膨胀 |
-| 一致性方案 | **分层，并用对照实验校准过**：强一致用事务框架（Seata AT，可切开关、**默认关**），最终一致用本地消息表 | 实测 AT 让 `POST /orders` +259%、吞吐 −21%（`docs/P-03`），而收益只在下单失败回滚时兑现；因此默认关，只在"券与库存不能有中间态"这类需求出现时开启。三个 `seata.enabled` 必须同进同退（只开 trade 会造成少卖，台账 S-10） |
+| 一致性方案 | **分层，并用对照实验校准过**：强一致用事务框架（Seata AT，可切开关、**默认关**），最终一致用本地消息表 | 实测 AT 让 `POST /orders` +259%、吞吐 −21%，收益只在下单失败回滚时兑现 |
 | 缓存击穿 | 逻辑过期 + 互斥锁 + 异步重建 | 牺牲一点实时性，换取"任何时刻都有数据可返回" |
 | 榜单存储 | **Redis ZSet**（非 ES） | Top-N 排序毫秒级、极省资源；多条件检索才需要 ES |
 | Feed 流 | **推拉结合**（阈值 1000） | 写扩散成本与粉丝数成正比，大 V 必须改拉模式 |
@@ -179,315 +477,97 @@ pwsh -File ../scripts/verify-auth.ps1        # 亮点 A 端到端验收
 
 ---
 
-## 五、项目亮点（量化数据为实测，口径与复现见 `benchmark/README.md` 与 `docs/P-01~P-03`）
-
-- **鉴权收口 + 安全加固**：统一账号中台；发现并修复"免鉴权路径可伪造 `user-info` 冒充任意用户"的越权问题
-- **可靠消息最终一致**：故障注入（消费者停机、消息重复投递 1000 次）验证**零丢单、零重复扣减**
-- **准实时热度闭环**：门店排序更新延迟由 T+1 降至**秒级**
-- **强一致 vs 最终一致：做过对照实验，有数据也有结论**（`docs/P-03-Seata-AT对照-2026-10-17.md`）：
-  Seata AT **全链跑通并验证了回滚**（故障注入触发 `Branch Rollbacked result: PhaseTwo_Rollbacked`，
-  库存 176→(扣 1)→176 不多不少，本地补偿钩子按守卫跳过、**无双回滚**）；
-  同一份 JMX 跑 on/off：`POST /orders` Avg **68.9 → 247.7 ms（+259%）**、整链路吞吐 **73.9 → 58.5 rps（−21%）**，
-  两态账实核对都精确成立 → **结论：默认关，收益只在下单失败回滚时兑现**
-- **读路径实测**（Docker 容器 10 服务 + 容器 ES；JMeter 5.6.3，堆 `-Xmx512m`；宿主 i7-14650HX 16C/24T、15.8GB）：
-  - Feed 收件箱读 `GET /follows/feed`：P95/P99 = **6 / 7 ms @10 并发**、**39 / 48 ms @50**、**70 / 84 ms @100**，错误率 0%；
-    每请求恒为 **1.0 条 SQL**（并发与每页条数都不改变它）→ **读路径无 N+1**
-  - 检索 `GET /search`（ES 30 条）：P99 **8 / 25 / 47 ms**（10/50/100 并发），错误率 0%
-  - 商品列表 `GET /items/page`：容量上限由 Sentinel 规则锁定（阈值 **1000 QPS** = 实测容量 1500~1550 × 70%），
-    超出即 400（设计内拒绝，不是故障；该键不在 Nacos，代码默认值即生效值）
-- **写路径实测**：50 并发 × 60 秒、1,403 次下单 → 1,371 次支付成功，
-  余额减少 35,097,600 分 = **25600 × 1371**（一次一扣、无重复扣款）；
-  同一支付单 20 线程并发双击 → **1 次成功 + 19 次拒绝，只扣一次款**
-- **口径说明**：JMeter 与被测容器跑在同一台宿主、抢同一批物理核，**QPS 绝对值不可与生产对标**；
-  可信的是同环境下的并发梯度对比。完整环境规格与局限见 `benchmark/README.md`。
-- **本机压测上限 ≈ 100 并发（硬上限，不再加码）**：16GB 宿主跑「10 个业务容器 + 中间件容器 + JMeter」时，
-  100 并发已是可行上限（该档宿主峰值 CPU 到过 94%~100%，再往上会先触发内存 90% 熔断）；
-  更高并发需要使用更强的机器或远程压测环境，本仓库的 JMX 并发全部由参数传入，换机器只需改 `-Threads`。
-
----
-
-## 六、目录结构
-
-```
-llmall/
-├── llmall-common/            共享库：统一响应、异常、UserContext、鉴权常量、MQ 转换器
-├── llmall-api/              服务间契约：Feign 客户端 + DTO + 事件 + 降级
-├── llmall-gateway/          网关：鉴权、限流、防伪造
-├── llmall-user-service/        用户域
-├── llmall-shop-service/        门店域
-├── llmall-item-service/        商品域
-├── llmall-cart-service/        购物车域
-├── llmall-trade-service/       交易域（含本地消息表与对账）
-├── llmall-pay-service/         支付域
-├── llmall-promotion-service/   营销域（优惠券 + 秒杀）
-├── llmall-content-service/     内容域
-├── llmall-search-service/      搜索域（ES + MySQL 读模型双引擎）
-├── gates/              工程化闸门（八道闸门 + 现行基线 + 自校验；见 gates/README.md）
-├── docs/               规范与治理文档（注释规范 / 验收清单 / 已知偏差台账 等）
-└── deploy/              Dockerfile / compose / 部署说明
-```
-
-### 工程化闸门（`gates/`）
-
-「只改注释、代码零改动」这句话在本仓库里不是承诺，是**可复现的机器判据**。
-闸门工具集、现行基线与自校验依赖都随仓库交付（`gates/`），clone 下来就能复现。
-完整前置要求、基线更新流程与依赖来源见 `gates/README.md`。
-
-**一条运行命令**（在仓库根目录执行）：
-
-```powershell
-pwsh -File gates\verify-all.ps1            # 八道闸门 + 13 模块编译；-SkipBuild 只跑分析闸门
-```
-
-只有 Windows PowerShell 5.1 的机器同样可用：`powershell -ExecutionPolicy Bypass -File gates\verify-all.ps1 -SkipBuild`
-（闸门不要求 `PATH` 上有 `pwsh`——谁跑起闸门，子脚本就用同一个宿主跑；两种宿主下结论与退出码一致）。
-
-**八道闸门各拦什么**：
-
-| # | 闸门 | 拦什么 | 判据 | 类别 |
-|---|---|---|---|---|
-| 1 | Java 指纹 | 代码语义或**书写形态**被改 | FP1（token 流）= 0 且 FP2（代码行序列）= 0，且无「未被基线覆盖」的文件 | 硬 |
-| 2 | YAML 指纹 | 配置项、缩进、结构被改 | 同上 | 硬 |
-| 3 | Lua / SQL / 脚本指纹 | 非 Java/YAML 文件的代码被改 | 剥注释后代码行序列 SHA256 逐文件一致 | 硬 |
-| 4 | 内容质量 | 11 类不该出现在注释里的东西 | HTML 标签 / 粗体 / 装饰横幅 / 历史叙述 / 实测叙述 / 口语化 / 待办标记 / 审计标签 / 迁移叙述 / 变更叙述 / 模板残留 = 全 0 | 硬 |
-| 5 | 闸门自校验 | 闸门**自己**出错 | 34 个用例全过（剥离规则、内容规则、端到端指纹、Feign 重试的运行时对照） | 硬 |
-| 6 | **文档引用** | 文档里的 `文件:行` 指不到东西：文件不在库 / 行号越界 / 指到空行 / 内容整体搬走 | 文件在库 + 行号不超总行数 + 该处非空 + 与成文时逐行一致（区间另判整块迁移）；判不了的（运行产物 / 同名歧义 / 非文件引用）单独计数披露 | 硬（失效为硬失败；仅行号漂移时按台账通道记 2） |
-| 7 | 字典一致性 | DDL 的取值与代码对不上 | 取值冲突 = 0、库名指向错误 = 0、同表同列表述不一 = 0 | 台账 |
-| 8 | Feign 一致性 | 有写调用的服务漏配禁重试 | 用到写方法的服务必须显式引入 `NoRetryFeignConfig` | 台账 |
-
-**三态退出码**（刻意分开，避免把「闸门失效」和「已登记偏差」混为一谈）：
-
-| 退出码 | 含义 | 该怎么办 |
-|---|---|---|
-| `0` | 全绿 | — |
-| `1` | **硬闸门失败** —— 闸门失效，或出现未登记的违规 | **必须修**，不得继续 |
-| `2` | 硬闸门全过，台账闸门报出**已登记**的待处理偏差 | 逐条核对 `docs/已知偏差台账-2026-10-15.md` |
-
-**真实全绿输出**（本仓库当前状态，pwsh 7.6.6 + JDK 11.0.32.1，2026-10-18 本机执行）：
+## 8. 目录结构
 
 ```text
-运行环境
-  仓库根      : D:\dsh\llmall
-  JDK         : D:\develop\jdk11  openjdk version "11.0.32.1" 2026-08-18 LTS
-  PowerShell  : 7.6.6 (Core)  ...\pwsh.exe
-  Maven       : D:\develop\apache-maven-3.9.6\bin\mvn.cmd
-
-【1/8】Java 去注释指纹（298 文件）      FP1 代码语义变更 : 0   FP2 代码格式变更 : 0   结论: 通过
-【2/8】YAML 去注释指纹（42 文件）       FP1 配置内容变更 : 0   FP2 配置格式变更 : 0   结论: 通过
-【3/8】Lua / SQL / 脚本指纹             结论: 通过 —— 剥离注释后，代码逐行未变
-【4/8】注释内容质量（11 条规则）        扫描文件 : 329   11 条规则全部 0 处   结论: 通过
-【5/8】闸门自校验（34 用例）            通过 34 / 失败 0   结论: 全过
-【6/8】文档引用有效性                   引用 487 ｜ 通过 482 ｜ 平移 0 ｜ 失效 0 ｜ 跳过 5   结论: 通过
-【7/8】字典与跨库引用一致性             ① 取值冲突 0   ② 疑似死状态 6（真候选 2 / 口径误报 4）   ③ 0   ④ 0   结论: 通过
-【8/8】Feign 禁重试一致性               6 个客户端；4 个有写调用的服务全部已显式禁用   结论: 通过
-【BUILD】全量编译（13 模块）            [INFO] BUILD SUCCESS   [INFO] Total time:  7.053 s
-
-闸门汇总
-  [PASS] Java 指纹                硬  退出码=0
-  [PASS] YAML 指纹                硬  退出码=0
-  [PASS] Lua/SQL/脚本指纹           硬  退出码=0
-  [PASS] 内容质量                   硬  退出码=0
-  [PASS] 闸门自校验                  硬  退出码=0
-  [PASS] 文档引用                   硬  退出码=0
-  [PASS] 字典一致性                  台账  退出码=0
-  [PASS] Feign 一致性              台账  退出码=0
-  [PASS] 全量编译                   硬  退出码=0
-
-结论: 全绿
+llmall/
+├── llmall-common/            共享库：统一响应、异常、UserContext、鉴权常量、MQ 转换器
+├── llmall-api/               服务间契约：Feign 客户端 + DTO + 事件 + 降级
+├── llmall-gateway/           网关：鉴权、限流、防伪造
+├── llmall-user-service/      用户域
+├── llmall-shop-service/      门店域
+├── llmall-item-service/      商品域
+├── llmall-cart-service/      购物车域
+├── llmall-trade-service/     交易域（含本地消息表与对账）
+├── llmall-pay-service/       支付域
+├── llmall-promotion-service/ 营销域（优惠券 + 秒杀）
+├── llmall-content-service/   内容域
+├── llmall-search-service/    搜索域（ES + MySQL 读模型双引擎）
+├── gates/                    工程化闸门（八道闸门 + 现行基线 + 自校验）
+├── docs/                     架构、规范、实测报告、偏差台账（索引见 docs/README.md）
+├── deploy/                   Dockerfile / compose / 部署说明
+├── docker/                   中间件编排（infra-lite / addon）与 ES-IK 插件
+├── nacos-config/             Nacos 共享配置与网关路由
+├── sql/                      建库建表与演示数据（合并版见 sql/merged/）
+├── benchmark/                JMeter 计划、压测方案与结论
+├── scripts/                  验收、密钥生成、Redis 高可用演练等脚本
+└── frontend/                 单文件演示前端
 ```
-
-### 一键运行（`demo.ps1`）
-
-`demo.ps1` 只**编排仓库里既有的材料**，不重造任何东西：`mvn package` + `deploy/Dockerfile` 构建单镜像 →
-`docker/docker-compose-infra-lite.yml` + `docker/docker-compose-addon.yml` 的 `elasticsearch` 起中间件 →
-按 `sql/merged/README.md` 的顺序建库灌数（**52 冻结不执行**，执行前先跑 `52a` 只读清点且要求 verdict = 0）→
-Nacos Open API 导入 `nacos-config/*.yaml` 与 `gateway-routes.json` → `gates/EsBulkLoad.java` + `es-shop-mapping.json` 灌 ES →
-`deploy/docker-compose-apps.yml --profile full` 起应用 → `scripts/MallE2E.java` 冒烟（结果写进 `logs/demo/demo-report-*.md`，
-含 `docker stats` 峰值内存）。
-
-三条命令：
-
-```powershell
-pwsh -File demo.ps1 -Reset     # 停容器 + 删卷 + 删网络（幂等）
-pwsh -File demo.ps1            # 全流程；冒烟全绿则退出码 0
-pwsh -File demo.ps1 -Down      # 收尾（加 -Volumes 连数据卷一起删）
-```
-
-前置：**Docker**（脚本会先跑 `-Preflight` 式检查，缺 docker 时退出码 2 并给出提示）、
-JDK 11 与 Maven（`-SkipBuild` 可复用已有镜像）。只有 Windows PowerShell 5.1 的机器同样可用。
-`--profile` 默认 `full` 而不是 `core`：冒烟链路要 trade/cart/pay/promotion/search，`core` 起不全必然红。
-ES 默认起 addon 容器；若 ES 已在本机原生安装（含 IK 插件），用 `-ExternalEs -EsUrl http://127.0.0.1:9200`
-让脚本复用外部实例、不抢 9200 端口。Nacos 导入是**幂等且不覆盖**的：远端不存在或已一致才写，
-遇到与仓库版本不一致的配置会停下并列出清单（要用仓库版本覆盖它们得显式加 `-ForceNacos`）。
-
-### 开发约定：注释规范
-
-- **规范正文**：`docs/注释规范.md` —— 八类注释（类 / 方法 / 行内 / 风险警示 / 配置 / Lua / SQL / TODO）的写法，以及各模块必须写清的口径（JWT 闭环、库存口径、三态语义、会话水位等）。
-- **逐条验收**：`docs/注释验收清单-2026-10-15.md`。
-- **改注释必须过闸门**：用去注释指纹证明「只改注释、代码零改动」，命令见上节与 `gates/README.md`。
-
-## 七、配套文档
-
-**仓库内**（可直接被面试官点开）
-
-| 文档 | 内容 |
-|---|---|
-| `docs/简历条目索引.md` | **简历每条断言 → 代码/文档行号**的索引表 + 30 秒演示路径 + 边界速查 |
-| `docs/面试问答手册.md` | 七章问答（电梯陈述 / 架构 / 选型 / 逐接口 / 踩坑 / 工程治理 / 陷阱题），每条要点带 `文件:行` 溯源 |
-| `docs/P-01~P-03` | 三份实测报告：支付单耗时定位、商品列表容量与阈值、Seata AT on/off 对照 |
-| `docs/已知偏差台账-2026-10-15.md` | 33 行登记（行行有 owner 与触发条件），台账闸门的红项都在这里 |
-| `gates/README.md` | 八道闸门、三态退出码、基线更新流程与覆盖边界 |
-
-**仓库外**（历史里程碑材料）
-
-| 文档 | 内容 |
-|---|---|
-| `设计文档-v1.1.md` | 架构与服务划分、亮点设计方案（同一份也在 `docs/` 内） |
-| `M1~M8-进展与验收.md` | 各阶段实现细节、缺陷修复与验收步骤（`docs/` 内） |
-| `资源受限运行方案.md` | 16G 机器怎么跑起来（VM 内存、JVM 参数、最小启动集） |
-
-## 八、演进路线
-
-- [x] llmall-promotion-service：优惠券与秒杀（Redis Lua 预扣减 + 一人一单 + MQ 异步落库）
-- [x] llmall-search-service 演进：ES 检索实现 + 读模型同步（`engine=auto` 优先 ES，不可用时回落 MySQL 读模型）
-- [ ] 检索双引擎对照压测（同一份代码跑 `engine=es` 与 `engine=mysql` 各一轮）
-- [x] Seata AT 对照实现 + 双方案对比压测（TP99 / 锁等待 / undo_log）
-  —— 已完成，结论与两态数据见 `docs/P-03-Seata-AT对照-2026-10-17.md`：
-  **AT 全链跑通（含 `PhaseTwo_Rollbacked` 回滚实证）**；`POST /orders` Avg 68.9 → 247.7 ms（+259%）、
-  整链路吞吐 73.9 → 58.5 rps（−21%）；**默认值已回落 `false`**（回落经 SHA256 逐字节校验 + 闸门全绿）。
-- [ ] 依赖版本对齐：seata 客户端 1.6.1 / 服务端 1.5.2 倒挂，且 jar 内 `seata-all-1.6.1` 与
-  `seata-core/common/discovery/config-1.5.2` 混装（台账 S-11）
-- [ ] 链路追踪：Micrometer Tracing / SkyWalking + traceId 贯穿日志
-- [ ] 优雅停机、灰度发布
-- [ ] Sentinel 规则持久化到 Nacos（当前规则由 `SentinelRuleConfig` 代码静态注册，控制台推送的规则重启即丢）
-
-## 九、Sentinel 控制台（可选部署）
-
-**当前形态**：控制台与**应用同机**运行（Windows 宿主，端口 8090），jar 在
-`D:\Javadir\llmall\sentinel\sentinel-dashboard.jar`（官方 dashboard **1.8.6**）。
-客户端是 `spring-cloud-alibaba 2021.0.4.0` 带进来的 **sentinel-core 1.8.5**（实测
-`/app/{app}/machines.json` 返回 `"version":"1.8.5"`）——与控制台 1.8.6 同属 1.8.x，
-向下兼容，不需要为了"版本一致"去换控制台。
-
-限流与熔断规则由 `SentinelRuleConfig` 在启动时**用代码静态注册**（`ItemController#queryItemByPage` 上有
-唯一一处 `@SentinelResource`，用于标记被保护的资源），**控制台不在线规则照样生效**
-（日志里只有 `failed to connect to dashboard` 级别的告警，不影响业务）。控制台的作用是
-**实时看 QPS/RT/拒绝数并动态改规则**。
-
-**地址口径（已统一）**：所有服务读同一个占位符，默认值即"控制台与应用同机"，改地址只改一处：
-
-```yaml
-spring:
-  cloud:
-    sentinel:
-      transport:
-        dashboard: ${llmall.sentinel.dashboard:localhost:8090}
-```
-
-覆盖方式（三种任选其一，无需改代码）：
-
-| 场景 | 怎么给值 |
-|---|---|
-| IDEA / 本机 `java -jar` | 不用给，默认值就是 `localhost:8090` |
-| 控制台搬到 VM 或另一台机器 | 启动参数 `--llmall.sentinel.dashboard=ip:port`，或环境变量 `LLMALL_SENTINEL_DASHBOARD=ip:port` |
-| 想让所有服务一起改 | Nacos 配置里加 `llmall.sentinel.dashboard: ip:port`（远程配置优先级高于本地 application.yaml） |
-
-**启动控制台**（端口必须是 8090：控制台自身默认 8080，会和网关撞端口）：
-
-```powershell
-java -Dserver.port=8090 -Dcsp.sentinel.dashboard.server=localhost:8090 `
-     -Dproject.name=sentinel-dashboard -jar D:\Javadir\llmall\sentinel\sentinel-dashboard.jar
-```
-
-默认账号密码 `sentinel/sentinel`。
-
-**验收**（起控制台 → 起任一服务 → 控制台左侧出现服务名、`簇点链路` 里有接口资源）：
-
-```bash
-curl -c cookie.txt -X POST -d 'username=sentinel&password=sentinel' http://localhost:8090/auth/login
-curl -b cookie.txt http://localhost:8090/app/names.json                      # 已注册的应用
-curl -b cookie.txt http://localhost:8090/app/llmall-cart-service/machines.json      # 机器详情（ip/port/health/version）
-```
-
-> 注意：登录路径**没有** `/api/v1` 前缀（`/api/v1/**` 是给界面用的，未登录时一律 401，容易被误判成"接口不存在"）。
-
-**两个必须知道的细节**（都是实测出来的）：
-
-1. **客户端默认是惰性注册**：`spring.cloud.sentinel.eager` 默认 `false`，客户端要等**第一次业务请求**
-   才会绑定命令端口并向控制台发心跳——所以"服务起来了、控制台里却是空的"往往不是没连上，而是还没人访问过它。
-   本项目 5 个真正引了客户端的服务（cart / shop / content / promotion / search）都已显式配
-   `eager: true`，启动即注册；不想要这个行为就把它删掉（退回默认）。
-2. **控制台自注册会占用宿主 8719**：启动命令里的 `-Dcsp.sentinel.dashboard.server=localhost:8090`
-   会让控制台自己也当一个 Sentinel 客户端，于是它占住 8719，同机应用的默认命令端口就被挤掉——
-   本轮实测 llmall-cart-service 只能落到 8720。要么给应用显式指定 `spring.cloud.sentinel.transport.port`，
-   要么去掉控制台的自注册参数（代价：控制台自己不会出现在应用列表里）。
-
-**为什么是"控制台与应用同机"**：Sentinel 的规则是**控制台 → 客户端 8719 端口**反向推送的。
-控制台在 VM、服务在 Windows 时，客户端上报的是 WLAN 地址（`192.168.31.x`），VM 连不上，
-表现为"机器列表能看到、加了流控规则却不生效"。真要把控制台搬到 VM（或以后服务进容器），
-需要三件事一起做：① 服务加 `--spring.cloud.sentinel.transport.client-ip=192.168.189.1`；
-② Windows 放行 8719 入站；③ 控制台容器与应用容器接同一个 `local-life` 网络。
-
-> 配置侧的两个已知细节：
-> ① 10 个模块都写了 `sentinel.transport.dashboard`，但只有 **cart / shop / content / promotion / search**
-> 这 5 个模块引了 `spring-cloud-starter-alibaba-sentinel` 依赖，另外 5 个（gateway / item / pay / trade / user）
-> 的这段配置目前是**空转**的（无害）；要让它们也接控制台，得先补依赖。
-> ② 历史上这段配置的默认值是 `192.168.189.128:8090`（"控制台部署在 VM"的口径）。按实际拓扑
-> （服务在 Windows IDEA、中间件在 VM）改成 `localhost:8090` 后，IDEA 里起服务即可直接连上控制台；
-> 变更记录见 `../最终验收与交付清单.md` 第九节。
 
 ---
 
-## 十、安全须知（公开仓库口径）
+## 9. 文档导航
 
-- **不入库的东西**（`.gitignore` 保证）：`target/`、`logs/`、`.env`、`*.jks`。
-  其中 `llmall.jks` 是 **JWT 签名私钥**，首次 clone 后须先跑 `scripts/gen-jks.ps1` 生成，
-  否则网关与用户服务起不来。
-- **凭据已在代码层外置**：`compose` 与 `seata` 配置里**不再有任何写死的口令**，全部改成
-  `${VAR:?…}`（缺失即报错退出，不会静默用默认值把环境起歪）；实际值只放在 **`deploy/.env`**，
-  而 `.env` 不入库，仓库里只有带演示值的 `deploy/.env.example`。
-  `demo.ps1` 会自动用示例值生成 `deploy/.env`（并把 Redis/MQ 改成容器名），所以**一键 demo 依旧是零配置**。
+| 想知道什么 | 看哪里 |
+|---|---|
+| 系统为什么这么切、这么选 | [`docs/架构设计.md`](docs/架构设计.md) |
+| 怎么部署、怎么验收 | [`deploy/部署说明.md`](deploy/部署说明.md) |
+| 八道闸门细节与基线更新 | [`gates/README.md`](gates/README.md) |
+| 实测数据怎么来的 | [`benchmark/README.md`](benchmark/README.md)、[`docs/P-01`~`P-03`](docs/P-01-申请支付单耗时定位-2026-10-17.md) |
+| 还有哪些已知问题 | [`docs/已知偏差台账-2026-10-15.md`](docs/已知偏差台账-2026-10-15.md) |
+| 每条结论对应哪段代码 | [`docs/简历条目索引.md`](docs/简历条目索引.md) |
+| 设计决策的追问与边界 | [`docs/面试问答手册.md`](docs/面试问答手册.md) |
+| 全部文档的分类 | [`docs/README.md`](docs/README.md) |
 
-  | 凭据键 | 用在哪 | 说明 |
-  |---|---|---|
-  | `MYSQL_ROOT_PASSWORD` | `docker/docker-compose-infra-lite.yml` | 与 `LLMALL_DB_PW` 保持一致 |
-  | `REDIS_PASSWORD` | 同上 | 与 `LLMALL_REDIS_PW` 保持一致（VM 上是 `123456`，不是 `123`） |
-  | `SEATA_CONSOLE_PASSWORD` / `SEATA_DB_PW` | `docker/seata/application.yml`（经 compose 注入） | 控制台账号与 TC 落库口令 |
-  | `LLMALL_DB_PW` / `LLMALL_REDIS_PW` | `deploy/docker-compose-apps.yml` | 注入到应用容器 |
-  | `LLMALL_INTERNAL_TOKEN` | `deploy/docker-compose-apps.yml` | 服务间内部凭证。`.env.example` 里**故意留空**，由 `demo.ps1` 首次生成 `.env` 时用加密安全随机源填 32 位 hex（幂等：已有值不动） |
-  | `LLMALL_JKS_PASSWORD` | 5 个服务的 `application.yaml` | 保留可覆盖的默认值——私钥文件本身不入库，口令单独泄露不构成可用凭据；克隆后 `gen-jks.ps1` 用的也是同一个默认值 |
+---
 
-  > **两条服务的 `application.yaml` 里保留默认值，是有意的边界，不是漏改**：
-  > - `LLMALL_JKS_PASSWORD`：同上（私钥不入库）。
-  > - `LLMALL_INTERNAL_TOKEN`：保留 `${LLMALL_INTERNAL_TOKEN:...}` 默认值是为了**让 IDEA 里裸跑服务这条
-  >   官方支持的开发路径继续可用**（IDEA 读不到 `deploy/.env`）。若把它改成 `${...:?}` 必填，
-  >   IDEA 裸跑会直接起不来，属可用性回退。
-  >   **适用边界**：该默认值**只适用于"仅本机、仅 IDEA 调试"**；容器部署一律走 `deploy/.env` 注入，
-  >   对外或对局域网开放的部署必须先换成随机值（否则知道这个默认串的人可以伪造任意用户身份）。
+## 10. 安全须知
+
+### 10.1 什么不入库
+
+`.gitignore` 保证：`target/`、`logs/`、`.env`、`*.jks`。
+其中 `llmall.jks` 是 **JWT 签名私钥**，首次 clone 后须先跑 `scripts/gen-jks.ps1` 生成，
+否则网关与用户服务起不来。
+
+### 10.2 凭据如何外置
+
+`compose` 与 `seata` 配置里**没有任何写死的口令**：全部改成 `${VAR:?…}`（缺失即报错退出，
+不会静默用默认值把环境起歪）。实际值只放在 **`deploy/.env`**（不入库），仓库里只有带演示值的
+`deploy/.env.example`。`demo.ps1` 会自动用示例值生成 `deploy/.env`（并把 Redis/MQ 改成容器名），
+所以**一键 demo 依旧是零配置**。
+
+| 凭据键 | 用在哪 | 说明 |
+|---|---|---|
+| `MYSQL_ROOT_PASSWORD` | `docker/docker-compose-infra-lite.yml` | 与 `LLMALL_DB_PW` 保持一致 |
+| `REDIS_PASSWORD` | 同上 | 与 `LLMALL_REDIS_PW` 保持一致 |
+| `SEATA_CONSOLE_PASSWORD` / `SEATA_DB_PW` | `docker/seata/application.yml`（经 compose 注入） | 控制台账号与 TC 落库口令 |
+| `LLMALL_DB_PW` / `LLMALL_REDIS_PW` | `deploy/docker-compose-apps.yml` | 注入到应用容器 |
+| `LLMALL_INTERNAL_TOKEN` | `deploy/docker-compose-apps.yml` | 服务间内部凭证。`.env.example` 里**故意留空**，由 `demo.ps1` 首次生成 `.env` 时用加密安全随机源填 32 位 hex（幂等：已有值不动） |
+| `LLMALL_JKS_PASSWORD` | 5 个服务的 `application.yaml` | 保留可覆盖的默认值——私钥文件本身不入库，口令单独泄露不构成可用凭据 |
+
+> **两条服务的 `application.yaml` 里保留默认值，是有意的边界，不是漏改**：
+> `LLMALL_JKS_PASSWORD`（私钥不入库）与 `LLMALL_INTERNAL_TOKEN`（保留默认值是为了让 IDEA
+> 里裸跑服务这条开发路径继续可用——IDEA 读不到 `deploy/.env`）。
+> **适用边界**：该默认值只适用于"仅本机、仅 IDEA 调试"；容器部署一律走 `deploy/.env` 注入，
+> 对外或对局域网开放的部署必须先换成随机值。
 
 > **⚠️ `${VAR:?}` 拦的是「变量没定义」，不是「值还是演示值」。**
-> `deploy/.env` 是由 `.env.example` **复制**出来的，因此那些演示值会**顺利通过** `${VAR:?}` 检查、
-> compose 也能正常起来 —— 这道检查只能保证"你没忘记设这个键"，**不能**保证"你已经换过口令"。
-> 所以：对外部署前必须**人工逐项替换** `deploy/.env` 里的每一个凭据键并轮换；
-> 这一步没有任何自动化闸门兜底（凭据值不进仓库，也就没有可对比的判据），只能靠部署清单。
+> `deploy/.env` 由 `.env.example` 复制而来，演示值会顺利通过检查、compose 也能起来——
+> 这道检查只能保证"你没忘记设这个键"，**不能**保证"你已经换过口令"。
+> 对外部署前必须**人工逐项替换** `deploy/.env` 里的每一个凭据键并轮换。
 >
-> **一句话**：这是**演示工程**，不是生产部署模板；`deploy/.env.example` 里的是演示值，
-> 对外部署前必须替换 `deploy/.env` 中的每一项并轮换。
+> **一句话**：这是**演示工程**，不是生产部署模板；`deploy/.env.example` 里的是演示值。
 
-### 10.1 历史凭据声明（重要，请先读这段再决定要不要部署）
+### 10.3 历史凭据声明（部署前必读）
 
-本仓库的公开历史中已包含演示环境的数据库 / Redis / 内部凭证等口令。这些值自首次提交起
-即对外可见，应视为已泄露；任何在本机以外、或对局域网开放的部署，必须先轮换全部凭据
-再启动。本仓库不提供、也不声称提供生产级凭据管理。
+本仓库的公开历史中包含演示环境的数据库 / Redis / 内部凭证等口令。这些值自首次提交起
+即对外可见，应视为已泄露；任何在本机以外、或对局域网开放的部署，必须先轮换全部凭据再启动。
+本仓库不提供、也不声称提供生产级凭据管理。
 
-> **为什么不再重写历史**：48 个提交、1 个 tag、以及可能存在的 fork 都会被牵动，而**重写历史
-> 并不能把"已经泄露"这件事变回"没泄露"** —— 所以处置方式是「承认 + 强制轮换」，而不是改写。
-> **任何曾经公开过的值，一律按已泄露处理。**
->
-> **实测事实**（口径与命令见 `docs/凭据历史核对-2026-10-17.md`）：Redis 部署口令的值在历史中命中
-> **15 个提交**、首次即**根提交 `16baf4e`**；Seata 控制台口令命中 12 个提交；JKS 口令 5 个；
-> MySQL root 与 Seata 落库是**同一个值**（指纹相同 ⇒ 口令复用），也都从根提交起就在。
-> 也就是说"公开历史里没有明文"这个假设**不成立**，本节的声明不是预防性的，是既成事实的登记。
+> **为什么不再重写历史**：历史提交与 tag 都会被牵动，而重写历史并不能把"已经泄露"
+> 变回"没泄露"——所以处置方式是「承认 + 强制轮换」，而不是改写。
+> **任何曾经公开过的值，一律按已泄露处理。** 核对口径与命中统计见
+> [`docs/internal/凭据历史核对-2026-10-17.md`](docs/internal/凭据历史核对-2026-10-17.md)。
 
 **部署前必须轮换的六类凭据**（只写"改哪里 / 要同步几处"，不写任何实际值）
 
@@ -499,3 +579,27 @@ curl -b cookie.txt http://localhost:8090/app/llmall-cart-service/machines.json  
 | 4 | Seata TC 落库 | `deploy/.env` 的 `SEATA_DB_PW` | 若与 MySQL root 复用，随第 1 条一起换；另需同步 `docker/seata/application.yml` |
 | 5 | JKS 私钥口令 | `scripts/gen-jks.ps1 -Password`（**重新生成 jks**，不是只改口令） | 5 个服务 `application.yaml` 的 `LLMALL_JKS_PASSWORD` 默认值 / 或设同名环境变量；轮换后**所有已签发 JWT 立即失效** |
 | 6 | 服务间内部 token | `deploy/.env` 的 `LLMALL_INTERNAL_TOKEN`（32 位 hex） | 全部 10 个服务都要拿到同一个值：容器走 `docker-compose-apps.yml` 注入，IDEA 裸跑需设环境变量或改 `application.yaml` 默认值 |
+
+### 10.4 网关攻击面收口
+
+- `/actuator/**` **不在网关白名单内**：运维端点只走内网直连，外部经 8080 只放行 `/actuator/health`。
+- 免鉴权路径一律**剥离**客户端提供的 `user-info` 类身份头，只信任网关写入的那一份。
+
+---
+
+## 11. 路线图
+
+- [x] 优惠券与秒杀（Redis Lua 预扣减 + 一人一单 + MQ 异步落库）
+- [x] 搜索域演进：ES 检索 + 读模型同步（`engine=auto` 优先 ES，不可用时回落 MySQL 读模型）
+- [x] Seata AT 对照实现 + 双方案对比压测（结论与两态数据见 [`docs/P-03`](docs/P-03-Seata-AT对照-2026-10-17.md)）
+- [ ] 检索双引擎对照压测（同一份代码跑 `engine=es` 与 `engine=mysql` 各一轮）
+- [ ] 依赖版本对齐：seata 客户端与服务端版本倒挂（见已知偏差台账 S-11）
+- [ ] 链路追踪：Micrometer Tracing / SkyWalking + traceId 贯穿日志
+- [ ] 灰度发布与更细的优雅停机
+- [ ] Sentinel 规则持久化到 Nacos（当前规则由 `SentinelRuleConfig` 代码静态注册，控制台推送的规则重启即丢）
+
+---
+
+## 许可
+
+[MIT](LICENSE)。示例商品数据仅用于本地演示，随仓库一并提供。
