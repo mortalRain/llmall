@@ -23,7 +23,7 @@
 #   验收**没有跑过**。可静态验证的部分（语法、-Preflight、JDK/Maven 解析、SQL 顺序表）已验；
 #   运行期行为未验。首次在真机上跑请先 `pwsh -File demo.ps1 -Preflight`。
 #
-# 【两处与施工单不一致，已按"能让冒烟真的全绿"取舍，见报告】
+# 【两处与设计文档不一致，已按"能让冒烟真的全绿"取舍，见报告】
 #   1) --profile 默认 full 而不是 core：core 只有 gateway/user/shop/item/content 五个服务，
 #      而 MallE2E 走的是 登录→购物车→下单→支付→取消→评价，必须有 trade/cart/pay/promotion/search。
 #      要按 core 起就传 -Profile core（此时请配 -SkipSmoke，否则冒烟必红）。
@@ -32,7 +32,7 @@
 #      替代做法：冒烟前后取"自增 id 水位线"，finally 里只删本次冒烟新建的行（见 -NoCleanup）。
 #
 # 【ES 的两种来源】默认起 addon 容器（docker/docker-compose-addon.yml 的 elasticsearch）。
-#   若 ES 已在本机原生装着（本机就有 D:\develop\elasticsearch-7.17.10，且 plugins\ik 已就位），
+#   若 ES 已在本机原生装着（plugins\ik 已就位），
 #   用 -ExternalEs -EsUrl http://127.0.0.1:9200：脚本不会再起容器版，避免抢 9200 端口。
 # ============================================================================
 
@@ -49,7 +49,7 @@ param(
     [switch]$SkipSmoke,             # 跳过 MallE2E 冒烟
     [switch]$NoCleanup,             # 不清理冒烟新建的数据
     [switch]$Online,                # 允许 Maven 走网络（默认离线 -o）
-    [switch]$WithDianpingMigration, # 额外执行 99-migrate-dianping-data.sql（需要外部库 dianping_src）
+    [switch]$WithSourceMigration, # 额外执行 99-migrate-source-data.sql（需要外部上游库_src）
     [switch]$ExternalEs,            # ES 已在别处跑着（宿主原生安装 / VM），不起 addon 容器
     [string]$EsUrl = 'http://127.0.0.1:9200',
     [int]$DbHostPort = 0,           # 宿主上 mysql 容器映射的端口；0 = 取 $env:MYSQL_HOST_PORT，再缺省 3306
@@ -464,8 +464,8 @@ if (-not $SkipEs -and -not $ExternalEs) {
     $ikDir = Join-Path $RepoRoot 'docker\es\plugins\ik'
     if (-not (Test-Path $ikDir)) {
         Write-Warn2 "缺少 IK 分词器目录 docker\es\plugins\ik —— ES 索引 mapping 用的是 ik_max_word/ik_smart，"
-        Write-Warn2 "没有它索引建不起来。放法见 docker\M0-环境搭建说明.md（把 IK 解压到 docker\es\plugins，目录名必须是 ik）。"
-        Write-Warn2 "若 ES 已在本机原生装着（例如 D:\develop\elasticsearch-7.17.10 且 plugins\ik 就位），改用 -ExternalEs 跳过容器版。"
+        Write-Warn2 "没有它索引建不起来。放法见 docker\ES与Seata环境说明.md（把 IK 解压到 docker\es\plugins，目录名必须是 ik）。"
+        Write-Warn2 "若 ES 已在本机原生装着（plugins\ik 已就位），改用 -ExternalEs 跳过容器版。"
     }
 }
 
@@ -611,11 +611,11 @@ try {
         Write-Info '跳过 sql/merged/52-fix-orphan-pay-orders.sql —— 冻结，本轮不动'
         Write-Info '跳过 sql/merged/61-user-weak-password-reset.sql —— 文档口径为「默认不执行，需人工启用」'
 
-        if ($WithDianpingMigration) {
-            Invoke-SqlFile -Path "$SqlMerged\99-migrate-dianping-data.sql" | Out-Null
+        if ($WithSourceMigration) {
+            Invoke-SqlFile -Path "$SqlMerged\99-migrate-source-data.sql" | Out-Null
         }
         else {
-            Write-Info '跳过 sql/merged/99-migrate-dianping-data.sql —— 依赖仓库外的 dianping_src 库（加 -WithDianpingMigration 才跑）'
+            Write-Info '跳过 sql/merged/99-migrate-source-data.sql —— 依赖仓库外的上游库（加 -WithSourceMigration 才跑）'
         }
 
         # 52a：只读清点，判据是最后一个结果集的第 1 列（非 user1 的已支付孤儿单数）

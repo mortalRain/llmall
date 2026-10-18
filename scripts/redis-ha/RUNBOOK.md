@@ -50,7 +50,7 @@ rename-command CONFIG "CONFIG_9f3a1c"      # ← 元凶，已删除
 | **应用扛过切换** | 应用连上后停主库：哨兵 `t+5s` 切换，应用仅 1 次 2 秒超时后**自动恢复读写**（不重启） |
 | 1 主 1 从复制 | 6379 `role:master` / 6380 `role:slave`，`master_link_status:up`，`connected_slaves:1`，数据量一致 |
 | 3 个哨兵运行 | 26379/26380/26381 均 active，`num-other-sentinels=2`（互相发现正常），`flags=master` |
-| 哨兵对外地址正确 | 下发 `192.168.189.128:6379`（**不是** 127.0.0.1，应用在 Windows 宿主上能连） |
+| 哨兵对外地址正确 | 下发 `<vm-ip>:6379`（**不是** 127.0.0.1，应用在 Windows 宿主上能连） |
 | 应用配置已切哨兵 | Nacos `shared-redis.yaml` + 网关 `application.yaml` 均已改为 sentinel 模式（见第 5 节） |
 | 切换后可写 / 不丢数据 | 新主库只读被正确解除；切换后数据量与切换前一致 |
 | 主库数据未受影响 | 全程 6379 承载现役数据，应用侧 `PING → PONG` |
@@ -119,7 +119,7 @@ IDEA 里跑通常已经设了（`Run/Debug Configurations` → VM options 加 `-
 
 ```bash
 # 在 VM 内以 root 执行
-bash install-redis-ha.sh --vm-ip 192.168.189.128 --password 123456
+bash install-redis-ha.sh --vm-ip <vm-ip> --password 123456
 bash install-redis-ha.sh --status
 bash failover-drill.sh                 # 演练（会短暂停主库，自带复位）
 bash install-redis-ha.sh --uninstall   # 只删从库与哨兵，主库 6379 不动
@@ -152,7 +152,7 @@ redis-cli -p 6380 -a 123456 --no-auth-warning INFO replication | grep ^role:   #
 
 # 4. 原主库修好后让它以从库身份回归（**必须做，否则形成双主**）
 systemctl start redis-server
-redis-cli -p 6379 -a 123456 --no-auth-warning REPLICAOF 192.168.189.128 6380
+redis-cli -p 6379 -a 123456 --no-auth-warning REPLICAOF <vm-ip> 6380
 
 # 5. 恢复哨兵
 for p in 26379 26380 26381; do systemctl start redis-sentinel@$p; done
@@ -181,7 +181,7 @@ spring:
 ### 接入前做过的验证（不是直接改上去的）
 
 1. **宿主机连通性**：三个哨兵端口 `26379/26380/26381` 从 Windows 宿主可达，
-   且 `SENTINEL get-master-addr-by-name llmall-master` 返回 `192.168.189.128:6379`。
+   且 `SENTINEL get-master-addr-by-name llmall-master` 返回 `<vm-ip>:6379`。
 2. **YAML 绑定**：用 Spring Boot 自己的 `Binder` 把这份配置绑成 `RedisProperties`，
    确认 `sentinel.master=llmall-master`、`sentinel.nodes` 解析出 **3 个**节点、
    口令/超时/池参数（含 `max-wait`）全部绑定成功。

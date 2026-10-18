@@ -1,8 +1,8 @@
 -- =====================================================================
--- 99-migrate-dianping-data.sql
+-- 99-migrate-source-data.sql
 -- 99 · 把点评（dianping_src）的门店数据迁移到 llmall-shop
 --
--- 执行：mysql -uroot -p < 99-migrate-dianping-data.sql
+-- 执行：mysql -uroot -p < 99-migrate-source-data.sql
 --
 -- ============================ 一、功能 ============================
 -- 把外部库 dianping_src 的 tb_shop_type、tb_shop 按 id upsert 进
@@ -42,7 +42,7 @@
 --      MySQL 8 会报 Invalid default value，导入时请加 --force 跳过该表；本项目不用那张表。
 --   2. 确认 10-shop.sql 已执行（不可跳过：shop / shop_type 两张表由它建），
 --      并确认 50 / 51-seed 脚本已按 README 的顺序跑完（本脚本排在最后，见"五、前置依赖"）。
---   3. 执行：mysql -uroot -p < 99-migrate-dianping-data.sql
+--   3. 执行：mysql -uroot -p < 99-migrate-source-data.sql
 --   4. 核对（期望：门店数与源库一致、热度分为 0 的门店为 0 行）：
 --        SELECT COUNT(*) FROM `llmall-shop`.`shop`;
 --        SELECT COUNT(*) FROM `llmall-shop`.`shop` WHERE `hot_score` = 0;
