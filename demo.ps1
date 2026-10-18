@@ -642,6 +642,9 @@ try {
     if (-not $SkipNacos) {
         Write-Step 'Nacos 共享配置与网关路由（Open API 导入）'
         $nacosDir = Join-Path $RepoRoot 'nacos-config'
+        # 【注意】这里是 glob 而不是白名单：nacos-config/ 下所有 *.yaml 与 gateway-routes.json 都会被导入。
+        # 因此新增 dataId（例如服务专属的 llmall-pay-service.yaml）只要放进目录就自动生效，不需要在这里再登记；
+        # 反过来说，"目录里有、Nacos 里没有"也会被这条 glob 自动补齐 —— 这正是"仓库是唯一事实源"的实现方式。
         $files = @(Get-ChildItem $nacosDir -File | Where-Object { $_.Name -like '*.yaml' -or $_.Name -eq 'gateway-routes.json' })
 
         # 先用**原始文本**读一遍现网值，把每份分成"不存在 / 已一致 / 不一致"三类。

@@ -81,6 +81,9 @@ services:
     ports:
       - "127.0.0.1:8848:8848"
       - "127.0.0.1:9848:9848"                       # Nacos 2.x 客户端 gRPC 端口，缺一则客户端连不上
+    volumes:
+      # standalone 模式的全部已发布配置都在内嵌 derby 的这个目录里；不挂卷则容器重建即清空。
+      - nacos-data:/home/nacos/data
     mem_limit: 640m
     restart: unless-stopped
 
@@ -168,6 +171,11 @@ volumes:
   # 【注意】RabbitMQ 的 mnesia 数据（vhost/用户/队列/交换机/消息）必须落卷，否则容器一删全清；
   # 与上面的固定 hostname 配合，才能做到重建容器不丢 MQ 状态。
   mq-data:
+  # 【注意】nacos 的 standalone 模式把全部已发布配置存在内嵌 derby 的 /home/nacos/data 下，
+  # 不挂卷时"重建容器 = 清空全部配置"。2026-10-18 实际发生过一次：重建后 9 个业务服务拿不到
+  # shared-*.yaml 与 gateway-routes.json，全部进入重启循环。而 demo.ps1 每次都会幂等导入配置，
+  # 把这件事长期掩盖住了 —— 所以这个卷不是"优化"，是把隐性依赖显性化。
+  nacos-data:
 
 # 【注意】把 compose 默认网络改名为共用的 external 网络：本文件所有服务自动接入，无需逐个写 networks:；
 # 网络名须与 docker-compose-addon.yml、llmall/deploy/docker-compose-apps.yml 一致，否则容器之间无法按名字解析，

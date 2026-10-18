@@ -1,0 +1,16 @@
+# llmall-pay-service 的服务专属 dataId（dataId = 服务名 + .yaml，与应用 spring.application.name 的默认约定一致）。
+# 内容只覆盖一个键：连接池上限 20，其余配置仍继承 Nacos 上的 shared-*.yaml。
+#
+# 【为什么单独一份、而不是改 shared-jdbc.yaml】那份是 9 个服务共用的，共同抬到 20 会变成 9 x 20 = 180，
+#   超过 MySQL max_connections（151 / 本机 100）把库打满。只有"服务专属 dataId"这一层能盖住
+#   shared-configs 里的同名键（覆盖层级与取值依据见 docs/P-01-申请支付单耗时定位-2026-10-17.md 第七节）。
+#
+# 【注意】HikariCP 的 maximum-pool-size 不在 Spring Cloud 动态刷新范围内：改完必须重启
+#   llmall-pay-service 才生效，导入配置后立刻读指标仍会是旧值。
+#
+# 【为什么要入仓】这份配置曾只存在于 Nacos（运行态手工发布）；2026-10-18 nacos 容器重建
+#   （当时未挂数据卷）导致它丢失，现已补录进仓库，此后以仓库为准 —— 仓库里不再有"只活在 Nacos 里"的配置。
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 20
