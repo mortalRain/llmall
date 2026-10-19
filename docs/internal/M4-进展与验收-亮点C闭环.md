@@ -32,7 +32,7 @@
 | `mapper/*`（5 个） | 对应 Mapper |
 | `domain/dto/BlogFormDTO.java` | 发布表单（校验评分 1~5，防止脏数据带偏热度） |
 | `service/impl/BlogServiceImpl.java` | 发布/详情/点赞/取消/评论 + **提交后发事件** |
-| `service/impl/FollowServiceImpl.java` | 关注/取关/共同关注/粉丝数 + **推拉结合 Feed** |
+| `service/impl/FollowServiceImpl.java` | 关注/取关/共同关注/粉丝数 + **Feed 写扩散（纯推）** |
 | `mq/ContentEventPublisher.java` | 事件投递 |
 | `controller/BlogController.java`、`FollowController.java` | 对外接口 |
 | `constant/ContentRedisConstants.java` | 点赞 ZSet、关注集合、写扩散阈值 |
@@ -110,7 +110,7 @@ MySQL 后面的赋值会看到前面刚赋的新值，若顺序写反，分母�
 | 衰减锚点 | 取 `last_review_time`（最近评价时间） | 若用"重算时间"，每次重算都把衰减重置成 1，衰减形同虚设 |
 | 榜单读 | Redis ZSet `ZREVRANGE` | O(log N + M)，毫秒级；比 `ORDER BY` 全表排序便宜得多 |
 | 榜单还原 | **按 ZSet 的 id 顺序还原**列表 | `WHERE id IN (...)` 返回顺序不保证与榜单一致，否则榜单乱序 |
-| Feed | 推拉结合：普通作者写扩散，粉丝 > 1000 跳过 | 写扩散成本与粉丝数成正比，大 V 不能写扩散 |
+| Feed | **纯推**：普通作者写扩散，粉丝 > 1000 **直接跳过**（该笔记对这批粉丝不可见） | 写扩散成本与粉丝数成正比；原设想的读时拉取未实现，见台账 C-01 |
 | Feed 分页 | 游标分页 `id < lastId` | 避免 `OFFSET` 深分页性能塌陷与翻页重复/漏数据 |
 | 点赞 | DB 唯一索引 + `liked = liked + 1` 原子自增 + Redis ZSet 排行 | 唯一索引即幂等；SQL 自增避免并发丢更新 |
 | 关注 | DB 权威 + Redis 集合（求交集 O(min(n,m))） | 共同关注用 SQL 需要两次 JOIN，数据量大时明显更慢 |
@@ -169,7 +169,7 @@ Invoke-RestMethod -Uri "$gw/shops/hot?limit=5" | ConvertTo-Json -Depth 3
 | 消息重复怎么办？ | `consume_record` 唯一索引占位，失败撤销占位；不依赖"MQ 不重复"这种不成立的假设 |
 | 热度为什么不用定时任务批量算？ | 批量算延迟高（T+1），且全量重算成本随门店数线性增长；这里只算"受影响的那一家"，O(1) |
 | 榜单为什么用 ZSet 不用 ES？ | 榜单只需"按分数排序取 Top N"，ZSet 毫秒级且极省资源；ES 更适合多条件检索与分词（分工见设计文档） |
-| 写扩散会不会被打爆？ | 已设阈值 1000，超阈值改为读时拉取；这是"推拉结合"的取舍点 |
+| 写扩散会不会被打爆？ | 已设阈值 1000，超阈值**直接跳过推送**（读时拉取未实现，这批粉丝看不到） |
 | 平均分并发怎么保证不丢更新？ | 一条 SQL 原子完成，并说明 MySQL 赋值顺序的坑 |
 
 ---

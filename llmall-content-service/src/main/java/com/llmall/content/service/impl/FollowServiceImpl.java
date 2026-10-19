@@ -11,6 +11,7 @@ import com.llmall.content.domain.po.Blog;
 import com.llmall.content.domain.po.FeedInbox;
 import com.llmall.content.domain.po.Follow;
 import com.llmall.content.domain.vo.FeedItemVO;
+import com.llmall.content.domain.vo.FeedPageVO;
 import com.llmall.content.mapper.BlogMapper;
 import com.llmall.content.mapper.FeedInboxMapper;
 import com.llmall.content.mapper.FollowMapper;
@@ -24,8 +25,12 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +53,15 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
 
     /** 笔记状态"已发布"：对外可见的唯一状态（与笔记详情的可见性判据保持一致） */
     private static final int STATUS_PUBLISHED = 1;
+
+    /** 补拉时每个大V 作者最多取几条：取页面上限的一半，既能让单个作者填满半页，也不让每批回表量翻倍 */
+    private static final int FEED_PULL_PER_AUTHOR = 20;
+
+    /** 补拉按作者分批的批大小：每批一条 SQL，批大小同时决定 IN 参数长度与批数 */
+    private static final int FEED_PULL_AUTHOR_BATCH = 20;
+
+    /** 单页参与补拉的大V 作者数上限：条数上界靠它卡死，超出时只补最近关注的一批并告警 */
+    private static final int FEED_PULL_AUTHOR_CAP = 60;
 
     private final FeedInboxMapper feedInboxMapper;
     private final BlogMapper blogMapper;
@@ -157,9 +171,9 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
         }
         if (followers > FEED_PUSH_THRESHOLD) {
             // 写扩散成本与粉丝数成正比（大 V 一次发布要写几十万行），超阈值直接跳过推送；
-            // 读路径 queryFeed 只查收件箱、没有"读时拉取合并"分支，因此这些粉丝的 Feed 里不会出现本条笔记
-            // 【可观测性·2026-10-15】从 INFO 升级为 WARN：这是用户可见的功能缺口（笔记对粉丝不可见），
-            // 静默 INFO 会让它淹没在日志里；升级后可按关键字告警与统计。只加信号，不补拉取功能。
+            // 跳过之后收件箱里不会再有这条笔记的行，它只能经读路径补拉（/follows/feed/v2）到达粉丝。
+            // 【可观测性】WARN 文案保持不变：该字符串已被台账登记为告警关键字，它描述的是"未写扩散"这个事件，
+            // 改文案会打断按关键字告警与统计；内容最终是否可见由读路径补拉决定，不由这条日志决定。
             log.warn("[Feed] 写扩散被阈值跳过，本条笔记不会出现在粉丝 Feed 里: author={}, blogId={}, followers={}, threshold={}",
                     authorId, blogId, followers, FEED_PUSH_THRESHOLD);
             return;
@@ -252,12 +266,145 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
         return items;
     }
 
+    @Override
+    public FeedPageVO queryFeedItemsV2(Long userId, Long lastInboxId, LocalDateTime lastCt, Long lastBlogId, Integer size) {
+        if (userId == null) {
+            return new FeedPageVO().setItems(CollUtils.emptyList());
+        }
+        int limit = (size == null || size <= 0) ? 10 : Math.min(size, 50);
+
+        // 【条数上界第一笔】关注列表单独一条 SQL。多取一条只为判断是否超过补拉上限，
+        // 溢出时截断并告警：先保证条数上界可计算，再谈补拉多少。
+        List<Long> following = baseMapper.selectFollowingIds(userId, FEED_PULL_AUTHOR_CAP + 1);
+        if (following.size() > FEED_PULL_AUTHOR_CAP) {
+            log.warn("[Feed] 关注作者数 {} 超过补拉上限 {}，只补拉最近关注的一批: userId={}",
+                    following.size(), FEED_PULL_AUTHOR_CAP, userId);
+            following = new ArrayList<>(following.subList(0, FEED_PULL_AUTHOR_CAP));
+        }
+
+        // 收件箱侧仍按主键倒序取：feed_inbox 的索引是 (user_id, id DESC)，按发布时间过滤没有索引可用，
+        // 因此这里不按时间游标过滤，改为归并时统一时间轴。取 limit 条足够：两路各自降序时，
+        // 各自的前 limit 条就足以算出归并后的前 limit 条，多取无益。
+        // 该查询的访问路径由 (user_id, id DESC) 保证；数据量很小时优化器可能改用 uk_user_blog
+        // 并对该用户自己的收件箱排一次序，两种走法都只读取当前用户的行，不随全表规模增长。
+        List<FeedInbox> inbox = feedInboxMapper.selectList(new LambdaQueryWrapper<FeedInbox>()
+                .eq(FeedInbox::getUserId, userId)
+                .lt(lastInboxId != null, FeedInbox::getId, lastInboxId)
+                .orderByDesc(FeedInbox::getId)
+                .last("LIMIT " + limit));
+
+        // 【条数上界其余各笔】补拉按作者分批，每批一条 SQL：
+        // 条数 = 收件箱 1 + 详情批量 1 + 关注列表 1 + 批数，批数 = 关注作者数除以批大小向上取整。
+        List<Blog> pulled = new ArrayList<>();
+        for (int i = 0; i < following.size(); i += FEED_PULL_AUTHOR_BATCH) {
+            List<Long> batch = following.subList(i, Math.min(i + FEED_PULL_AUTHOR_BATCH, following.size()));
+            pulled.addAll(blogMapper.selectBigvRecentBlogs(batch, FEED_PUSH_THRESHOLD, lastCt, lastBlogId,
+                    batch.size() * FEED_PULL_PER_AUTHOR));
+        }
+        // 每作者截断：SQL 只做全局 LIMIT，某个作者在同一时间窗内发得特别密会把其他作者的候选挤掉，
+        // 因此在内存里再按作者取前 N 条，保证一页不被单个作者占满。
+        Map<Long, Integer> perAuthor = new HashMap<>();
+        List<Blog> candidates = new ArrayList<>();
+        for (Blog blog : pulled) {
+            if (perAuthor.merge(blog.getUserId(), 1, Integer::sum) <= FEED_PULL_PER_AUTHOR) {
+                candidates.add(blog);
+            }
+        }
+
+        // 归并去重：作者昨天粉丝未过阈值时笔记已被推进收件箱，今天过阈值后新笔记只走补拉；
+        // 跨阈值那一刻两路数据集相交，同一篇笔记会同时出现在两边，按 blog_id 去重是这条链路的必需品。
+        Set<Long> seenBlogIds = new HashSet<>();
+        List<FeedCandidate> merged = new ArrayList<>(inbox.size() + candidates.size());
+        for (FeedInbox row : inbox) {
+            if (seenBlogIds.add(row.getBlogId())) {
+                merged.add(new FeedCandidate(row.getBlogId(), row.getCreateTime(), row.getId(), row.getAuthorId()));
+            }
+        }
+        for (Blog blog : candidates) {
+            if (seenBlogIds.add(blog.getId())) {
+                merged.add(new FeedCandidate(blog.getId(), blog.getCreateTime(), null, blog.getUserId()));
+            }
+        }
+        merged.sort(Comparator
+                .comparing(FeedCandidate::getCreateTime, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(FeedCandidate::getBlogId, Comparator.reverseOrder()));
+        if (merged.size() > limit) {
+            merged = merged.subList(0, limit);
+        }
+
+        FeedPageVO page = new FeedPageVO().setPullApplied(!candidates.isEmpty())
+                .setNextLi(lastInboxId).setNextCt(lastCt).setNextCi(lastBlogId);
+        if (merged.isEmpty()) {
+            return page.setItems(CollUtils.emptyList());
+        }
+
+        List<Long> blogIds = merged.stream().map(FeedCandidate::getBlogId).collect(Collectors.toList());
+        Map<Long, Blog> detail = blogMapper.selectBatchIds(blogIds).stream()
+                .collect(Collectors.toMap(Blog::getId, blog -> blog, (left, right) -> left));
+        Long currentUserId = UserContext.getUser();
+        List<FeedItemVO> items = new ArrayList<>(merged.size());
+        for (FeedCandidate candidate : merged) {
+            Blog blog = detail.get(candidate.getBlogId());
+            if (blog == null) {
+                // 笔记被物理删除：收件箱里还留着指针，跳过而不是抛异常
+                continue;
+            }
+            boolean authorSelf = currentUserId != null && currentUserId.equals(blog.getUserId());
+            if (!Integer.valueOf(STATUS_PUBLISHED).equals(blog.getStatus()) && !authorSelf) {
+                continue;
+            }
+            items.add(toFeedItem(candidate.getFeedId(), candidate.getAuthorId(), blog));
+            // 游标只随真正返回的条目前进：被跳过的条目不参与翻页，否则一次跳过就会翻丢一页
+            page.setNextCt(candidate.getCreateTime()).setNextCi(candidate.getBlogId());
+            if (candidate.getFeedId() != null) {
+                page.setNextLi(candidate.getFeedId());
+            }
+        }
+        return page.setItems(items);
+    }
+
+    /** 归并中间态：一条笔记在合并时间轴上的位置，以及它来自收件箱时的记录 id 与落库作者 */
+    private static final class FeedCandidate {
+        private final Long blogId;
+        private final LocalDateTime createTime;
+        private final Long feedId;
+        private final Long authorId;
+
+        private FeedCandidate(Long blogId, LocalDateTime createTime, Long feedId, Long authorId) {
+            this.blogId = blogId;
+            this.createTime = createTime;
+            this.feedId = feedId;
+            this.authorId = authorId;
+        }
+
+        private Long getBlogId() {
+            return blogId;
+        }
+
+        private LocalDateTime getCreateTime() {
+            return createTime;
+        }
+
+        private Long getFeedId() {
+            return feedId;
+        }
+
+        private Long getAuthorId() {
+            return authorId;
+        }
+    }
+
     /** 收件箱记录 + 笔记详情 → 对外视图；authorId 取收件箱记录上的值（写扩散时落下的作者） */
     private FeedItemVO toFeedItem(FeedInbox row, Blog blog) {
+        return toFeedItem(row.getId(), row.getAuthorId(), blog);
+    }
+
+    /** 归并后的单条视图构造：补拉来源没有收件箱记录，feedId 为 null、authorId 取笔记作者 */
+    private FeedItemVO toFeedItem(Long feedId, Long authorId, Blog blog) {
         return new FeedItemVO()
-                .setFeedId(row.getId())
+                .setFeedId(feedId)
                 .setBlogId(blog.getId())
-                .setAuthorId(row.getAuthorId() != null ? row.getAuthorId() : blog.getUserId())
+                .setAuthorId(authorId != null ? authorId : blog.getUserId())
                 .setShopId(blog.getShopId())
                 .setTitle(blog.getTitle())
                 .setImages(blog.getImages())

@@ -19,4 +19,18 @@ public interface FollowMapper extends BaseMapper<Follow> {
             + "INNER JOIN `follow` f2 ON f1.follow_user_id = f2.follow_user_id "
             + "WHERE f1.user_id = #{userId} AND f2.user_id = #{otherUserId}")
     List<Long> selectCommonFollowIds(@Param("userId") Long userId, @Param("otherUserId") Long otherUserId);
+
+    /**
+     * 取"我关注的人"的 id 列表，供读路径按批补拉。
+     *
+     * 【为什么不用 Redis 关注集合】follow:user:* 是缓存而非权威数据，要确认它完整就得与库里的计数比对，
+     * 而那次比对本身就是一条查询，与直接查表等价；这里选一条 SQL 直取，读路径因此没有
+     * "集合可信度"这一层分支，也不用区分命中与回源两种条数。
+     *
+     * 【limit 由调用方传上限加一】多取的那一条只用于判断是否溢出补拉上限，溢出时截断并告警，
+     * 使条数上界可计算。走 uk_follow(user_id, follow_user_id) 的 user_id 前缀。
+     */
+    @Select("SELECT `follow_user_id` FROM `follow` WHERE `user_id` = #{userId} "
+            + "ORDER BY `id` DESC LIMIT #{limit}")
+    List<Long> selectFollowingIds(@Param("userId") Long userId, @Param("limit") int limit);
 }

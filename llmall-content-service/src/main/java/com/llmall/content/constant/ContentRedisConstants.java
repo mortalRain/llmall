@@ -19,7 +19,7 @@ public interface ContentRedisConstants {
     /** 粉丝数缓存：follow:fans:count:{userId}，值为 DB 的 count(*)（只是缓存，权威在 follow 表） */
     String FANS_COUNT_KEY = "follow:fans:count:";
 
-    /** 写扩散阈值：粉丝数超过该值的作者不再推送，改由粉丝读 Feed 时"拉取 + 合并"（推拉结合） */
+    /** 写扩散阈值：粉丝数超过该值的作者不做写扩散（跳过时打 WARN），改由粉丝读 Feed 时按作者补拉并合并 */
     int FEED_PUSH_THRESHOLD = 1000;
 
     /**

@@ -43,6 +43,12 @@ public class MallE2E {
     static String token = "";
     static int pass = 0, fail = 0;
 
+    /** 大V fixture 账号名：该账号的粉丝数必须超过写扩散阈值，才可能触发"跳过推送"，是补拉断言的前提 */
+    static final String BIGV_USER = "FeedAuthor";
+
+    /** 与内容域 FEED_PUSH_THRESHOLD 保持一致：超过该粉丝数的作者不再写扩散 */
+    static final int BIGV_THRESHOLD = 1000;
+
     public static void main(String[] args) throws Exception {
         if (!waitReady()) {
             System.out.println("网关未就绪，退出");
@@ -250,6 +256,47 @@ public class MallE2E {
         JsonNode hotRank = get("/shops/hot?limit=3", false);
         check("热度榜(ZSet)可读", hotRank.size() > 0, hotRank.size() + " 家门店");
 
+        // 大V（粉丝数超过写扩散阈值）发布后，粉丝的 Feed 必须能看到这条笔记。
+        // 这条笔记没有被写扩散进收件箱，只能经由读路径补拉进入视图，所以两条断言必须成对：
+        // 旧接口看不到（推送确实被跳过）且新接口看得到（补拉生效）。缺一样都证明不了闭环。
+        JsonNode bigvLogin = null;
+        try {
+            bigvLogin = post("/users/login", "{\"username\":\"" + BIGV_USER + "\",\"password\":\"123456\"}", false);
+        } catch (Exception ignored) {
+            // 环境里没有这个 fixture 账号：不算失败，但要把跳过原因说清楚
+        }
+        if (bigvLogin == null) {
+            System.out.println("  [跳过] 大V Feed 补拉 —— 环境里没有 " + BIGV_USER + " 账号");
+        } else {
+            String bigvToken = bigvLogin.path("accessToken").asText();
+            long bigvId = bigvLogin.path("userId").asLong();
+            long fans = get("/follows/" + bigvId + "/fans", true).asLong();
+            if (fans <= BIGV_THRESHOLD) {
+                System.out.println("  [跳过] 大V Feed 补拉 —— " + BIGV_USER + " 粉丝数 " + fans
+                        + " 未超过阈值 " + BIGV_THRESHOLD);
+            } else {
+                post("/follows/" + bigvId, null, true);
+                String title = "E2E 大V 补拉断言 " + System.currentTimeMillis();
+                postAs(bigvToken, "/blogs", "{\"shopId\":1,\"title\":\"" + title
+                        + "\",\"content\":\"跨过阈值后不再写扩散，只能靠读路径补拉\",\"score\":5}");
+                boolean inOld = containsTitle(get("/follows/feed?size=50", true), title);
+                check("大V 笔记不进旧接口（写扩散确实被跳过）", !inOld,
+                        "粉丝数 " + fans + " 超过阈值，该笔记未被推进收件箱");
+                JsonNode newItems = get("/follows/feed/v2?size=50", true).path("items");
+                check("大V 粉丝在 v2 Feed 能看到这条（读路径补拉生效）", containsTitle(newItems, title),
+                        "补拉后可见，本页 " + newItems.size() + " 条");
+                java.util.Set<Long> uniq = new java.util.HashSet<>();
+                boolean dup = false;
+                for (JsonNode it : newItems) {
+                    if (!uniq.add(it.path("blogId").asLong())) {
+                        dup = true;
+                    }
+                }
+                check("v2 Feed 无重复条目（跨阈值两路相交后被去重）", !dup,
+                        "唯一 " + uniq.size() + " / 共 " + newItems.size());
+            }
+        }
+
         System.out.println("\n================ 结果 ================");
         System.out.println("通过 " + pass + " 项，失败 " + fail + " 项");
     }
@@ -281,6 +328,39 @@ public class MallE2E {
             b.header("authorization", token);
         }
         return HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    }
+
+    /** 用指定账号的令牌发请求：大V 断言的发布动作必须由那个账号本人发起，不能借用登录态全局变量 */
+    static HttpResponse<String> sendAs(String method, String path, String body, String tok) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(BASE + path)).timeout(Duration.ofSeconds(25));
+        if (body != null) {
+            b.header("content-type", "application/json; charset=utf-8");
+            b.method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+        } else {
+            b.method(method, HttpRequest.BodyPublishers.noBody());
+        }
+        if (tok != null && !tok.isEmpty()) {
+            b.header("authorization", tok);
+        }
+        return HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    }
+
+    static JsonNode postAs(String tok, String path, String body) throws Exception {
+        HttpResponse<String> r = sendAs("POST", path, body, tok);
+        if (r.statusCode() != 200) {
+            throw new RuntimeException("POST " + path + " → " + r.statusCode() + " " + r.body());
+        }
+        return M.readTree(r.body());
+    }
+
+    /** 判断一页结果里是否存在指定标题；Feed 视图的标题字段是 title */
+    static boolean containsTitle(JsonNode arr, String title) {
+        for (JsonNode n : arr) {
+            if (title.equals(n.path("title").asText())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static JsonNode get(String path, boolean auth) throws Exception {

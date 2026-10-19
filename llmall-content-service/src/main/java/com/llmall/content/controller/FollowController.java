@@ -2,12 +2,15 @@ package com.llmall.content.controller;
 
 import com.llmall.common.utils.UserContext;
 import com.llmall.content.domain.vo.FeedItemVO;
+import com.llmall.content.domain.vo.FeedPageVO;
 import com.llmall.content.service.IFollowService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import io.swagger.v3.oas.annotations.Operation;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Set;
 
@@ -70,5 +73,22 @@ public class FollowController {
     public List<Long> feedIds(@RequestParam(value = "lastId", required = false) Long lastId,
                               @RequestParam(value = "size", required = false, defaultValue = "10") Integer size) {
         return followService.queryFeed(UserContext.getUser(), lastId, size);
+    }
+
+    /**
+     * 我的 Feed 流 v2：收件箱（推）与大V 作者近若干条（拉）归并后分页。
+     *
+     * 【游标】首页 li / ct / ci 都不传；后续页回传上一页的 nextLi / nextCt / nextCi。
+     * ct 与 ci 必须成对使用，只用发布时间会在同一秒内重行。
+     * 【与 /feed 的关系】/feed 保持纯推语义不变，v2 是新增能力，两者不改变对方口径。
+     */
+    @Operation(summary = "我的 Feed 流 v2（推拉结合：收件箱 + 大V 补拉合并，复合游标）")
+    @GetMapping("/feed/v2")
+    public FeedPageVO feedV2(@RequestParam(value = "li", required = false) Long li,
+                             @RequestParam(value = "ct", required = false)
+                             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime ct,
+                             @RequestParam(value = "ci", required = false) Long ci,
+                             @RequestParam(value = "size", required = false, defaultValue = "10") Integer size) {
+        return followService.queryFeedItemsV2(UserContext.getUser(), li, ct, ci, size);
     }
 }
