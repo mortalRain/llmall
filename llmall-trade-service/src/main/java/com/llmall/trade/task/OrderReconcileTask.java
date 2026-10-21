@@ -34,6 +34,12 @@ public class OrderReconcileTask {
     private static final int RECONCILE_WINDOW_HOURS = 24;
     private static final int BATCH_SIZE = 100;
 
+    /**
+     * 单轮最多翻几批（防一轮跑太久拖住调度线程）。100 笔/批 × 10 批 = 单轮最多 1000 笔，
+     * 超出的顺延到下一轮；每轮都从 id 游标位置继续，不会重复也不会漏。
+     */
+    private static final int MAX_BATCHES_PER_ROUND = 10;
+
     /** 连续出现"状态未知"达到该轮数就升级为 ERROR（下游长时间不可用需人工介入） */
     private static final int UNKNOWN_ALERT_ROUNDS = 3;
 
@@ -59,34 +65,59 @@ public class OrderReconcileTask {
             fixedDelayString = "${llmall.reconcile.interval-ms:300000}")
     public void reconcilePaidOrders() {
         try {
-            List<Order> orders = orderService.lambdaQuery()
-                    .eq(Order::getStatus, Order.STATUS_PAID)
-                    .ge(Order::getPayTime, LocalDateTime.now().minusHours(RECONCILE_WINDOW_HOURS))
-                    .last("LIMIT " + BATCH_SIZE)
-                    .list();
-            if (orders.isEmpty()) {
-                return;
-            }
+            // 原来只有裸的 `.last("LIMIT 100")`：没有 ORDER BY 也不翻页，积压超过 100 笔时每轮都对到
+            // 同一批，后面的订单永远轮不到。改成 ORDER BY id + id 游标翻页，id 是雪花号单调递增，
+            // 上一批最后一条即下批起点，不重复也不遗漏；到批次上限仍未取空时只告警，余量顺延下一轮。
+            long cursor = 0L;
+            int batches = 0;
+            int total = 0;
             int consumed = 0;
             int missing = 0;
             int unknown = 0;
-            for (Order order : orders) {
-                DownstreamState points = safePointsApplied(order.getId());
-                DownstreamState shop = safeShopConsumed(order.getId());
-                if (points == DownstreamState.UNKNOWN || shop == DownstreamState.UNKNOWN) {
-                    // 只要有一项未知这一笔就不下结论：不补发（避免补偿风暴）、也不算作已处理（避免掩盖缺口）
-                    unknown++;
-                    continue;
+            boolean truncated = false;
+            while (batches < MAX_BATCHES_PER_ROUND) {
+                batches++;
+                List<Order> orders = orderService.lambdaQuery()
+                        .eq(Order::getStatus, Order.STATUS_PAID)
+                        .ge(Order::getPayTime, LocalDateTime.now().minusHours(RECONCILE_WINDOW_HOURS))
+                        .gt(Order::getId, cursor)
+                        .orderByAsc(Order::getId)
+                        .last("LIMIT " + BATCH_SIZE)
+                        .list();
+                if (orders.isEmpty()) {
+                    break;
                 }
-                if (points == DownstreamState.NOT_CONSUMED || shop == DownstreamState.NOT_CONSUMED) {
-                    missing++;
-                    log.warn("对账发现下游未处理: orderId={}, points={}, shop={}", order.getId(), points, shop);
-                    messageLogService.compensate(MqConstants.BIZ_ORDER_PAID, String.valueOf(order.getId()));
-                } else {
-                    consumed++;
+                for (Order order : orders) {
+                    DownstreamState points = safePointsApplied(order.getId());
+                    DownstreamState shop = safeShopConsumed(order.getId());
+                    if (points == DownstreamState.UNKNOWN || shop == DownstreamState.UNKNOWN) {
+                        // 只要有一项未知这一笔就不下结论：不补发（避免补偿风暴）、也不算作已处理（避免掩盖缺口）
+                        unknown++;
+                        continue;
+                    }
+                    if (points == DownstreamState.NOT_CONSUMED || shop == DownstreamState.NOT_CONSUMED) {
+                        missing++;
+                        log.warn("对账发现下游未处理: orderId={}, points={}, shop={}", order.getId(), points, shop);
+                        messageLogService.compensate(MqConstants.BIZ_ORDER_PAID, String.valueOf(order.getId()));
+                    } else {
+                        consumed++;
+                    }
                 }
+                total += orders.size();
+                cursor = orders.get(orders.size() - 1).getId();
+                if (orders.size() < BATCH_SIZE) {
+                    break;
+                }
+                truncated = (batches >= MAX_BATCHES_PER_ROUND);
             }
-            report(orders.size(), consumed, missing, unknown);
+            if (total == 0) {
+                return;
+            }
+            if (truncated) {
+                log.warn("对账本轮已达批次上限 {} 批（{} 笔），剩余订单顺延到下一轮（不会漏，只是延后）",
+                        MAX_BATCHES_PER_ROUND, total);
+            }
+            report(total, consumed, missing, unknown);
         } catch (Exception e) {
             log.error("对账任务执行异常", e);
         }
