@@ -6,37 +6,23 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.api.dto.ShopDTO;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.constant.MqConstants;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.domain.PageDTO;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.domain.PageQuery;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.BeanUtils;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.CollUtils;
-import com.llmall.common.tx.TxAfterCommit;
+import com.llmall.shop.domain.bo.RebuildReason;
 import com.llmall.shop.domain.bo.RedisData;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.domain.po.ConsumeRecord;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.domain.po.Shop;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.event.ShopDocChangedEvent;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.mapper.ConsumeRecordMapper;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.mapper.ShopMapper;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.mapper.ShopTypeMapper;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.mq.ShopEventPublisher;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.shop.service.IShopService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -236,8 +222,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
                 cacheRebuildExecutor.execute(() -> {
                     try {
                         log.info("异步重建门店缓存, id={}", id);
-                        // 逻辑过期路径：查库前读到过缓存值，传 true 表示只回源不回填（见 rebuildCache）
-                        rebuildCache(id, true);
+                        // 逻辑过期路径：必须回填，否则缓存越过逻辑过期后再也不会刷新
+                        rebuildCache(id, RebuildReason.LOGICAL_EXPIRE);
                     } catch (Exception e) {
                         log.error("重建门店缓存失败, id={}", id, e);
                     } finally {
@@ -281,7 +267,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
                 if (recheck != null) {
                     return hit.getData();
                 }
-                return rebuildCache(id, false);
+                return rebuildCache(id, RebuildReason.COLD_MISS);
             } finally {
                 unlock(lockKey, token);
             }
@@ -320,16 +306,15 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     /**
      * 查库并回填缓存；门店不存在时写入空值哨兵。两种 key 都必须带 Redis 物理 TTL。
      *
-     * @param cacheHitBeforeQuery 调用方查库之前是否读到过一个可解析的缓存值。
-     *        【注意】持锁线程二次检查没读到值时，既可能是①本来就是冷 key（可正常回填），也可能是
-     *        ②缓存刚被别的线程或运维 evictCache 删掉；②时本次查库读到的是尚未提交的旧值，
-     *        回填会让旧值驻留最长 {@code ttl + physical-extra} 分钟，所以只查库、不回填。
+     * @param reason 重建原因，见 {@link RebuildReason}。
+     *               【注意】只有 EVICT_RACE 才放弃回填：此时查到的可能是删除前读到的旧值。
+     *               逻辑过期路径必须回填，否则缓存越过逻辑过期后永远不会刷新。
      */
-    private ShopDTO rebuildCache(Long id, boolean cacheHitBeforeQuery) {
+    private ShopDTO rebuildCache(Long id, RebuildReason reason) {
         Shop shop = getById(id);
         ShopDTO dto = shop == null ? null : toDTO(shop);
-        if (cacheHitBeforeQuery) {
-            log.warn("缓存重建期间读到过缓存值（疑似刚被失效），本次只回源不回填，避免把旧值写回缓存, id={}", id);
+        if (reason == RebuildReason.EVICT_RACE) {
+            log.warn("缓存重建期间缓存被并发删除，本次只回源不回填，避免把旧值写回缓存, id={}", id);
             return dto;
         }
         if (shop == null) {
@@ -917,7 +902,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Override
     public void evictCache(Long shopId) {
-        // 运维手动失效（DELETE /shops/cache/{id}）是外部主动动作，不在事务里，直接删
+        // 运维手动失效：与重建共用同一把锁，避免"重建线程刚写到一半、删除把新值删掉"的交叉。
+        // 拿不到锁时短等（重建通常只有毫秒级），仍拿不到则直接删并留日志，保证运维动作不被无限阻塞。
         evictAllShopDerivedData(shopId);
         log.info("门店缓存已失效（详情 + 榜单 + GEO 坐标）, shopId={}", shopId);
     }
@@ -934,24 +920,45 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         if (shopId == null) {
             return;
         }
+        evictAllShopDerivedData(shopId);
+        log.info("门店下线清理完成（榜单 + GEO + 详情缓存）, shopId={}", shopId);
+    }
+
+    /** 三份派生数据一起删：详情缓存 key、榜单成员、GEO 坐标 */
+    private void evictAllShopDerivedData(Long shopId) {
+        deleteCacheUnderLock(shopId);
         removeFromRank(shopId);
         try {
             redisTemplate.opsForZSet().remove(SHOP_GEO_KEY, String.valueOf(shopId));
         } catch (Exception e) {
             log.error("从 GEO 索引移除门店失败, shopId={}", shopId, e);
         }
-        deleteCacheKey(SHOP_CACHE_KEY + shopId);
-        log.info("门店下线清理完成（榜单 + GEO + 详情缓存）, shopId={}", shopId);
     }
 
-    /** 三份派生数据一起删：详情缓存 key、榜单成员、GEO 坐标 */
-    private void evictAllShopDerivedData(Long shopId) {
-        deleteCacheKey(SHOP_CACHE_KEY + shopId);
-        removeFromRank(shopId);
+    /**
+     * 在重建锁的保护下删除详情缓存。
+     *
+     * 【为什么删除也要拿锁】重建线程的时序是"查库 -> 写缓存"。若删除发生在查库之后、写缓存之前，
+     * 新值会被随后的写入覆盖成旧值；把删除与重建串行化后，只可能出现"先写后删（自愈）"或
+     * "先删后写新值"两种顺序，不会留下旧值。
+     */
+    private void deleteCacheUnderLock(Long shopId) {
+        String lockKey = SHOP_LOCK_KEY + shopId;
+        String token = tryLock(lockKey);
+        long deadline = System.currentTimeMillis() + lockWaitMillis;
+        while (token == null && System.currentTimeMillis() < deadline) {
+            sleepQuietly(lockWaitIntervalMillis);
+            token = tryLock(lockKey);
+        }
+        if (token == null) {
+            log.warn("失效门店缓存时未取得重建锁，直接删除（并发重建可能写回旧值）, shopId={}", shopId);
+        }
         try {
-            redisTemplate.opsForZSet().remove(SHOP_GEO_KEY, String.valueOf(shopId));
-        } catch (Exception e) {
-            log.error("从 GEO 索引移除门店失败, shopId={}", shopId, e);
+            deleteCacheKey(SHOP_CACHE_KEY + shopId);
+        } finally {
+            if (token != null) {
+                unlock(lockKey, token);
+            }
         }
     }
 

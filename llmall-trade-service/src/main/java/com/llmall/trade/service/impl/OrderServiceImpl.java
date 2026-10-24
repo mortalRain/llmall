@@ -1,5 +1,7 @@
 package com.llmall.trade.service.impl;
 
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.crypto.digest.DigestUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -39,10 +41,12 @@ import io.seata.spring.annotation.GlobalTransactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
@@ -75,6 +79,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private final VoucherClient voucherClient;
     private final UserClient userClient;
     private final PayClient payClient;
+    private final TransactionTemplate transactionTemplate;
 
     @org.springframework.beans.factory.annotation.Value("${llmall.trade.order-timeout-seconds:900}")
     private long orderTimeoutSeconds;
@@ -101,8 +106,38 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     @Override
     // Seata AT 全局事务（下单 + 跨服务扣库存/锁券）；seata.enabled=false（默认）时注解不生效，方法退化为纯本地事务
     @GlobalTransactional(name = "llmall-create-order", rollbackFor = Exception.class)
-    @Transactional(rollbackFor = Exception.class)
     public Long createOrder(OrderFormDTO orderFormDTO) {
+        Long userId = requireLogin();
+        String clientToken = orderFormDTO == null ? null : StrUtil.trimToNull(orderFormDTO.getClientToken());
+        // 幂等回放：同一用户同一令牌已经下过单，直接返回原订单，不再重复扣库存/锁券
+        if (clientToken != null) {
+            Order exist = findByIdempotencyKey(userId, clientToken);
+            if (exist != null) {
+                return replayOrder(exist, orderFormDTO);
+            }
+        }
+        try {
+            return transactionTemplate.execute(status -> doCreateOrder(orderFormDTO, clientToken));
+        } catch (DuplicateKeyException e) {
+            // 并发提交同一令牌：唯一键 uk_user_token 裁决，输的一方回查并回放
+            if (clientToken == null) {
+                throw e;
+            }
+            Order exist = findByIdempotencyKey(userId, clientToken);
+            if (exist == null) {
+                throw e;
+            }
+            return replayOrder(exist, orderFormDTO);
+        }
+    }
+
+    /**
+     * 下单事务体：由事务模板包住，保证"业务数据 + 消息表"同事务。
+     *
+     * 【为什么把事务从方法注解改成模板】幂等冲突的回查必须发生在事务结束之后：
+     * REPEATABLE READ 下，同一事务内的快照早于并发提交，捕获唯一键冲突后再查可能查不到那一行。
+     */
+    private Long doCreateOrder(OrderFormDTO orderFormDTO, String clientToken) {
         // num 必须在 1~99：num<=0 会让扣库存 SQL 退化成加库存、总价算成负数，落库即脏数据
         List<OrderDetailDTO> detailDTOS = orderFormDTO.getDetails();
         if (CollUtils.isEmpty(detailDTOS)) {
@@ -140,6 +175,8 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         order.setPaymentType(orderFormDTO.getPaymentType());
         order.setUserId(UserContext.getUser());
         order.setStatus(Order.STATUS_UNPAID);
+        order.setClientToken(clientToken);
+        order.setRequestHash(clientToken == null ? null : orderRequestHash(orderFormDTO));
         ItemDTO firstItem = items.get(0);
         order.setShopId(firstItem.getShopId());
         order.setOrderType(ITEM_TYPE_PACKAGE == (firstItem.getType() == null ? 1 : firstItem.getType())
@@ -205,8 +242,46 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         return order.getId();
     }
 
+    /** 按用户 + 客户端令牌查已存在的订单（唯一键 uk_user_token 的查询侧） */
+    private Order findByIdempotencyKey(Long userId, String clientToken) {
+        return lambdaQuery()
+                .eq(Order::getUserId, userId)
+                .eq(Order::getClientToken, clientToken)
+                .one();
+    }
+
     /**
-     * 登记"下单事务没提交就把库存补回来"的钩子，必须在真正扣库存之前调用。
+     * 幂等回放：同令牌同参数返回原订单；同令牌不同参数说明客户端复用了令牌，必须拒绝。
+     */
+    private Long replayOrder(Order exist, OrderFormDTO orderFormDTO) {
+        String hash = orderRequestHash(orderFormDTO);
+        if (exist.getRequestHash() != null && !exist.getRequestHash().equals(hash)) {
+            throw new BadRequestException("同一幂等令牌不能用于不同的下单参数");
+        }
+        log.info("下单幂等回放，返回已存在订单: orderId={}", exist.getId());
+        return exist.getId();
+    }
+
+    /**
+     * 下单参数哈希：覆盖影响订单内容与金额的字段，商品行排序后拼接以保证"顺序无关"。
+     */
+    private static String orderRequestHash(OrderFormDTO orderFormDTO) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(orderFormDTO.getAddressId()).append('|')
+                .append(orderFormDTO.getPaymentType()).append('|')
+                .append(orderFormDTO.getUserVoucherId()).append('|');
+        if (orderFormDTO.getDetails() != null) {
+            orderFormDTO.getDetails().stream()
+                    .filter(Objects::nonNull)
+                    .map(detail -> detail.getItemId() + ":" + detail.getNum())
+                    .sorted()
+                    .forEach(item -> sb.append(item).append(';'));
+        }
+        return DigestUtil.sha256Hex(sb.toString());
+    }
+
+    /**
+     * 登记"下单事务没提交就把库存补回来"的钩子：必须在真正扣库存之前调用。
      *
      * 兜的是跨服务调用丢回包的场景：库存侧已扣成功而回包丢失/超时，本地事务回滚后会留下"订单不存在、库存少了"且无人可查的少卖。
      * 用 afterCompletion 而非 catch：提交阶段失败（status=UNKNOWN）时方法已正常返回，catch 不会执行，判据必须是不等于 COMMITTED。

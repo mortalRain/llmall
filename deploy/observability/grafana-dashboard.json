@@ -1,0 +1,154 @@
+{
+  "title": "llmall 运行看板",
+  "uid": "llmall-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "全站 QPS",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(http_server_requests_seconds_count[1m]))",
+          "legendFormat": "all services"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "P99 延迟（按接口）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, uri) (rate(http_server_requests_seconds_bucket[5m])))",
+          "legendFormat": "{{uri}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "5xx 比例（5 分钟）",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count[5m])), 1)"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "鉴权降级次数（5 分钟）",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(llmall_auth_degrade_total[5m]))" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "补偿失败（按域）",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (domain, action) (increase(llmall_compensation_failure_total[10m]))",
+          "legendFormat": "{{domain}}/{{action}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "扣款结果未知 / 检索回落",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(llmall_pay_deduct_uncertain_total[10m]))", "legendFormat": "deduct uncertain" },
+        { "refId": "B", "expr": "sum by (reason) (increase(llmall_search_fallback_total[5m]))", "legendFormat": "search fallback {{reason}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "JVM 堆使用",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (job) (jvm_memory_used_bytes{area=\"heap\"})", "legendFormat": "{{job}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Hikari 连接池（活跃 / 等待）",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (job) (hikaricp_connections_active)", "legendFormat": "active {{job}}" },
+        { "refId": "B", "expr": "sum by (job) (hikaricp_connections_pending)", "legendFormat": "pending {{job}}" }
+      ]
+    }
+  ]
+}

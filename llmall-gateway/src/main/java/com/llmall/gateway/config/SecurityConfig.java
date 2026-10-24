@@ -1,4 +1,5 @@
 package com.llmall.gateway.config;
+import com.llmall.common.security.InternalCredentialProperties;
 import com.llmall.common.security.JwtProperties;
 import com.llmall.common.security.JwtTool;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -20,7 +21,7 @@ import java.security.KeyPair;
  * 一边换库、换 alias 或改口令而另一边没同步，表现为"登录成功但所有接口 401"（验签失败），且只在跨服务调用时暴露。
  */
 @Configuration
-@EnableConfigurationProperties(JwtProperties.class)
+@EnableConfigurationProperties({JwtProperties.class, InternalCredentialProperties.class})
 public class SecurityConfig {
 
     @Bean

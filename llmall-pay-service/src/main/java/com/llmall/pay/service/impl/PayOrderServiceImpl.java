@@ -11,6 +11,7 @@ import com.llmall.api.dto.TradeOrderDTO;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.ForbiddenException;
+import com.llmall.common.metrics.BizMetrics;
 import com.llmall.common.trace.BizTrace;
 import com.llmall.common.utils.BeanUtils;
 import com.llmall.common.utils.UserContext;
@@ -25,6 +26,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -95,6 +97,8 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
     private final TradeClient tradeClient;
 
     private final RabbitTemplate rabbitTemplate;
+
+    private final BizMetrics metrics;
 
     private final StringRedisTemplate redisTemplate;
 
@@ -351,13 +355,15 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
      * 【返回】true 表示本次拿到闸门，false 表示状态已被并发请求改走，调用方必须立即失败并且不能扣款。
      */
     private boolean claimDeductAttempt(Long payOrderId) {
+        // 从 1 推进到 4（支付中）：写入的值一定发生变化，不依赖驱动返回匹配行数还是变更行数；
+        // 同时把"有人正在支付"这个事实写进账本，供对账任务识别卡死的支付单
         boolean claimed = lambdaUpdate()
                 .eq(PayOrder::getId, payOrderId)
                 .eq(PayOrder::getStatus, PayStatus.WAIT_BUYER_PAY.getValue())
-                .set(PayOrder::getStatus, PayStatus.WAIT_BUYER_PAY.getValue())
+                .set(PayOrder::getStatus, PayStatus.PAYING.getValue())
                 .update();
         if (!claimed) {
-            // 可能已被并发请求推进为 3 或关闭为 2：错误提示与支付单申请侧的失败语义保持一致
+            // 可能已被并发请求推进为 3、4 或关闭为 2：错误提示与支付单申请侧的失败语义保持一致
             log.warn("扣款尝试未获得闸门（支付单状态已变更）: payOrderId={}", payOrderId);
         }
         return claimed;
@@ -425,6 +431,7 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
      * 代价是这笔单退化成"看起来从未发起过支付"，只能靠这条 error 日志人工接手。
      */
     private void markDeductUncertain(Long payOrderId, String deductBizNo, Exception cause) {
+        metrics.increment("llmall.pay.deduct.uncertain");
         try {
             lambdaUpdate()
                     .eq(PayOrder::getId, payOrderId)
@@ -481,12 +488,13 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
         });
     }
 
-    /** 事务未提交时把支付单归位为待支付：只收敛 0/1 这类非终态 —— 已是 3 或 2 的账本不能被改回来 */
+    /** 事务未提交时把支付单归位为待支付：只收敛 0/1/4 这类非终态 —— 已是 3 或 2 的账本不能被改回来 */
     private void restoreWaitPayIfNotTerminal(Long payOrderId) {
         try {
             boolean reset = lambdaUpdate()
                     .eq(PayOrder::getId, payOrderId)
-                    .in(PayOrder::getStatus, PayStatus.NOT_COMMIT.getValue(), PayStatus.WAIT_BUYER_PAY.getValue())
+                    .in(PayOrder::getStatus, PayStatus.NOT_COMMIT.getValue(),
+                            PayStatus.WAIT_BUYER_PAY.getValue(), PayStatus.PAYING.getValue())
                     .set(PayOrder::getStatus, PayStatus.WAIT_BUYER_PAY.getValue())
                     .update();
             log.warn("支付流程未提交，支付单已归位为待支付: payOrderId={}, 是否发生变更={}", payOrderId, reset);
@@ -605,6 +613,7 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
         } catch (Exception refundError) {
             log.error("【需人工介入】支付流程失败且自动退款补偿也失败，用户余额可能已被扣走: payOrderId={}, payerId={}, amount={}, bizNo={}",
                     payOrderId, payerId, amount, refundBizNo, refundError);
+            metrics.compensationFailure("pay", "refund");
         }
     }
 
@@ -634,8 +643,9 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
                 .set(PayOrder::getStatus, PayStatus.TRADE_SUCCESS.getValue())
                 .set(PayOrder::getPaySuccessTime, successTime)
                 .eq(PayOrder::getId, id)
-                // 乐观锁：仅限 0/1 这两个源状态推进为支付成功
-                .in(PayOrder::getStatus, PayStatus.NOT_COMMIT.getValue(), PayStatus.WAIT_BUYER_PAY.getValue())
+                // 乐观锁：只允许 0/1/4 这些未终态的源状态推进为支付成功
+                .in(PayOrder::getStatus, PayStatus.NOT_COMMIT.getValue(),
+                        PayStatus.WAIT_BUYER_PAY.getValue(), PayStatus.PAYING.getValue())
                 .update();
     }
 
@@ -664,7 +674,19 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
             payOrder.setPayOrderNo(IdWorker.getId());
             timer.record("pay.idWorker.getId", idBegin);
             long saveBegin = timer.begin();
-            save(payOrder);
+            try {
+                save(payOrder);
+            } catch (DuplicateKeyException e) {
+                // 并发申请同一交易订单：由唯一键 biz_order_no 裁决，第二个请求回查并复用已提交的支付单。
+                // 【注意】applyPayOrder 没有事务，所以能看见并发事务刚提交的行；若将来给它加事务，
+                // RR 快照会让这里回查不到，必须把回查放到事务外层或用 REQUIRES_NEW。
+                PayOrder exist = queryByBizOrderNo(applyDTO.getBizOrderNo());
+                if (exist == null) {
+                    throw e;
+                }
+                timer.record("pay.save", saveBegin);
+                return exist;
+            }
             timer.record("pay.save", saveBegin);
             return payOrder;
         }
@@ -731,7 +753,8 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
                 .set(PayOrder::getStatus, PayStatus.TRADE_CLOSED.getValue())
                 .eq(PayOrder::getId, payOrder.getId())
                 .in(PayOrder::getStatus, PayStatus.NOT_COMMIT.getValue(),
-                        PayStatus.WAIT_BUYER_PAY.getValue(), PayStatus.TRADE_SUCCESS.getValue())
+                        PayStatus.WAIT_BUYER_PAY.getValue(), PayStatus.PAYING.getValue(),
+                        PayStatus.TRADE_SUCCESS.getValue())
                 .update();
         if (closed) {
             log.info("退款回写支付单：支付单已关闭（原状态 {}），payOrderId={}, bizOrderNo={}",

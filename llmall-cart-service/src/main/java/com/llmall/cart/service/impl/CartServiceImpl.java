@@ -3,46 +3,30 @@ import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.api.client.ItemClient;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.api.dto.ItemDTO;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.config.CartProperties;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.constant.CartRedisConstants;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.constant.CartRedisScripts;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.domain.dto.CartFormDTO;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.domain.po.Cart;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.domain.vo.CartVO;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.mapper.CartMapper;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.cart.service.ICartService;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.BadRequestException;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.BizIllegalException;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.UnauthorizedException;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.BeanUtils;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.CollUtils;
-import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.common.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -57,10 +41,11 @@ import java.util.stream.Collectors;
  * 购物车业务：加购、改数量、删条目、下单后清空购物车，Redis Hash 缓存 + MySQL 双写。
  *
  * 【注意】读缓存"未命中"与"购物车为空"是两种状态，混同会在 Redis 抖动时把用户的购物车显示成空。
- * 【注意】写路径先写 DB 再整份重建缓存；重建统一注册给 TxAfterCommit，因此只保证"绝不早于事务提交"：
- * 本类的方法都不带 @Transactional，自身被调用时没有事务上下文，重建是立即执行的；只有调用方自带事务
- * （如订单侧的清车路径）才会等提交后才执行。缓存读写失败只记日志，不抛给业务。
- * 【注意】不做单字段删除的精细更新：整份重建保证"缓存 == 那一刻的 DB"，条目数有硬上限（默认 10），成本可忽略。
+ * 【注意】写路径先写 DB 再失效缓存，失效统一注册给 TxAfterCommit，因此只保证"绝不早于事务提交"：
+ * 加购带事务，提交后才失效；清车等 MQ 路径没有事务上下文，失效立即执行。
+ * 缓存读写失败只记日志，不抛给业务。
+ * 【注意】写路径只失效、不重建：重建是"读快照再整份写回"，并发写会丢更新；
+ * 失效后由下一次读回源重建，条目数有硬上限（默认 10），回填成本可忽略。
  *
  * @author 同城生活
  * @since 2023-05-05
@@ -82,6 +67,7 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
     private final ObjectMapper objectMapper;
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void addItem2Cart(CartFormDTO cartFormDTO) {
         Long userId = UserContext.getUser();
         if (userId == null) {
@@ -99,15 +85,15 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
         if (affected == 1) {
             long count = lambdaQuery().eq(Cart::getUserId, userId).count();
             if (count > maxEntries) {
-                // 超限则撤掉刚插入的条目，维持"最多 maxEntries 种商品"
+                // 超限则撤掉刚插入的条目，维持"最多 maxEntries 种商品"。
+                // 本方法带事务，插入与撤销同成败，不会留下"永久超限"的中间状态。
                 lambdaUpdate().eq(Cart::getUserId, userId).eq(Cart::getItemId, cartFormDTO.getItemId()).remove();
-                // 撤销后 DB 已无此条目，缓存必须紧随重建，否则缓存里会留下刚插入的条目
-                rebuildCacheAfterCommit(userId);
+                invalidateCacheAfterCommit(userId);
                 throw new BizIllegalException(StrUtil.format("购物车最多放 {} 种商品", maxEntries));
             }
         }
-        // DB 已是最新，整份重建缓存（提交后执行，见 rebuildCacheAfterCommit）
-        rebuildCacheAfterCommit(userId);
+        // DB 已是最新：只失效缓存，不在写路径重建（见 invalidateCacheAfterCommit 的说明）
+        invalidateCacheAfterCommit(userId);
     }
 
     @Override
@@ -155,9 +141,14 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
 
     @Override
     public void updateCartNum(Cart cart) {
-        // 数量边界在入口拦住：负数/0 会在下单时被当成"正数购买"或被静默忽略（前端约束为 1~99）
+        // 数量边界在入口拦住：负数/0 会在下单时被当成"正数购买"或被静默忽略
         if (cart.getNum() == null || cart.getNum() < 1) {
             throw new BadRequestException("购买数量必须大于 0");
+        }
+        // 上限必须与加购一致：只校验下界时，改数量接口可以把 num 改成任意大，
+        // 而交易域按 price * num 用 int 累加金额，存在溢出与展示失真
+        if (cart.getNum() > MAX_NUM_PER_ITEM) {
+            throw new BadRequestException("单个商品一次最多购买 " + MAX_NUM_PER_ITEM + " 件");
         }
         // 归属校验以库里的 user_id 为准：请求体的 userId 前端可控，
         // 用它做条件等于把"改谁的购物车"交给调用方决定
@@ -174,7 +165,7 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
                 .eq(Cart::getUserId, userId)
                 .set(Cart::getNum, cart.getNum())
                 .update();
-        rebuildCacheAfterCommit(userId);
+        invalidateCacheAfterCommit(userId);
     }
 
     @Override
@@ -193,7 +184,7 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
                 .eq(Cart::getId, id)
                 .eq(Cart::getUserId, userId));
         // 只删 DB 不重建缓存，用户刷新后仍会看到旧条目（最长 CART_CACHE_TTL）
-        rebuildCacheAfterCommit(userId);
+        invalidateCacheAfterCommit(userId);
     }
 
     @Override
@@ -214,7 +205,7 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
                 .in(Cart::getItemId, itemIds);
         remove(queryWrapper);
         // 下单后清空购物车也走这条路：不重建缓存会表现为"下单了购物车还在"
-        rebuildCacheAfterCommit(userId);
+        invalidateCacheAfterCommit(userId);
     }
 
     /**
@@ -266,27 +257,20 @@ public class CartServiceImpl extends ServiceImpl<CartMapper, Cart> implements IC
     }
 
     /**
-     * 事务提交后重建缓存；无事务上下文（如 MQ 消费端直接调用）时立即重建。
+     * 事务提交后失效缓存；无事务上下文（如 MQ 消费端直接调用）时立即失效。
      *
-     * 【注意】在事务内重建等于把尚未提交（很可能随后回滚）的状态写进 Redis，回滚后 DB 是旧值、
-     * 缓存却是新值；提交后重建最坏只是缓存短暂落后于 DB，由 TTL 兜底。
+     * 【为什么是失效而不是重建】重建是"读 DB 快照 + 整份写回"，两条并发写就会出现
+     * "先读到的旧快照后落盘、覆盖掉新值"的丢更新。失效没有这个问题：
+     * 写路径只删 key，下一次读回源时读到的一定是当时已提交的数据。
+     *
+     * 【为什么必须等提交后】提交前删 key，并发读会回源读到尚未提交的旧值并回填，
+     * 提交后缓存仍是旧值；提交后删最坏只是这段时间没有缓存，由 TTL 与回源兜底。
      */
-    private void rebuildCacheAfterCommit(Long userId) {
+    private void invalidateCacheAfterCommit(Long userId) {
         if (userId == null) {
             return;
         }
-        TxAfterCommit.run("rebuild cart cache user=" + userId, () -> rebuildFromDb(userId));
-    }
-
-    /** 从 DB 重新读一遍整份重建缓存：以"库里那一刻的样子"为准，不猜哪个字段变了 */
-    private void rebuildFromDb(Long userId) {
-        try {
-            List<Cart> latest = lambdaQuery().eq(Cart::getUserId, userId).list();
-            rebuildCache(CartRedisConstants.CART_CACHE_KEY + userId, latest);
-        } catch (Exception e) {
-            // 重建失败不影响主流程：缓存有 TTL，到期后下次读自然回源
-            log.error("按 DB 重建购物车缓存失败: userId={}", userId, e);
-        }
+        TxAfterCommit.run("evict cart cache user=" + userId, () -> deleteCache(CartRedisConstants.CART_CACHE_KEY + userId));
     }
 
     /**

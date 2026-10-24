@@ -20,11 +20,22 @@ public interface IUserService extends IService<User> {
     /** 用户名 + 密码登录：返回令牌对、用户视图与改密标记。 */
     UserLoginVO login(LoginFormDTO loginFormDTO);
 
-    /** 发送手机验证码：同一手机号在发送间隔内只允许一次，验证码在有效期内只能核销一次。 */
+    /** 发送手机验证码（默认登录场景）：同一手机号在发送间隔内只允许一次，验证码在有效期内只能核销一次。 */
     void sendCode(String phone);
 
     /** 手机验证码登录：手机号未注册时自动注册（用户名由手机号派生，登录口令为随机值）。 */
     UserLoginVO loginByCode(SmsLoginDTO smsLoginDTO);
+
+    /**
+     * 发送指定场景的验证码。
+     *
+     * 【为什么必须区分场景】登录码与改密码用途不同。若共用一个 key，
+     * 拿到登录码的人可以直接完成支付口令修改，一次社会工程即可解锁资金操作。
+     *
+     * @param phone 手机号
+     * @param scene 场景，取值见 VerificationCodePolicy 的 SCENE_* 常量；空值按登录场景处理
+     */
+    void sendCode(String phone, String scene);
 
     /** 获取当前登录用户（身份来自网关注入的 user-info 头，经拦截器放入 UserContext） */
     UserLoginVO currentUser();

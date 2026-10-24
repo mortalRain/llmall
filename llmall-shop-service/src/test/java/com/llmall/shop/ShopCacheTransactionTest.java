@@ -3,6 +3,7 @@ package com.llmall.shop;
 import com.llmall.api.dto.ShopDTO;
 import com.llmall.shop.domain.po.Shop;
 import com.llmall.shop.service.IShopService;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringApplication;
@@ -18,8 +19,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 缓存失效只能发生在事务提交之后，回滚不得误删。
  *
  * 【注意】依赖真实 MySQL/Redis/Nacos 与真实事务行为：把 RedisTemplate Mock 掉测不出任何东西，
- * TTL、失效时机、锁的归属都是 Redis 与事务的真实行为。
+ * TTL、失效时机、锁的归属都是 Redis 与事务的真实行为。标注 integration 后默认不参与 mvn test。
  */
+@Tag("integration")
 @SpringBootTest
 class ShopCacheTransactionTest {
 

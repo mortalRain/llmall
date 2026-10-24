@@ -8,6 +8,7 @@ import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.exception.UnauthorizedException;
+import com.llmall.common.metrics.BizMetrics;
 import com.llmall.common.trace.BizTrace;
 import com.llmall.common.utils.UserContext;
 import com.llmall.common.tx.TxAfterCommit;
@@ -27,6 +28,9 @@ import com.llmall.user.mapper.UserInfoMapper;
 import com.llmall.user.mapper.UserMapper;
 import com.llmall.user.service.ITokenService;
 import com.llmall.user.service.IUserService;
+import com.llmall.user.sms.CodeSender;
+import com.llmall.user.support.VerificationCodePolicy;
+import com.llmall.user.support.WeakPasswordPolicy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
@@ -36,9 +40,12 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.annotation.PostConstruct;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.UUID;
 
 /**
  * 用户账号入口：两种登录方式（用户名密码 / 手机验证码）、账号口令的修改与弱口令收口，
@@ -67,9 +74,6 @@ import java.util.Collections;
 @Service
 @RequiredArgsConstructor
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
-
-    private static final Duration CODE_TTL = Duration.ofMinutes(5);
-    private static final Duration CODE_SEND_INTERVAL = Duration.ofSeconds(60);
 
     /**
      * 初始口令：自动注册账号的支付口令初值，同时也是判断"支付口令是否仍是初始值"的判据。
@@ -101,13 +105,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
      * 在上线当天即到期，等于没有缓冲期；从首次检测起算才能保证每个账号都获得完整缓冲期，
      * 且到期时间自然错开，避免集中到期。
      */
-    private static final Duration WEAK_PASSWORD_GRACE = Duration.ofDays(7);
+    private static final Duration WEAK_PASSWORD_GRACE = WeakPasswordPolicy.GRACE;
 
     /** 口令错误锁定阈值与锁定时长 */
     private static final int PWD_MAX_FAIL = 5;
     private static final Duration PWD_LOCK_DURATION = Duration.ofMinutes(30);
     /** 口令错误计数的保留时间：比锁定时长略长，使"锁定解除后计数也重置" */
     private static final Duration PWD_FAIL_TTL = Duration.ofMinutes(31);
+
+    /** 登录口令连续错误阈值与锁定时间，防止在线撞库 */
+    private static final int LOGIN_MAX_FAIL = 5;
+    private static final Duration LOGIN_LOCK_DURATION = Duration.ofMinutes(15);
+    private static final Duration LOGIN_FAIL_TTL = Duration.ofMinutes(16);
 
     /** 口令修改接口频控：同一账号 1 小时内最多 5 次 */
     private static final int PWD_CHANGE_MAX_PER_HOUR = 5;
@@ -120,23 +129,36 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     private static final long CODE_CONSUME_OK = 1L;
     /** 核销脚本返回值：验证码不存在或已过期 */
     private static final long CODE_CONSUME_MISSING = 0L;
-    /** 核销脚本返回值：验证码存在但不是用户提交的这个 */
+    /** 核销脚本返回值：验证码存在但不是用户提交的这个，且未达错误上限 */
     private static final long CODE_CONSUME_MISMATCH = -1L;
-    /** 核销脚本返回值：值相等却没删掉 → 被另一个并发请求抢先核销 */
-    private static final long CODE_CONSUME_RACED = -2L;
+    /** 核销脚本返回值：错误次数达到上限，验证码已作废并锁定 */
+    private static final long CODE_CONSUME_LOCKED = -2L;
 
     /**
-     * 验证码核销脚本：把"读值 → 比对 → 删除"合成一次原子操作，保证验证码一次性使用。
+     * 验证码核销脚本：读值、比对、失败计数、达阈值作废并锁定，一次原子完成。
      *
-     * 【注意】不用现成的 compare-and-delete，是因为它只回答"删没删掉"，
-     * 把"已过期 / 填错码 / 被并发抢先核销"混成同一个返回值，而这三者该给的提示语不同。
-     * KEYS[1]=验证码 key；ARGV[1]=用户提交的验证码。
+     * 【注意】失败时绝不直接删码：那会让攻击者用错误码把受害者的验证码刷掉，
+     * 从"猜不中"变成"让你也登不上"。正确做法是计次，达到上限才作废并锁定。
+     * 【注意】达上限时同时写 lock key，避免攻击者靠"重新发送"立刻绕过。
+     * KEYS[1]=验证码 key，KEYS[2]=错误计数 key，KEYS[3]=锁定 key；
+     * ARGV[1]=用户提交的验证码，ARGV[2]=计数窗口秒数，ARGV[3]=错误上限，ARGV[4]=锁定秒数。
      */
     private static final DefaultRedisScript<Long> CONSUME_CODE_SCRIPT = new DefaultRedisScript<>(
             "local actual = redis.call('get', KEYS[1]) "
                     + "if not actual then return 0 end "
-                    + "if actual ~= ARGV[1] then return -1 end "
-                    + "if redis.call('del', KEYS[1]) == 1 then return 1 else return -2 end",
+                    + "if actual == ARGV[1] then "
+                    + "  redis.call('del', KEYS[1]) "
+                    + "  redis.call('del', KEYS[2]) "
+                    + "  return 1 "
+                    + "end "
+                    + "local fails = redis.call('incr', KEYS[2]) "
+                    + "if fails == 1 then redis.call('expire', KEYS[2], tonumber(ARGV[2])) end "
+                    + "if fails >= tonumber(ARGV[3]) then "
+                    + "  redis.call('del', KEYS[1]) "
+                    + "  redis.call('set', KEYS[3], '1', 'EX', tonumber(ARGV[4])) "
+                    + "  return -2 "
+                    + "end "
+                    + "return -1",
             Long.class);
 
     private final PasswordEncoder passwordEncoder;
@@ -146,6 +168,21 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     private final UserInfoMapper userInfoMapper;
     /** 资金账本（余额流水）：每次余额变动都与余额更新写在同一事务里，见 deductMoney/refundMoney */
     private final BalanceFlowMapper balanceFlowMapper;
+    private final CodeSender codeSender;
+    private final BizMetrics metrics;
+
+    /**
+     * 不存在的用户也要跑一次同成本的哈希比对，抹平响应时间差。
+     *
+     * 【注意】BCrypt 单次约几十毫秒，而"用户不存在"的短路会让该请求几乎立即返回；
+     * 这个时间差足以稳定区分账号是否存在，统一提示语挡不住。
+     */
+    private String dummyPasswordHash;
+
+    @PostConstruct
+    void initDummyPasswordHash() {
+        this.dummyPasswordHash = passwordEncoder.encode("dummy-" + UUID.randomUUID());
+    }
 
     @Override
     public UserLoginVO login(LoginFormDTO loginDTO) {
@@ -154,13 +191,24 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         // 四段式埋点：用 username 作 bizId 而不是 userId —— 登录失败时还不知道 userId，
         // 而"某个用户名一直在失败"正是需要被发现的安全信号
         long traceStart = BizTrace.enter(BIZ_TYPE_LOGIN, username, "方式=密码登录");
+        // 锁定检查排在查库与 bcrypt 之前：锁定期间不应再消耗一次哈希计算
+        assertLoginNotLocked(username);
         User user = lambdaQuery().eq(User::getUsername, username).one();
-        // 安全细节：用户不存在与密码错误返回同一句提示，避免账号枚举
-        if (user == null || !passwordEncoder.matches(password, user.getPassword())) {
+        if (user == null) {
+            // 用户不存在也跑一次同成本比对，避免响应时间差被用来枚举账号
+            passwordEncoder.matches(password, dummyPasswordHash);
+            recordLoginFailure(username);
             BizTrace.result(BIZ_TYPE_LOGIN, username, false, "用户名或密码错误（不区分二者，避免账号枚举）");
             BizTrace.cost(BIZ_TYPE_LOGIN, username, traceStart);
             throw new BadRequestException("用户名或密码错误");
         }
+        if (user.getPassword() == null || !passwordEncoder.matches(password, user.getPassword())) {
+            recordLoginFailure(username);
+            BizTrace.result(BIZ_TYPE_LOGIN, username, false, "用户名或密码错误（不区分二者，避免账号枚举）");
+            BizTrace.cost(BIZ_TYPE_LOGIN, username, traceStart);
+            throw new BadRequestException("用户名或密码错误");
+        }
+        clearLoginFailures(username);
         assertNotFrozen(user);
         // 弱口令缓冲期：期内放行并提示改密，到期后硬拦截（两种登录方式口径一致）
         assertLoginAllowedForWeakPassword(user);
@@ -173,19 +221,34 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
 
     @Override
     public void sendCode(String phone) {
-        // 频控：发送间隔内只允许一次（防短信轰炸）
+        sendCode(phone, VerificationCodePolicy.SCENE_LOGIN);
+    }
+
+    @Override
+    public void sendCode(String phone, String scene) {
+        String normalizedScene = VerificationCodePolicy.normalizeScene(scene);
+        assertCodeNotLocked(normalizedScene, phone);
+        // 频控一：同一手机号 60 秒内只允许发送一次
         String limitKey = AuthConstants.REDIS_CODE_LIMIT + phone;
-        Boolean first = redisTemplate.opsForValue().setIfAbsent(limitKey, "1", CODE_SEND_INTERVAL);
+        Boolean first = redisTemplate.opsForValue().setIfAbsent(limitKey, "1", VerificationCodePolicy.SEND_INTERVAL);
         if (!Boolean.TRUE.equals(first)) {
             throw new BizIllegalException("验证码发送过于频繁，请稍后再试");
         }
+        // 频控二：同一手机号 1 小时内最多 10 次。只按 60 秒间隔限流时，
+        // 换手机号即可无限发送；单号小时级上限是对短信成本与轰炸的兜底。
+        String windowKey = VerificationCodePolicy.sendWindowKey(phone);
+        Long sent = redisTemplate.opsForValue().increment(windowKey);
+        if (sent != null && sent == 1L) {
+            redisTemplate.expire(windowKey, VerificationCodePolicy.SEND_WINDOW);
+        }
+        if (sent != null && sent > VerificationCodePolicy.SEND_MAX_PER_WINDOW) {
+            throw new BizIllegalException("验证码发送次数过多，请稍后再试");
+        }
         String code = RandomUtil.randomNumbers(6);
-        redisTemplate.opsForValue().set(AuthConstants.REDIS_LOGIN_CODE + phone, code, CODE_TTL);
-        // 【验证码与日志】本行把验证码明文写入日志，且当前没有任何开关约束它：
-        // 只有不接短信通道的本地/联调环境可以接受，生产必须走真实短信通道并关闭本行 ——
-        // 生产误开等于把任意手机号的登录验证码写进日志采集链路，任何有日志读权限的人都能据此登录对应账号。
-        // 【脱敏】手机号按"前 3 后 4"打码，避免完整手机号进入日志采集与工单截图
-        log.info("【验证码】手机号 {} 的登录验证码为 {}（{} 分钟内有效）", maskPhone(phone), code, CODE_TTL.toMinutes());
+        redisTemplate.opsForValue().set(
+                VerificationCodePolicy.codeKey(normalizedScene, phone), code, VerificationCodePolicy.CODE_TTL);
+        // 验证码只交给发送通道：本地实现打印，生产实现走短信；日志里不再出现验证码
+        codeSender.send(phone, normalizedScene, code);
     }
 
     @Override
@@ -206,7 +269,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         long traceStart = BizTrace.enter(BIZ_TYPE_LOGIN, phone, "方式=短信验证码登录");
         // 验证码核销抽成公共方法：登录与"修改支付密码"共用同一套验证码与同一套核销语义，
         // 避免两处各写一遍 CONSUME_CODE_SCRIPT 的分支判断而出现口径漂移
-        consumeLoginCode(phone, submitted);
+        consumeCode(phone, VerificationCodePolicy.SCENE_LOGIN, submitted);
         BizTrace.idempotent(BIZ_TYPE_LOGIN, phone, AuthConstants.REDIS_LOGIN_CODE + phone,
                 "验证码已原子核销（读值+比对+删除一次完成）");
 
@@ -226,7 +289,9 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
                     // 支付口令：单独一列，保留可预期的初始值，否则自动注册的账号无法完成余额支付
                     .setPayPassword(passwordEncoder.encode(INITIAL_PASSWORD))
                     .setStatus(UserStatus.NORMAL)
-                    .setBalance(500000)
+                    // 注册礼金改为 0：直接写余额会绕过资金流水，使 SUM(balance_flow) 与 balance 对不上，
+                    // 破坏对账前提。需要体验金时应由营销域按 bizNo 入账并留下流水。
+                    .setBalance(0)
                     .setCreateTime(now)
                     .setUpdateTime(now);
             save(user);
@@ -469,13 +534,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         try {
             String since = redisTemplate.opsForValue().get(key);
             if (since == null) {
-                // 首次检测：记录缓冲期起点（不续期，见方法注释）
+                // 首次检测：记录缓冲期起点（不续期，见方法注释）；
+                // TTL 必须长于缓冲期，否则 key 会先于业务期限消失，硬拦截永远不触发
                 redisTemplate.opsForValue().set(key, String.valueOf(System.currentTimeMillis()),
-                        WEAK_PASSWORD_GRACE);
+                        WeakPasswordPolicy.TTL);
                 return;
             }
             long sinceMillis = Long.parseLong(since);
-            if (System.currentTimeMillis() - sinceMillis > WEAK_PASSWORD_GRACE.toMillis()) {
+            if (WeakPasswordPolicy.isExpired(sinceMillis, System.currentTimeMillis())) {
                 log.warn("弱口令缓冲期已过，拦截登录并要求改密: userId={}", userId);
                 throw new BizIllegalException("您的登录密码仍为初始密码且已超过 "
                         + WEAK_PASSWORD_GRACE.toDays() + " 天，为保障账号安全请先修改登录密码后再登录");
@@ -605,11 +671,60 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     }
 
     /** 口令校验通过后清零失败计数与锁定标记 */
-    private void clearPasswordFailure(Long userId) {        try {
+    private void clearPasswordFailure(Long userId) {
+        try {
             redisTemplate.delete(AuthConstants.REDIS_PWD_FAIL_COUNT + userId);
             redisTemplate.delete(AuthConstants.REDIS_PWD_LOCK + userId);
         } catch (Exception e) {
             log.warn("清除口令错误计数失败: userId={}", userId, e);
+        }
+    }
+
+    /**
+     * 登录锁定检查：连续失败达阈值后，在一段时间内直接拒绝，不再消耗 bcrypt 计算。
+     *
+     * 【fail-open】Redis 异常时放行：锁定是防撞库的加固，不能因为缓存故障让所有人无法登录。
+     */
+    private void assertLoginNotLocked(String username) {
+        try {
+            Boolean locked = redisTemplate.hasKey(AuthConstants.REDIS_LOGIN_LOCK + username);
+            if (Boolean.TRUE.equals(locked)) {
+                metrics.loginFailure("locked");
+                throw new BizIllegalException("登录失败次数过多，请 " + LOGIN_LOCK_DURATION.toMinutes() + " 分钟后再试");
+            }
+        } catch (BizIllegalException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("登录锁定状态查询失败（放行）: username={}", username, e);
+        }
+    }
+
+    /** 记录一次登录失败；达阈值时写锁定标记并清空计数，避免锁定解除后立刻又触发 */
+    private void recordLoginFailure(String username) {
+        try {
+            String failKey = AuthConstants.REDIS_LOGIN_FAIL + username;
+            Long fails = redisTemplate.opsForValue().increment(failKey);
+            if (fails != null && fails == 1L) {
+                redisTemplate.expire(failKey, LOGIN_FAIL_TTL);
+            }
+            metrics.loginFailure("bad-credential");
+            if (fails != null && fails >= LOGIN_MAX_FAIL) {
+                redisTemplate.opsForValue().set(
+                        AuthConstants.REDIS_LOGIN_LOCK + username, "1", LOGIN_LOCK_DURATION);
+                redisTemplate.delete(failKey);
+                log.warn("登录失败次数达阈值，账号已锁定: username={}, fails={}", username, fails);
+            }
+        } catch (Exception e) {
+            log.warn("记录登录失败次数失败（不影响本次拒绝）: username={}", username, e);
+        }
+    }
+
+    /** 登录成功后清零失败计数 */
+    private void clearLoginFailures(String username) {
+        try {
+            redisTemplate.delete(AuthConstants.REDIS_LOGIN_FAIL + username);
+        } catch (Exception e) {
+            log.warn("清除登录失败计数失败: username={}", username, e);
         }
     }
 
@@ -686,31 +801,62 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
      * @param submitted 用户提交的验证码
      * @throws BizIllegalException 验证码为空/过期/错误/已被核销/校验失败
      */
-    private void consumeLoginCode(String phone, String submitted) {
+    private void consumeCode(String phone, String scene, String submitted) {
         if (StrUtil.isBlank(submitted)) {
             throw new BizIllegalException("验证码不能为空");
         }
-        String codeKey = AuthConstants.REDIS_LOGIN_CODE + phone;
+        String codeKey = VerificationCodePolicy.codeKey(scene, phone);
+        String failKey = VerificationCodePolicy.failKey(scene, phone);
+        String lockKey = VerificationCodePolicy.lockKey(scene, phone);
         Long outcome;
         try {
             outcome = redisTemplate.execute(CONSUME_CODE_SCRIPT,
-                    Collections.singletonList(codeKey), submitted);
+                    Arrays.asList(codeKey, failKey, lockKey),
+                    submitted,
+                    String.valueOf(VerificationCodePolicy.ATTEMPT_WINDOW.getSeconds()),
+                    String.valueOf(VerificationCodePolicy.MAX_ATTEMPTS),
+                    String.valueOf(VerificationCodePolicy.LOCK.getSeconds()));
         } catch (Exception e) {
-            log.error("校验验证码失败（按不通过处理）: phone={}", maskPhone(phone), e);
+            log.error("校验验证码失败（按不通过处理）: phone={}, scene={}", maskPhone(phone), scene, e);
             throw new BizIllegalException("验证码校验失败，请稍后重试");
         }
         if (outcome == null || outcome == CODE_CONSUME_MISSING) {
+            metrics.codeFailure(scene, "expired");
             throw new BizIllegalException("验证码已过期，请重新获取");
         }
         if (outcome == CODE_CONSUME_MISMATCH) {
+            metrics.codeFailure(scene, "mismatch");
             throw new BizIllegalException("验证码错误");
         }
-        if (outcome == CODE_CONSUME_RACED) {
-            log.warn("验证码已被并发核销（疑似重放）: phone={}", maskPhone(phone));
-            throw new BizIllegalException("验证码已被使用，请重新获取");
+        if (outcome == CODE_CONSUME_LOCKED) {
+            metrics.codeFailure(scene, "locked");
+            log.warn("验证码错误次数达上限，已作废并锁定: phone={}, scene={}", maskPhone(phone), scene);
+            throw new BizIllegalException("验证码错误次数过多，已失效，请 "
+                    + VerificationCodePolicy.LOCK.toMinutes() + " 分钟后重新获取");
         }
         if (outcome != CODE_CONSUME_OK) {
+            metrics.codeFailure(scene, "unknown");
             throw new BizIllegalException("验证码校验失败，请重新获取");
+        }
+    }
+
+    /**
+     * 验证码锁定检查：达错误上限后，重新发送也不能立刻绕过。
+     *
+     * 【fail-open】Redis 异常时放行：锁定是防爆破的加固措施，不能因为缓存故障让所有人收不到验证码。
+     */
+    private void assertCodeNotLocked(String scene, String phone) {
+        try {
+            Boolean locked = redisTemplate.hasKey(VerificationCodePolicy.lockKey(scene, phone));
+            if (Boolean.TRUE.equals(locked)) {
+                metrics.codeFailure(scene, "send-locked");
+                throw new BizIllegalException("验证码已锁定，请 "
+                        + VerificationCodePolicy.LOCK.toMinutes() + " 分钟后再试");
+            }
+        } catch (BizIllegalException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("验证码锁定状态查询失败（放行发送）: phone={}, scene={}", maskPhone(phone), scene, e);
         }
     }
 
@@ -757,8 +903,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         assertPasswordChangeAllowed(userId);
         assertNotPasswordLocked(userId);
 
-        // ① 短信验证码：证明操作者持有该账号绑定的手机号（复用登录验证码，原子核销）
-        consumeLoginCode(user.getPhone(), form.getCode());
+        // ① 短信验证码：证明操作者持有该账号绑定的手机号（改密场景独立，登录码不能复用）
+        consumeCode(user.getPhone(), VerificationCodePolicy.SCENE_PAY_PASSWORD, form.getCode());
 
         // ② 原支付密码：只比对 pay_password 列，与登录口令严格分离
         String currentHash = baseMapper.selectPayPassword(userId);
@@ -773,6 +919,11 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         // ③ 新旧必须不同：否则"改密"是空操作，强制改密会被绕过
         if (passwordEncoder.matches(form.getNewPassword(), currentHash)) {
             throw new BizIllegalException("新支付密码不能与原支付密码相同");
+        }
+        // 不允许把支付口令设回初始值：否则改完立刻又被"初始口令拦截"卡住，
+        // 用户会陷入"改了也不能支付"的自锁状态
+        if (INITIAL_PASSWORD.equals(form.getNewPassword())) {
+            throw new BizIllegalException("新支付密码不能使用初始密码");
         }
 
         lambdaUpdate()
@@ -831,8 +982,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         assertPasswordChangeAllowed(userId);
         assertNotPasswordLocked(userId);
 
-        // ① 短信验证码：证明持有账号绑定的手机号
-        consumeLoginCode(user.getPhone(), form.getCode());
+        // ① 短信验证码：证明持有账号绑定的手机号（改密场景独立，登录码不能复用）
+        consumeCode(user.getPhone(), VerificationCodePolicy.SCENE_LOGIN_PASSWORD, form.getCode());
 
         // ② 原登录口令：只比对 password 列
         if (user.getPassword() == null || !passwordEncoder.matches(form.getOldPassword(), user.getPassword())) {
@@ -843,6 +994,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         // ③ 新旧必须不同
         if (passwordEncoder.matches(form.getNewPassword(), user.getPassword())) {
             throw new BizIllegalException("新登录密码不能与原登录密码相同");
+        }
+        // 不允许改回初始登录口令：否则弱口令缓冲期的强制改密会被"改回原值"绕过
+        if (INITIAL_PASSWORD.equals(form.getNewPassword())) {
+            throw new BizIllegalException("新登录密码不能使用初始密码");
         }
 
         lambdaUpdate()

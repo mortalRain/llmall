@@ -1,8 +1,10 @@
 package com.llmall.common.config;
 import com.llmall.common.interceptor.UserInfoInterceptor;
+import com.llmall.common.security.InternalCredentialProperties;
 import com.llmall.common.trace.TraceIdFilter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -13,6 +15,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration
 @ConditionalOnClass(DispatcherServlet.class)
+@EnableConfigurationProperties(InternalCredentialProperties.class)
 public class MvcConfig implements WebMvcConfigurer {
 
     /**

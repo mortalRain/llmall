@@ -138,6 +138,15 @@
                         <target>11</target> <!-- depending on your project -->
                     </configuration>
                 </plugin>
+                <!-- 单测默认只跑不依赖中间件的用例：标注 integration 的用例需要真实 MySQL/Redis/Nacos，
+                     默认排除，需要时用 -Dgroups=integration -DexcludedGroups= 显式开启。 -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <excludedGroups>integration</excludedGroups>
+                    </configuration>
+                </plugin>
             </plugins>
         </pluginManagement>
     </build>

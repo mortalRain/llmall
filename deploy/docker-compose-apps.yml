@@ -23,6 +23,10 @@ x-app: &app
     # 【注意】服务 yaml 里仍保留 ${LLMALL_INTERNAL_TOKEN:...} 的默认值，那是给「IDEA 裸跑读不到 .env」的开发路径用的；
     #   容器路径一律走这里注入，两者不要混。
     LLMALL_INTERNAL_TOKEN: ${LLMALL_INTERNAL_TOKEN:?请在 deploy/.env 中设置 LLMALL_INTERNAL_TOKEN}
+    # 服务间调用凭证：与内部凭证同等重要，且必须与 yaml 里的示例值不同（下面的开关会强制校验）。
+    LLMALL_SERVICE_TOKEN: ${LLMALL_SERVICE_TOKEN:?请在 deploy/.env 中设置 LLMALL_SERVICE_TOKEN}
+    # 容器环境禁止示例凭证：缺失、过短或等于仓库示例值时应用直接拒绝启动。
+    LLMALL_INTERNAL_REJECT_DEMO: "true"
     JAVA_OPTS: "-Xms64m -Xmx192m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dspring.jmx.enabled=false -Dfile.encoding=UTF-8 -Dserver.shutdown=graceful -Dspring.lifecycle.timeout-per-shutdown-phase=30s"
   networks:
     - local-life

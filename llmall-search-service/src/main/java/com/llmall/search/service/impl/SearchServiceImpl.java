@@ -9,6 +9,8 @@ import com.llmall.api.dto.ShopPageDTO;
 import com.llmall.common.constant.MqConstants;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.common.domain.PageQuery;
+import com.llmall.common.exception.BadRequestException;
+import com.llmall.common.metrics.BizMetrics;
 import com.llmall.common.utils.CollUtils;
 import com.llmall.search.constant.SearchRedisScripts;
 import com.llmall.search.domain.po.ConsumeRecord;
@@ -26,6 +28,7 @@ import com.llmall.search.mapper.SearchHistoryMapper;
 import com.llmall.search.mapper.SearchHotWordMapper;
 import com.llmall.search.mapper.ShopSearchDocMapper;
 import com.llmall.search.service.ISearchService;
+import com.llmall.search.support.SearchPagingPolicy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
@@ -112,6 +115,7 @@ public class SearchServiceImpl implements ISearchService {
     /** ES 网关（检索与索引维护）；是否真正使用由 llmall.search.engine 决定 */
     private final EsShopSearchGateway esGateway;
     private final ShopSearchEngineProperties engineProperties;
+    private final BizMetrics metrics;
 
     /** 门店检索（无坐标）：委托 {@link #doSearch}，x/y 传 null 即走综合排序 */
     @Override
@@ -158,6 +162,11 @@ public class SearchServiceImpl implements ISearchService {
         int current = PageQuery.normalizePageNo(page);
         int pageSize = PageQuery.normalizeSize(size, 10, 50);
         String kw = StrUtil.trimToNull(keyword);
+        // 深分页在入口拒绝：ES 超过 1 万条会抛错，auto 模式会把该错误误判成"ES 不可用"回落
+        if (SearchPagingPolicy.exceedsWindow(current, pageSize)) {
+            throw new BadRequestException("最多支持查看前 " + SearchPagingPolicy.MAX_RESULT_WINDOW
+                    + " 条结果，请用筛选条件缩小范围");
+        }
 
         if (esGateway.enabled()) {
             try {
@@ -169,6 +178,7 @@ public class SearchServiceImpl implements ISearchService {
                 // 才回落。单纯的"这个关键词没有门店命中"仍然照常返回空结果，不能被误判成故障。
                 if (isEmptyResult(result) && engineProperties.fallbackToMysql() && isEmptyIndexButReadModelNotEmpty()) {
                     log.warn("[ES] 索引为空但读模型非空（esDocs=0），该次检索回落 MySQL 读模型: keyword={}", kw);
+                    metrics.increment("llmall.search.fallback", "reason", "empty-index");
                 }
                 else {
                     // 反向失效：这次 ES 确实查出了数据，说明索引不是空的 —— 把负向缓存的时刻清零，
@@ -185,6 +195,7 @@ public class SearchServiceImpl implements ISearchService {
                     throw new IllegalStateException("ES 检索失败且未开启回落: " + e.getMessage(), e);
                 }
                 log.warn("ES 检索失败，回落 MySQL 读模型: {}", e.getMessage());
+                metrics.increment("llmall.search.fallback", "reason", "es-error");
             }
         }
 

@@ -6,6 +6,7 @@ import com.llmall.user.domain.dto.SmsLoginDTO;
 import com.llmall.user.domain.vo.TokenPair;
 import com.llmall.user.service.ITokenService;
 import com.llmall.user.service.IUserService;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringApplication;
@@ -30,9 +31,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * "无报错、QPS 正常"，只有两个请求几乎同时读到同一份值才会被击穿。
  *
  * 【注意】必须连真实 Redis（原子性、TTL、竞态都是 Redis 的真实行为，把
- * {@code StringRedisTemplate} mock 掉等于什么都没测）；离线 Maven 仓库缺 surefire 的
- * junit-platform provider，故本类另提供 main 入口运行。
+ * {@code StringRedisTemplate} mock 掉等于什么都没测）；标注 integration 后默认不参与 mvn test，
+ * 需要时用 -Dgroups=integration -DexcludedGroups= 显式开启。
  */
+@Tag("integration")
 @SpringBootTest
 class AuthConcurrencyTest {
 

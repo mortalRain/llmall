@@ -119,4 +119,26 @@ public interface AuthConstants {
 
     /** Redis：口令修改接口的滑动窗口频控，key = 前缀 + userId */
     String REDIS_PWD_CHANGE_LIMIT = "auth:pwdchg:";
+
+    /**
+     * Redis：验证码错误次数，key = 前缀 + scene + ":" + phone。
+     *
+     * 【为什么按场景隔离】登录码与改密码的用途不同：若共用一个 key，拿到登录码的人
+     * 可以直接完成支付口令修改，一次社会工程即可解锁资金操作。
+     */
+    String REDIS_CODE_FAIL = "auth:code:fail:";
+
+    /** Redis：验证码错误达上限后的锁定标记，key = 前缀 + scene + ":" + phone */
+    String REDIS_CODE_LOCK = "auth:code:lock:";
+
+    /**
+     * Redis：登录口令连续错误次数，key = 前缀 + username。
+     *
+     * 【为什么按 username 而不是 userId】登录失败时还不知道账号是否存在，
+     * 按 userId 计数等于只保护"存在的账号"，攻击者仍可无限试探不存在的用户名。
+     */
+    String REDIS_LOGIN_FAIL = "auth:login:fail:";
+
+    /** Redis：登录锁定标记，key = 前缀 + username */
+    String REDIS_LOGIN_LOCK = "auth:login:lock:";
 }

@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.UnauthorizedException;
+import com.llmall.common.metrics.BizMetrics;
 import com.llmall.common.utils.CollUtils;
 import com.llmall.common.utils.UserContext;
 import com.llmall.content.constant.ContentRedisScripts;
@@ -60,12 +61,13 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
     /** 补拉按作者分批的批大小：每批一条 SQL，批大小同时决定 IN 参数长度与批数 */
     private static final int FEED_PULL_AUTHOR_BATCH = 20;
 
-    /** 单页参与补拉的大V 作者数上限：条数上界靠它卡死，超出时只补最近关注的一批并告警 */
-    private static final int FEED_PULL_AUTHOR_CAP = 60;
+    /** 单页参与补拉的大V 作者数上限：条数上界靠它卡死；超出时在响应里显式标记 pullTruncated */
+    private static final int FEED_PULL_AUTHOR_CAP = 200;
 
     private final FeedInboxMapper feedInboxMapper;
     private final BlogMapper blogMapper;
     private final StringRedisTemplate redisTemplate;
+    private final BizMetrics metrics;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -176,6 +178,7 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
             // 改文案会打断按关键字告警与统计；内容最终是否可见由读路径补拉决定，不由这条日志决定。
             log.warn("[Feed] 写扩散被阈值跳过，本条笔记不会出现在粉丝 Feed 里: author={}, blogId={}, followers={}, threshold={}",
                     authorId, blogId, followers, FEED_PUSH_THRESHOLD);
+            metrics.increment("llmall.feed.fanout.skipped");
             return;
         }
         int pushed = 0;
@@ -276,10 +279,14 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
         // 【条数上界第一笔】关注列表单独一条 SQL。多取一条只为判断是否超过补拉上限，
         // 溢出时截断并告警：先保证条数上界可计算，再谈补拉多少。
         List<Long> following = baseMapper.selectFollowingIds(userId, FEED_PULL_AUTHOR_CAP + 1);
+        boolean pullTruncated = false;
         if (following.size() > FEED_PULL_AUTHOR_CAP) {
-            log.warn("[Feed] 关注作者数 {} 超过补拉上限 {}，只补拉最近关注的一批: userId={}",
+            // 不再静默截断：响应里带 pullTruncated，客户端可提示"部分关注内容未展示"。
+            // 上限从 60 提到 200 只是把影响面缩小；彻底解决需要作者维度游标（登记在台账 R-03）。
+            log.warn("[Feed] 关注作者数 {} 超过补拉上限 {}，本页只覆盖最近关注的一批: userId={}",
                     following.size(), FEED_PULL_AUTHOR_CAP, userId);
             following = new ArrayList<>(following.subList(0, FEED_PULL_AUTHOR_CAP));
+            pullTruncated = true;
         }
 
         // 收件箱侧仍按主键倒序取：feed_inbox 的索引是 (user_id, id DESC)，按发布时间过滤没有索引可用，
@@ -333,6 +340,7 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
         }
 
         FeedPageVO page = new FeedPageVO().setPullApplied(!candidates.isEmpty())
+                .setPullTruncated(pullTruncated)
                 .setNextLi(lastInboxId).setNextCt(lastCt).setNextCi(lastBlogId);
         if (merged.isEmpty()) {
             return page.setItems(CollUtils.emptyList());

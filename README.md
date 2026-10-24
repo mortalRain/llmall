@@ -3,7 +3,7 @@
 > **一句话**：**10 个服务、一服务一库**的同城生活电商后端（1 个网关 + 9 个业务域），跑通
 > 「逛门店 → 买套餐 → 下单支付 → 到店核销 → 写评价 → 门店热度/榜单」的完整闭环。
 >
-> 亮点不在于"写完了"，而在于**每条结论都带可复现的机器判据**：八道工程闸门、端到端 34 项断言、
+> 亮点不在于"写完了"，而在于**每条结论都带可复现的机器判据**：八道工程闸门、端到端 37 项断言、
 > 压测 + 账实核对。
 
 ![Java](https://img.shields.io/badge/Java-11-informational)
@@ -22,7 +22,7 @@
 |---|---|
 | **资金安全** | 50 并发完成 **1,500 次完整闭环**（下单 / 支付单 / 支付各 1,500 次，错误率 0%）：余额减少 **38,400,000 分 = 25,600 × 1500.0**，一单一张支付单；并发双击只扣一次（口径见 `benchmark/README.md` §4「零截断闭环轮」） |
 | **读路径性能** | Feed 收件箱 100 并发 P99 **92 ms**（v1）/ **117 ms**（v2 推拉）、每请求 SQL 条数恒定（v1 **2.0**、v2 **4.0** 起，上界 6.0）、错误率 **0%**；ES 检索 P99 **47 ms** |
-| **工程化** | **八道闸门 + 三态退出码 + 39 行台账**；端到端冒烟 **34 项通过 / 0 失败**；改一行配置也会被闸门精确点名 |
+| **工程化** | **八道闸门 + 三态退出码 + 39 行台账**；端到端冒烟 **37 项通过 / 0 失败**；改一行配置也会被闸门精确点名 |
 
 **目录**：[系统全景](#1-系统全景) · [核心链路](#2-核心链路) · [部署形态](#3-部署形态) ·
 [快速开始](#4-快速开始) · [工程治理](#5-工程治理八道闸门) · [实测数据](#6-实测数据) ·
@@ -361,6 +361,7 @@ llmall/
 | `SEATA_CONSOLE_PASSWORD` / `SEATA_DB_PW` | `docker/seata/application.yml`（经 compose 注入） | 控制台账号与 TC 落库口令 |
 | `LLMALL_DB_PW` / `LLMALL_REDIS_PW` | `deploy/docker-compose-apps.yml` | 注入到应用容器 |
 | `LLMALL_INTERNAL_TOKEN` | `deploy/docker-compose-apps.yml` | 服务间内部凭证。`.env.example` 里**故意留空**，由 `demo.ps1` 首次生成 `.env` 时用加密安全随机源填 32 位 hex（幂等：已有值不动） |
+| `LLMALL_SERVICE_TOKEN` | `deploy/docker-compose-apps.yml` | 服务间调用凭证（`x-service-token`），保护「标记订单已支付 / 扣退余额 / 改库存」等内部接口。同样由 `demo.ps1` 生成 32 位 hex；容器环境由 `LLMALL_INTERNAL_REJECT_DEMO=true` 强制校验，等于示例值即拒绝启动 |
 | `LLMALL_JKS_PASSWORD` | 5 个服务的 `application.yaml` | 保留可覆盖的默认值——私钥文件本身不入库，口令单独泄露不构成可用凭据 |
 
 > **两条服务的 `application.yaml` 里保留默认值，是有意的边界，不是漏改**：
@@ -387,6 +388,7 @@ llmall/
 | 4 | Seata TC 落库 | `deploy/.env` 的 `SEATA_DB_PW` | 若与 MySQL root 复用，随第 1 条一起换；另需同步 `docker/seata/application.yml` |
 | 5 | JKS 私钥口令 | `scripts/gen-jks.ps1 -Password`（**重新生成 jks**，不是只改口令） | 5 个服务 `application.yaml` 的 `LLMALL_JKS_PASSWORD` 默认值 / 或设同名环境变量；轮换后**所有已签发 JWT 立即失效** |
 | 6 | 服务间内部 token | `deploy/.env` 的 `LLMALL_INTERNAL_TOKEN`（32 位 hex） | 全部 10 个服务都要拿到同一个值：容器走 `docker-compose-apps.yml` 注入，IDEA 裸跑需设环境变量或改 `application.yaml` 默认值 |
+| 7 | 服务间调用 token | `deploy/.env` 的 `LLMALL_SERVICE_TOKEN`（32 位 hex） | 同上；它保护的是资金与库存内部接口，泄露等价于可伪造「已支付」与「扣款」，轮换后需重启全部服务 |
 
 ### 10.4 网关攻击面收口
 
@@ -407,6 +409,12 @@ llmall/
 - [ ] Sentinel 规则持久化到 Nacos（当前规则由 `SentinelRuleConfig` 代码静态注册，控制台推送的规则重启即丢）
 
 ---
+
+## 12. 可观测性
+
+- 指标：10 个服务统一暴露 `/actuator/prometheus`，覆盖 HTTP、JVM、连接池，以及 7 类业务指标（鉴权降级、验证码失败、登录失败、扣款未知、补偿失败、检索回落、Feed 跳推）。
+- 看板与告警：`deploy/observability/` 提供 Prometheus 抓取配置、7 条告警规则与 Grafana 看板；启动方式见 [`docs/可观测性-看板与告警.md`](docs/可观测性-看板与告警.md)。
+- 一键验证：`pwsh -File scripts/verify.ps1`（62 个单测 + 八道闸门；`-SkipTests` 只跑闸门）。
 
 ## 许可
 

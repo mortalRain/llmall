@@ -120,14 +120,14 @@ function Initialize-DeployEnv {
     $missing = @($examplePairs | Where-Object { -not (Get-EnvFileValue $EnvFile $_.Key) })
     if ($missing.Count -eq 0) { return }
 
-    # 内部凭证例外：example 里它故意留空，回填时必须是加密安全随机源现生成的 32 位 hex，不能给可预测的示例串。
-    $tokenKey = 'LLMALL_INTERNAL_TOKEN'
+    # 凭据例外：example 里它们故意留空，回填时必须是加密安全随机源现生成的 32 位 hex，不能给可预测的示例串。
+    $tokenKeys = @('LLMALL_INTERNAL_TOKEN', 'LLMALL_SERVICE_TOKEN')
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $values = @()
     try {
         foreach ($m in $missing) {
             $v = $m.Value
-            if ($m.Key -eq $tokenKey) {
+            if ($tokenKeys -contains $m.Key) {
                 $bytes = New-Object byte[] 16
                 $rng.GetBytes($bytes)
                 $v = -join ($bytes | ForEach-Object { $_.ToString('x2') })
@@ -154,12 +154,13 @@ function Initialize-DeployEnv {
     }
     [System.IO.File]::WriteAllText($EnvFile, $text, (New-Object System.Text.UTF8Encoding($false)))
 
-    $demoKeys = @($values | Where-Object { $_.Key -ne $tokenKey } | ForEach-Object { $_.Key })
+    $demoKeys = @($values | Where-Object { -not ($tokenKeys -contains $_.Key) } | ForEach-Object { $_.Key })
     if ($demoKeys.Count -gt 0) {
         Write-Warn2 ("以下键按「演示值」回填，对外部署前必须替换：" + ($demoKeys -join ', '))
     }
-    if (@($values | Where-Object { $_.Key -eq $tokenKey }).Count -gt 0) {
-        Write-Info '已为 deploy/.env 生成 LLMALL_INTERNAL_TOKEN（32 位 hex，加密安全随机；值不打印）'
+    $generatedKeys = @($values | Where-Object { $tokenKeys -contains $_.Key } | ForEach-Object { $_.Key })
+    if ($generatedKeys.Count -gt 0) {
+        Write-Info ("已为 deploy/.env 生成 " + ($generatedKeys -join '、') + "（32 位 hex，加密安全随机；值不打印）")
     }
     Write-Info ("回填完成，共 " + $values.Count + " 个键：" + (($values | ForEach-Object { $_.Key }) -join ', '))
 }

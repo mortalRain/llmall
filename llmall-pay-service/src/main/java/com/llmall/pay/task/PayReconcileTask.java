@@ -63,6 +63,9 @@ public class PayReconcileTask {
      */
     private static final int RECONCILE_WINDOW_HOURS = 48;
 
+    /** 支付中状态的卡死阈值（分钟）：一次余额支付在秒级完成，超过该值视为收尾钩子未执行 */
+    private static final int STUCK_PAYING_MINUTES = 10;
+
     /** 防重入：定时触发与运维手动触发可能撞在一起（CAS 失败的那一轮直接跳过，不排队） */
     private final AtomicBoolean running = new AtomicBoolean(false);
 
@@ -107,8 +110,9 @@ public class PayReconcileTask {
 
         List<PayOrder> uncertain = listUncertain(windowStart);
         List<PayOrder> stuckPending = listStuckPending(windowStart);
+        List<PayOrder> stuckPaying = listStuckPaying(windowStart);
 
-        if (uncertain.isEmpty() && stuckPending.isEmpty()) {
+        if (uncertain.isEmpty() && stuckPending.isEmpty() && stuckPaying.isEmpty()) {
             log.info("支付日终对账完成：窗口 {} 小时内无待对账/长期挂起订单", RECONCILE_WINDOW_HOURS);
             return 0;
         }
@@ -123,9 +127,15 @@ public class PayReconcileTask {
             log.warn("发现 {} 笔超过支付超时时间仍为待支付的支付单，建议检查交易域关单链路是否正常: payOrderIds={}",
                     stuckPending.size(), idsOf(stuckPending));
         }
+        // 支付中卡死说明进程在扣款过程中退出或收尾钩子未执行：钱可能已扣，必须人工核对
+        if (!stuckPaying.isEmpty()) {
+            log.error("【需人工介入】发现 {} 笔长时间停留在支付中的支付单，请核对余额流水后归位或推进: payOrderIds={}",
+                    stuckPaying.size(), idsOf(stuckPaying));
+        }
 
-        log.warn("支付日终对账完成：待对账 {} 笔，长期挂起 {} 笔", uncertain.size(), stuckPending.size());
-        return uncertain.size() + stuckPending.size();
+        log.warn("支付日终对账完成：待对账 {} 笔，长期挂起 {} 笔，支付中卡死 {} 笔",
+                uncertain.size(), stuckPending.size(), stuckPaying.size());
+        return uncertain.size() + stuckPending.size() + stuckPaying.size();
     }
 
     /** 扣款结果未知的支付单（实时链路写入的 UNCERTAIN 标记） */
@@ -142,6 +152,16 @@ public class PayReconcileTask {
         return payOrderService.list(new LambdaQueryWrapper<PayOrder>()
                 .eq(PayOrder::getStatus, PayStatus.WAIT_BUYER_PAY.getValue())
                 .lt(PayOrder::getPayOverTime, LocalDateTime.now())
+                .ge(PayOrder::getCreateTime, windowStart)
+                .orderByAsc(PayOrder::getCreateTime)
+                .last("LIMIT " + BATCH_SIZE));
+    }
+
+    /** 长时间停留在"支付中"（4）的支付单：正常一次支付在秒级完成，超过阈值即视为卡死 */
+    private List<PayOrder> listStuckPaying(LocalDateTime windowStart) {
+        return payOrderService.list(new LambdaQueryWrapper<PayOrder>()
+                .eq(PayOrder::getStatus, PayStatus.PAYING.getValue())
+                .lt(PayOrder::getCreateTime, LocalDateTime.now().minusMinutes(STUCK_PAYING_MINUTES))
                 .ge(PayOrder::getCreateTime, windowStart)
                 .orderByAsc(PayOrder::getCreateTime)
                 .last("LIMIT " + BATCH_SIZE));

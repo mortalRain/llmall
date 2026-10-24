@@ -1,0 +1,78 @@
+groups:
+  - name: llmall-availability
+    rules:
+      - alert: LlmallHighErrorRate
+        expr: |
+          sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_server_requests_seconds_count[5m])), 1)
+          > 0.01
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "5xx 比例超过 1%"
+          description: "最近 5 分钟 5xx 占比 {{ $value | humanizePercentage }}，先看网关与下游 Feign 的 5xx 分布。"
+
+      - alert: LlmallHighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, uri) (rate(http_server_requests_seconds_bucket[5m]))
+          ) > 1
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "接口 P99 超过 1s: {{ $labels.uri }}"
+          description: "P99={{ $value }}s。先分段计时定位，再确认是连接池排队、DB 慢查询还是下游 Feign。"
+
+  - name: llmall-auth
+    rules:
+      - alert: LlmallAuthDegraded
+        expr: increase(llmall_auth_degrade_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "鉴权正在降级（Redis 故障窗口内 fail-open）"
+          description: "reason={{ $labels.reason }}。窗口内已注销令牌可能仍被放行，优先恢复 Redis，再评估是否强制重新登录。"
+
+      - alert: LlmallLoginBruteForce
+        expr: increase(llmall_auth_login_failure_total[10m]) > 20
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "登录失败次数异常升高，疑似撞库"
+          description: "10 分钟失败 {{ $value }} 次。检查是否有单一 username/IP 集中失败，必要时临时收紧限流阈值。"
+
+  - name: llmall-consistency
+    rules:
+      - alert: LlmallCompensationFailure
+        expr: increase(llmall_compensation_failure_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "补偿失败，可能需要人工介入: {{ $labels.domain }}/{{ $labels.action }}"
+          description: "自动退款或回补失败，按日志里的幂等键核对资金流水；不要直接重试退款，先确认是否已退。"
+
+      - alert: LlmallDeductUncertain
+        expr: increase(llmall_pay_deduct_uncertain_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "出现扣款结果未知的支付单"
+          description: "到支付对账任务与 pay_order.result_code=UNCERTAIN 的记录里按幂等键核对，禁止把未知当未支付放行。"
+
+  - name: llmall-search
+    rules:
+      - alert: LlmallSearchFallbackHigh
+        expr: increase(llmall_search_fallback_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "检索回落次数偏高: {{ $labels.reason }}"
+          description: "empty-index 说明索引可能没灌数；es-error 说明 ES 不可用。回落本身是降级，但要确认是否长期停在这里。"

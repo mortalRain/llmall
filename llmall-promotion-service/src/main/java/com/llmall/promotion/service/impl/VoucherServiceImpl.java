@@ -17,6 +17,7 @@ import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.exception.UnauthorizedException;
+import com.llmall.common.metrics.BizMetrics;
 import com.llmall.common.trace.BizTrace;
 import com.llmall.common.utils.CollUtils;
 import com.llmall.common.utils.UserContext;
@@ -192,6 +193,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     private final ConsumeRecordMapper consumeRecordMapper;
     private final UserClient userClient;
     private final TradeClient tradeClient;
+    private final BizMetrics metrics;
 
     /** 交易订单状态：1 未付款 2 已付款（与 llmall-trade-service 的 Order 常量保持一致） */
     private static final int ORDER_STATUS_UNPAID = 1;
@@ -356,14 +358,14 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
 
         // 先收款：免费券 pay_value=0 在此直接跳过
         //    扣款幂等键按"一人一张券"取（确定性）—— 重复点击/网络重发不会重复扣款。
-        //    【注意】退款幂等键必须与扣款键不同：两者若共用一个键，并发的第二个请求会因为
-        //    "扣款被下游幂等跳过（但仍返回成功）"而误判为自己付过钱，它的失败补偿就会用同一个键
-        //    把第一个请求已经成功的扣款退回去 → 用户白拿付费券（纯资损）。
-        //    故退款键按"本次尝试"生成，与扣款键一一对应但互不覆盖。
-        //    键形态统一由 IdempotentKeys 构造（见本类幂等键注释），本类只传入业务参数
+        //    【注意】退款键与扣款键必须不同值，但这还不够：并发重复领取时，第二个请求的扣款会被
+        //    下游按同一 bizNo 幂等跳过（仍返回成功），它并未真正扣钱；若它随后发券失败就退款，
+        //    退掉的是第一个请求已经扣过的钱，用户等于白拿付费券。
+        //    因此退款必须以"本次是否真的扣到钱"为前提，见 refundAllowed。
         String purchaseBizNo = IdempotentKeys.voucherBuy(voucherId, userId);
         String refundBizNo = IdempotentKeys.voucherRefund(voucherId, userId, IdUtil.fastSimpleUUID());
         boolean paid = chargeVoucherPurchase(voucher, userId, pw, purchaseBizNo);
+        boolean refundAllowed = paid;
 
         try {
             // 只有配了秒杀库存行的券才有"库存"概念，rows=0 即已领完；这里不扣 Redis，DB 才是最终闸门
@@ -386,17 +388,20 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             try {
                 userVoucherMapper.insert(userVoucher);
             } catch (DuplicateKeyException e) {
-                // 并发重复领取被唯一键拦下；抛异常回滚整个事务，上面扣掉的库存一并还回
+                // 该用户已经有这张券，说明另一次尝试已经成功：本次的扣款被下游幂等跳过，一分钱没动。
+                // 因此本次失败绝不能退款，否则会把另一次尝试的钱退回去。
+                refundAllowed = false;
+                log.warn("并发重复领取，本次未扣款，不触发退款: userId={}, voucherId={}", userId, voucherId);
                 throw new BizIllegalException("您已领取过该券，请勿重复领取", e);
             }
             log.info("领券成功: userId={}, voucherId={}, userVoucherId={}, 售价={}分",
                     userId, voucherId, userVoucher.getId(), payValueOf(voucher));
             return userVoucher.getId();
         } catch (RuntimeException e) {
-            // 失败补偿：券已被事务回滚，已收的券款必须原路退回
-            //    退款键按本次尝试唯一，重复补偿（快路径 + 事务收尾）仍只退一次，
-            //    但绝不会覆盖/抵消另一次尝试的扣款
-            refundPurchaseQuietly(paid, voucher, userId, "领券失败补偿", refundBizNo);
+            // 失败补偿：只有本次确实扣到钱才退；退款键按本次尝试唯一，重复补偿仍只退一次
+            if (refundAllowed) {
+                refundPurchaseQuietly(true, voucher, userId, "领券失败补偿", refundBizNo);
+            }
             throw e;
         }
     }
@@ -880,6 +885,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         } catch (Exception e) {
             log.error("{}：券款退回失败，需人工补偿: userId={}, voucherId={}, amount={}分, bizNo={}",
                     scene, userId, voucher.getId(), payValue, refundBizNo, e);
+            metrics.compensationFailure("promotion", "refund");
         }
     }
 

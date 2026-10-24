@@ -129,3 +129,27 @@ PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 --   5 交易取消/订单关闭        6 交易结束/已评价
 --   7 已核销（门店套餐/团购券到店使用后）
 -- ------------------------------------------------------------
+
+-- ------------------------------------------------------------
+-- 下单幂等键（2026-10-24）
+--   client_token 由客户端生成，同一令牌重复提交必须命中同一张订单；
+--   request_hash 用于识别"同一令牌、不同参数"的客户端误用。
+--   唯一键允许 NULL：老客户端不传令牌，行为与改造前一致。
+-- ------------------------------------------------------------
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'order'
+             AND COLUMN_NAME IN ('client_token', 'request_hash'));
+SET @s := IF(@c = 0,
+    'ALTER TABLE `order`
+       ADD COLUMN `client_token` VARCHAR(64) DEFAULT NULL COMMENT ''客户端幂等令牌（同一次下单重试必须相同）'' AFTER `verify_time`,
+       ADD COLUMN `request_hash` CHAR(64)   DEFAULT NULL COMMENT ''下单参数哈希，用于识别同令牌不同参数'' AFTER `client_token`',
+    'SELECT ''order.client_token / request_hash 已存在，跳过''');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.STATISTICS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'order'
+             AND INDEX_NAME = 'uk_user_token');
+SET @s := IF(@c = 0,
+    'ALTER TABLE `order` ADD UNIQUE KEY `uk_user_token` (`user_id`, `client_token`)',
+    'SELECT ''uk_user_token 已存在，跳过''');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;

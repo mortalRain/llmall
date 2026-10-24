@@ -65,9 +65,9 @@ public class OrderReconcileTask {
             fixedDelayString = "${llmall.reconcile.interval-ms:300000}")
     public void reconcilePaidOrders() {
         try {
-            // 原来只有裸的 `.last("LIMIT 100")`：没有 ORDER BY 也不翻页，积压超过 100 笔时每轮都对到
-            // 同一批，后面的订单永远轮不到。改成 ORDER BY id + id 游标翻页，id 是雪花号单调递增，
-            // 上一批最后一条即下批起点，不重复也不遗漏；到批次上限仍未取空时只告警，余量顺延下一轮。
+            // 必须 ORDER BY 且翻页：裸 LIMIT 100 在积压超过 100 笔时每轮都取到同一批，
+            // 后面的订单永远轮不到。id 是雪花号、单调递增，上一批最后一条即下批起点，
+            // 不重复也不遗漏；到批次上限仍未取空时只告警，余量顺延下一轮。
             long cursor = 0L;
             int batches = 0;
             int total = 0;

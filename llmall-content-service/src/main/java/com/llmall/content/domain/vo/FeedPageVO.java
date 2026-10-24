@@ -38,4 +38,12 @@ public class FeedPageVO implements Serializable {
 
     /** 本页是否发生了补拉 */
     private Boolean pullApplied;
+
+    /**
+     * 本页是否因"关注作者数超过补拉上限"而只覆盖了部分作者。
+     *
+     * 【为什么要回给客户端】截断本身是条数上界的代价，但不能静默：
+     * 客户端可据此提示"部分关注内容未展示"，而不是让用户以为 Feed 就这些。
+     */
+    private Boolean pullTruncated;
 }

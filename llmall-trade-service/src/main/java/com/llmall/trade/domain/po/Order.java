@@ -41,6 +41,12 @@ public class Order implements Serializable {
 
     private LocalDateTime verifyTime;
 
+    /** 客户端幂等令牌：与 user_id 组成唯一键 uk_user_token，重复提交返回同一张订单 */
+    private String clientToken;
+
+    /** 下单参数哈希：用于识别"同一令牌、不同参数"的客户端误用 */
+    private String requestHash;
+
     /** 总金额，单位：分 */
     private Integer totalFee;
 

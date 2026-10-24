@@ -5,6 +5,7 @@ import com.llmall.common.constant.AuthConstants;
 import com.llmall.common.domain.TokenPayload;
 import com.llmall.common.exception.TokenExpiredException;
 import com.llmall.common.exception.UnauthorizedException;
+import com.llmall.common.metrics.BizMetrics;
 import com.llmall.gateway.config.AuthProperties;
 import com.llmall.common.security.JwtProperties;
 import com.llmall.common.security.JwtTool;
@@ -67,14 +68,16 @@ import java.util.Set;
  * 执行顺序 0（见 {@link #getOrder()}），排在 {@link TraceGlobalFilter} 之后，使 401 的日志也带 traceId。
  *
  * 【注意】Redis 异常时黑名单与会话失效水位的校验都按放行处理（fail-open，见 {@link #checkAuthState}）：
- * 这是可用性取舍 —— 该窗口内已注销 / 被踢下线的令牌仍能通过网关，且降级只有 ERROR 日志、没有告警指标。
+ * 这是可用性取舍 —— 该窗口内已注销 / 被踢下线的令牌仍能通过网关。降级会累加
+ * llmall.auth.degrade 指标（reason 区分 blacklist / watermark / token-state），可据此告警。
  * 与之相反，白名单未配置、令牌缺 jti、脚本无返回值这些分支一律 fail-closed，两类口径不得混为一谈。
  *
  * 【注意】以下内容是既有实现的不变量，改动等于破坏功能：
  * 1. {@code x-auth-error} 的原因码字面量与 401 响应体结构是对外契约，改一个字母前端就认不出来；
  * 2. 请求头名取值来自 {@link AuthConstants}，改了下游取不到身份，表现为"用户莫名丢失"；
- * 3. {@link #AUTH_CHECK_SCRIPT} 的脚本体与 {@link #NO_REFRESH_KEY} 哨兵 key：脚本返回值语义（1 / 0 / -1）
- *    被主流程与刷新流程共用，改语义会让两条链路一起错。
+ * 3. 两条 Lua 的返回值语义（1 / 0 / -1）分别被主流程与刷新流程使用：
+ *    {@link #BLACKLIST_CHECK_SCRIPT} 只判存在性，{@link #AUTH_CHECK_SCRIPT} 还要校验 refresh 归属，
+ *    改语义或把两者合并会让鉴权链路整体失效。
  *
  * @author 同城生活
  * @since 2026-01-15
@@ -93,6 +96,8 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
     private final AuthProperties authProperties;
     private final JwtProperties jwtProperties;
     private final ReactiveStringRedisTemplate redisTemplate;
+    /** 降级指标：fail-open 是可用性取舍，但必须可告警，不能只留日志 */
+    private final BizMetrics metrics;
     private final AntPathMatcher antPathMatcher = new AntPathMatcher();
 
     /**
@@ -109,9 +114,9 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
      * KEYS[2] = refresh 白名单 key（{@code auth:refresh:} + jti），value 为 userId
      * ARGV[1] = 期望的 userId 字符串，与 {@code KEYS[2]} 的 value 比对
      *
-     * 【注意】主流程只查黑名单时给 {@code KEYS[2]} 传一个永不存在的哨兵 key（{@link #NO_REFRESH_KEY}）：
-     * "refresh 不存在 → 返回 0"恰好等价于"在黑名单里"。这个等价关系依赖"哨兵 key 永远不存在"这一前提，
-     * 若把哨兵 key 改成可能被写入的真实 key，主流程会把"refresh 有效"误判为"未命中黑名单"而放行已注销的令牌。
+     * 【注意】本脚本只用于 refresh 白名单校验（刷新流程）：它第二段判的是
+     * "refresh key 是否存在"，而主流程手里只有 access token，两者的 jti 不同源。
+     * 主流程的黑名单查询使用 {@link #BLACKLIST_CHECK_SCRIPT}，不要为了"省一个脚本"把两者合并。
      *
      * 【注意】脚本只做只读校验、不消费 refresh：轮换由用户服务的显式刷新接口负责（那里是原子的
      * compare-and-delete）。网关若在此删除 refresh，一旦响应在网络上丢失，客户端会直接掉线（令牌没了，
@@ -139,9 +144,6 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
     private static final DefaultRedisScript<Long> BLACKLIST_CHECK_SCRIPT = new DefaultRedisScript<>(
             "if redis.call('exists', KEYS[1]) == 1 then return 0 end return 1",
             Long.class);
-
-    /** 主流程 KEYS[2] 用的哨兵 key：带 {@code \0} 前缀、按命名约定不可能被业务写入，保证恒不存在 */
-    private static final String NO_REFRESH_KEY = "auth:\u0000no-such-key";
 
     // 内部调用凭证（llmall.internal.token）：认证通过后与 user-info 一起写给下游，下游两个头同时具备才采信身份。
     // 它只能由网关注入 —— 客户端自带的同名头在入口处已被剥离，因此它是"请求经过网关"的凭证。
@@ -273,6 +275,7 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
                     // 这里只打 ERROR 日志：本类没有上报任何降级指标，也没有配套告警规则，
                     // "降级正在发生"只能靠检索这条日志发现，禁止改成静默返回或降级为 WARN。
                     log.error("【鉴权降级】查询会话失效水位失败，本次请求按未失效放行: userId={}", payload.getUserId(), e);
+                    metrics.authDegrade("watermark");
                     return Mono.just(Boolean.FALSE);
                 });
     }
@@ -388,12 +391,12 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
      * 1. Redis 异常（onErrorResume）是 fail-open：返回 1 放行并打 ERROR。收益是整站不会因 Redis 抖动全线不可用
      *    （连未登录的浏览请求都进不来）；代价是故障窗口内已注销/被踢的令牌仍能通过网关，
      *    即"提前失效"的能力在窗口内暂时失效（令牌本身仍在自身有效期内，不是新增长期风险）。
-     *    本类只打日志，没有降级指标也没有告警规则，ERROR 日志是发现这个窗口的唯一途径。
+     *    降级会累加 llmall.auth.degrade 指标，可据此配置告警。
      * 2. 脚本无返回值（defaultIfEmpty）是 fail-closed：按 0 拒绝。它不代表 Redis 故障，而属异常输入，宁严不宽。
      *
-     * @param jti            令牌唯一编号；为 {@code null} 时黑名单 key 换成永不存在的哨兵值，使结论只取决于 refresh 判定
-     * @param refreshKey     refresh 白名单 key；主流程查黑名单时传 {@link #NO_REFRESH_KEY} 哨兵
-     * @param expectedUserId 期望的 userId 字符串，与 refresh 白名单 value 比对；主流程传 {@code "0"}（哨兵 key 恒不存在，该参数不参与判定）
+     * @param jti            令牌唯一编号；为 {@code null} 时黑名单 key 换成永不存在的值
+     * @param refreshKey     refresh 白名单 key，只有刷新流程会传真实 key
+     * @param expectedUserId 期望的 userId 字符串，与 refresh 白名单 value 比对
      * @return {@code 1} = 校验通过；{@code 0} = 黑名单命中或 refresh 无效；{@code -1} = refresh 存在但 userId 不匹配
      */
     private Mono<Long> checkAuthState(String jti, String refreshKey, String expectedUserId) {
@@ -410,11 +413,12 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
                 .onErrorResume(e -> {
                     // 【鉴权降级 · fail-open】见方法注释的【fail 策略】；返回 1 = 放行
                     log.error("【鉴权降级】查询令牌黑名单/白名单失败，本次请求按已登录放行: jti={}", jti, e);
+                    metrics.authDegrade("token-state");
                     return Mono.just(1L);
                 });
     }
 
-    /** 黑名单查询，复用 {@link #AUTH_CHECK_SCRIPT}（refresh 侧传哨兵 key）；Redis 异常时的放行取舍见 checkAuthState */
+    /** 黑名单查询，使用只判存在的 {@link #BLACKLIST_CHECK_SCRIPT}；Redis 异常时的放行取舍见 checkAuthState */
     private Mono<Boolean> isBlacklisted(TokenPayload payload) {
         if (payload.getJti() == null) {
             // 令牌缺 jti 时无法被主动失效（黑名单按 jti 索引）。解析阶段已拒绝缺 jti 的令牌，本分支是防御性兜底：
@@ -433,6 +437,7 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
                 .onErrorResume(e -> {
                     // 【鉴权降级 · fail-open】口径与 checkAuthState 一致：Redis 故障不整站 401
                     log.error("【鉴权降级】查询令牌黑名单失败，本次请求按未命中黑名单放行: jti={}", payload.getJti(), e);
+                    metrics.authDegrade("blacklist");
                     return Mono.just(Boolean.FALSE);
                 });
     }

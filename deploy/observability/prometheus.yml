@@ -1,0 +1,60 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: demo
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+scrape_configs:
+  # 所有服务都通过 /actuator/prometheus 暴露指标（父 pom 统一引入 micrometer-registry-prometheus）
+  - job_name: llmall-gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["gateway:8080"]
+
+  - job_name: llmall-user-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-user-service:8084"]
+
+  - job_name: llmall-shop-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-shop-service:8087"]
+
+  - job_name: llmall-item-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-item-service:8081"]
+
+  - job_name: llmall-cart-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-cart-service:8082"]
+
+  - job_name: llmall-trade-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-trade-service:8085"]
+
+  - job_name: llmall-pay-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-pay-service:8086"]
+
+  - job_name: llmall-promotion-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-promotion-service:8088"]
+
+  - job_name: llmall-content-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-content-service:8089"]
+
+  - job_name: llmall-search-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["llmall-search-service:8093"]

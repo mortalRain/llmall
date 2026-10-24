@@ -93,19 +93,25 @@ public class UserController {
     }
 
     /**
-     * 发送手机登录验证码。
+     * 发送手机验证码。
      *
      * 【权限】匿名可访问（网关公开写接口白名单）。
-     * 【入参约束】phone 必填，且必须匹配 ^1[3-9]\d{9}$，违反时由 @Pattern 拦截。
-     * 【错误码】400 手机号格式不正确；400 距上次发送不足发送间隔（发送过于频繁）。
-     * 【注意】该验证码同时用于验证码登录与口令修改，核销是一次性的。
+     * 【入参约束】phone 必填且匹配 ^1[3-9]\d{9}$；scene 可选，取 login / change-pay-password /
+     * change-login-password，缺省为 login。
+     * 【错误码】400 手机号格式不正确；400 场景非法；400 距上次发送不足发送间隔；
+     *          400 该手机号一小时发送次数超限；400 验证码处于锁定期。
+     * 【场景隔离】登录码不能用于改密：两类验证码使用不同的 Redis key，核销时场景必须匹配。
      */
-    @Operation(summary = "发送手机验证码")
+    @Operation(summary = "发送手机验证码（按场景隔离：登录 / 改支付口令 / 改登录口令）")
     @Parameter(name = "phone", description = "手机号", required = true)
+    @Parameter(name = "scene", description = "场景：login（默认）/ change-pay-password / change-login-password")
     @PostMapping("/code")
     public void sendCode(@RequestParam("phone")
-                         @Pattern(regexp = "^1[3-9]\\d{9}$", message = "手机号格式不正确") String phone) {
-        userService.sendCode(phone);
+                         @Pattern(regexp = "^1[3-9]\\d{9}$", message = "手机号格式不正确") String phone,
+                         @RequestParam(value = "scene", required = false)
+                         @Pattern(regexp = "^(login|change-pay-password|change-login-password)?$",
+                                 message = "验证码场景不正确") String scene) {
+        userService.sendCode(phone, scene);
     }
 
     /**
