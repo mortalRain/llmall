@@ -1,0 +1,26 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: maven
+
+      # 62 个纯单测，不依赖 MySQL/Redis/MQ；integration 用例默认被 surefire 排除
+      - name: Unit tests
+        run: mvn -B -ntp test
+
+  # 闸门依赖 PowerShell + 本地 JDK 指纹工具，暂不在 CI 里跑；
+  # 本地执行：pwsh -File gates/verify-all.ps1
