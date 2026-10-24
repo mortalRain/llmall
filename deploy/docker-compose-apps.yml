@@ -27,6 +27,9 @@ x-app: &app
     LLMALL_SERVICE_TOKEN: ${LLMALL_SERVICE_TOKEN:?请在 deploy/.env 中设置 LLMALL_SERVICE_TOKEN}
     # 容器环境禁止示例凭证：缺失、过短或等于仓库示例值时应用直接拒绝启动。
     LLMALL_INTERNAL_REJECT_DEMO: "true"
+    # 仅网关读取：本地演示时放行 /actuator/prometheus 供 Prometheus 抓取。
+    # 【注意】生产必须删除或设为 false，否则网关会把指标端点暴露在 8080 上。
+    LLMALL_ACTUATOR_PROMETHEUS_PUBLIC: "true"
     JAVA_OPTS: "-Xms64m -Xmx192m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dspring.jmx.enabled=false -Dfile.encoding=UTF-8 -Dserver.shutdown=graceful -Dspring.lifecycle.timeout-per-shutdown-phase=30s"
   networks:
     - local-life

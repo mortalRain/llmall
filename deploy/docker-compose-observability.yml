@@ -30,8 +30,8 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
-      # 只读匿名访问：用于本地截图与演示；对外暴露 Grafana 时必须关闭。
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      # 默认关闭匿名访问；本地截图时用 GRAFANA_ANONYMOUS=true 临时开启，用完即关。
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS:-false}
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     volumes:
       - ./observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prom.yml:ro
