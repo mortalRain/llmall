@@ -43,9 +43,9 @@ services:
       - es-data:/usr/share/elasticsearch/data
       - ./es/plugins:/usr/share/elasticsearch/plugins   # 把 IK 分词器解压到这里（目录名必须是 ik）
     ports:
-      # 宿主已有其它 ES 占用 9200/9300 时避免抢端口；容器间仍走 es:9200。
-      - "127.0.0.1:19200:9200"
-      - "127.0.0.1:19300:9300"
+      # 宿主 9200/9300 已空出（原 hmall 的 ES 已停用），恢复默认端口；容器间仍走 es:9200。
+      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9300:9300"
     networks:
       - infra-net
     restart: unless-stopped
