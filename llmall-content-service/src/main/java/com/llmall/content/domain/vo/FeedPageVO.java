@@ -46,4 +46,12 @@ public class FeedPageVO implements Serializable {
      * 客户端可据此提示"部分关注内容未展示"，而不是让用户以为 Feed 就这些。
      */
     private Boolean pullTruncated;
+
+    /**
+     * 下一页补拉作者游标：非空时下一页请作为 ai 参数回传。
+     *
+     * 【为什么要单独一路游标】收件箱按 feed_inbox.id、补拉按 blog 时间轴，两者互不相干；
+     * 关注数超过单页上限时，必须再有一个"作者扫到哪"的进度位，否则更早关注的大 V 永远轮不到。
+     */
+    private Long nextAuthorId;
 }

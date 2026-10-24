@@ -270,24 +270,27 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
     }
 
     @Override
-    public FeedPageVO queryFeedItemsV2(Long userId, Long lastInboxId, LocalDateTime lastCt, Long lastBlogId, Integer size) {
+    public FeedPageVO queryFeedItemsV2(Long userId, Long lastInboxId, LocalDateTime lastCt, Long lastBlogId,
+                                       Long afterAuthorId, Integer size) {
         if (userId == null) {
             return new FeedPageVO().setItems(CollUtils.emptyList());
         }
         int limit = (size == null || size <= 0) ? 10 : Math.min(size, 50);
 
-        // 【条数上界第一笔】关注列表单独一条 SQL。多取一条只为判断是否超过补拉上限，
-        // 溢出时截断并告警：先保证条数上界可计算，再谈补拉多少。
-        List<Long> following = baseMapper.selectFollowingIds(userId, FEED_PULL_AUTHOR_CAP + 1);
-        boolean pullTruncated = false;
-        if (following.size() > FEED_PULL_AUTHOR_CAP) {
-            // 不再静默截断：响应里带 pullTruncated，客户端可提示"部分关注内容未展示"。
-            // 上限从 60 提到 200 只是把影响面缩小；彻底解决需要作者维度游标（登记在台账 R-03）。
-            log.warn("[Feed] 关注作者数 {} 超过补拉上限 {}，本页只覆盖最近关注的一批: userId={}",
-                    following.size(), FEED_PULL_AUTHOR_CAP, userId);
-            following = new ArrayList<>(following.subList(0, FEED_PULL_AUTHOR_CAP));
-            pullTruncated = true;
+        // 【条数上界第一笔】关注列表单独一条 SQL。afterAuthorId 是补拉作者游标：
+        // 关注数超过单页上限时，下一页从本页最后一个作者继续，不会永久漏内容。
+        List<Follow> followingRows = baseMapper.selectFollowingPage(userId, afterAuthorId, FEED_PULL_AUTHOR_CAP + 1);
+        boolean pullTruncated = followingRows.size() > FEED_PULL_AUTHOR_CAP;
+        Long nextAuthorId = null;
+        if (pullTruncated) {
+            followingRows = new ArrayList<>(followingRows.subList(0, FEED_PULL_AUTHOR_CAP));
+            nextAuthorId = followingRows.get(followingRows.size() - 1).getId();
+            log.warn("[Feed] 关注作者数超过单页补拉上限 {}，本页只覆盖到作者游标 {}，下一页请回传 nextAuthorId: userId={}",
+                    FEED_PULL_AUTHOR_CAP, nextAuthorId, userId);
         }
+        List<Long> following = followingRows.stream()
+                .map(Follow::getFollowUserId)
+                .collect(Collectors.toList());
 
         // 收件箱侧仍按主键倒序取：feed_inbox 的索引是 (user_id, id DESC)，按发布时间过滤没有索引可用，
         // 因此这里不按时间游标过滤，改为归并时统一时间轴。取 limit 条足够：两路各自降序时，
@@ -341,6 +344,7 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
 
         FeedPageVO page = new FeedPageVO().setPullApplied(!candidates.isEmpty())
                 .setPullTruncated(pullTruncated)
+                .setNextAuthorId(nextAuthorId)
                 .setNextLi(lastInboxId).setNextCt(lastCt).setNextCi(lastBlogId);
         if (merged.isEmpty()) {
             return page.setItems(CollUtils.emptyList());

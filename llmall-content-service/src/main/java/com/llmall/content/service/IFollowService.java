@@ -47,8 +47,11 @@ public interface IFollowService extends IService<Follow> {
      *
      * 【入参约束】lastInboxId 为收件箱侧已消费到的记录 id；lastCt 与 lastBlogId 为合并时间轴上的位置，
      * 两者必须成对传入；首页三个参数全传 null。size 超过 50 按 50 处理。
+     * afterAuthorId 为补拉作者游标：首页传 null，后续页回传上一页的 nextAuthorId。
      *
-     * 【返回】按发布时间倒序的一页内容与下一页游标；对当前用户不可见的条目仍会被跳过。
+     * 【返回】按发布时间倒序的一页内容与下一页游标（收件箱、时间轴、作者三路）；
+     * 对当前用户不可见的条目仍会被跳过。
      */
-    FeedPageVO queryFeedItemsV2(Long userId, Long lastInboxId, LocalDateTime lastCt, Long lastBlogId, Integer size);
+    FeedPageVO queryFeedItemsV2(Long userId, Long lastInboxId, LocalDateTime lastCt, Long lastBlogId,
+                                Long afterAuthorId, Integer size);
 }

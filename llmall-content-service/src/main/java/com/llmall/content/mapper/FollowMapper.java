@@ -21,16 +21,20 @@ public interface FollowMapper extends BaseMapper<Follow> {
     List<Long> selectCommonFollowIds(@Param("userId") Long userId, @Param("otherUserId") Long otherUserId);
 
     /**
-     * 取"我关注的人"的 id 列表，供读路径按批补拉。
+     * 取"我关注的人"的一页，供读路径按批补拉。
      *
      * 【为什么不用 Redis 关注集合】follow:user:* 是缓存而非权威数据，要确认它完整就得与库里的计数比对，
      * 而那次比对本身就是一条查询，与直接查表等价；这里选一条 SQL 直取，读路径因此没有
      * "集合可信度"这一层分支，也不用区分命中与回源两种条数。
      *
-     * 【limit 由调用方传上限加一】多取的那一条只用于判断是否溢出补拉上限，溢出时截断并告警，
-     * 使条数上界可计算。走 uk_follow(user_id, follow_user_id) 的 user_id 前缀。
+     * 【作者游标】按 follow 行 id 倒序（最近关注优先）；afterId 非空时只取更早关注的那一页，
+     * 这样关注数超过单页上限也不会永久漏内容——客户端回传 nextAuthorId 即可继续。
+     * 【limit 由调用方传上限加一】多取的那一条只用于判断"还有没有下一页"。
      */
-    @Select("SELECT `follow_user_id` FROM `follow` WHERE `user_id` = #{userId} "
-            + "ORDER BY `id` DESC LIMIT #{limit}")
-    List<Long> selectFollowingIds(@Param("userId") Long userId, @Param("limit") int limit);
+    @Select("<script>SELECT `id`, `follow_user_id` FROM `follow` WHERE `user_id` = #{userId} "
+            + "<if test='afterId != null'> AND `id` &lt; #{afterId}</if> "
+            + "ORDER BY `id` DESC LIMIT #{limit}</script>")
+    List<Follow> selectFollowingPage(@Param("userId") Long userId,
+                                     @Param("afterId") Long afterId,
+                                     @Param("limit") int limit);
 }

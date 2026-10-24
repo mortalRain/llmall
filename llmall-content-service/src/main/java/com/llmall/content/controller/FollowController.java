@@ -88,7 +88,8 @@ public class FollowController {
                              @RequestParam(value = "ct", required = false)
                              @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime ct,
                              @RequestParam(value = "ci", required = false) Long ci,
+                             @RequestParam(value = "ai", required = false) Long ai,
                              @RequestParam(value = "size", required = false, defaultValue = "10") Integer size) {
-        return followService.queryFeedItemsV2(UserContext.getUser(), li, ct, ci, size);
+        return followService.queryFeedItemsV2(UserContext.getUser(), li, ct, ci, ai, size);
     }
 }
