@@ -1,6 +1,7 @@
 package com.llmall.gateway.filters;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.reactive.ServerHttpRequest;
@@ -58,6 +59,18 @@ public class ActuatorExposureFilter implements WebFilter, Ordered {
     /** 唯一放行的前缀：/actuator/health 及其子路径 */
     private static final String HEALTH_PREFIX = "/actuator/health";
 
+    /** 指标端点路径：只在演练实例上按开关放行，默认仍返回 404 */
+    private static final String PROMETHEUS_PATH = "/actuator/prometheus";
+
+    /**
+     * 是否额外放行 /actuator/prometheus，默认 false。
+     *
+     * 【用途】仅用于本地演练/截图：需要 Prometheus 抓网关指标，而本过滤器默认把非 health 端
+     * 一律 404。生产保持默认，指标由内网直连或独立管理端口采集。
+     */
+    @Value("${llmall.actuator.prometheus-public:false}")
+    private boolean prometheusPublic;
+
     /**
      * 过滤器主流程：非 actuator 请求一律快速放行，不给正常业务流量增加判定成本。
      *
@@ -76,6 +89,9 @@ public class ActuatorExposureFilter implements WebFilter, Ordered {
             return chain.filter(exchange);
         }
         if (isHealthPath(path)) {
+            return chain.filter(exchange);
+        }
+        if (prometheusPublic && PROMETHEUS_PATH.equals(path)) {
             return chain.filter(exchange);
         }
         return reject(exchange, path);

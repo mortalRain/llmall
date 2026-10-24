@@ -14,6 +14,13 @@ scrape_configs:
     static_configs:
       - targets: ["gateway:8080"]
 
+  - job_name: llmall-gateway-drill
+    metrics_path: /actuator/prometheus
+    # 演练专用：目标写在 file_sd 文件里，平时为空数组（无 down 目标），演练时临时写入。
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets-drill.json"]
+        refresh_interval: 5s
+
   - job_name: llmall-user-service
     metrics_path: /actuator/prometheus
     static_configs:

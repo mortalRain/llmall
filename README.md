@@ -416,6 +416,7 @@ llmall/
 - 看板与告警：`deploy/observability/` 提供 Prometheus 抓取配置、7 条告警规则与 Grafana 看板；启动方式见 [`docs/可观测性-看板与告警.md`](docs/可观测性-看板与告警.md)。
 - 一键验证：`pwsh -File scripts/verify.ps1`（62 个单测 + 八道闸门；`-SkipTests` 只跑闸门）。
 - 验证证据：[八道闸门全绿](docs/images/gates-green.png)、[完整日志](docs/verification/gates-2026-10-24.log)（2026-10-24 实跑，退出码 0）。
+- 演练证据：[鉴权降级看板](docs/images/auth-degrade-grafana.png)、[告警 firing](docs/images/auth-degrade-alerts.png)、[演练记录](docs/可观测性-演练记录-2026-10-24.md)。
 
 ## 许可
 
