@@ -415,6 +415,7 @@ llmall/
 - 指标：10 个服务统一暴露 `/actuator/prometheus`，覆盖 HTTP、JVM、连接池，以及 7 类业务指标（鉴权降级、验证码失败、登录失败、扣款未知、补偿失败、检索回落、Feed 跳推）。
 - 看板与告警：`deploy/observability/` 提供 Prometheus 抓取配置、7 条告警规则与 Grafana 看板；启动方式见 [`docs/可观测性-看板与告警.md`](docs/可观测性-看板与告警.md)。
 - 一键验证：`pwsh -File scripts/verify.ps1`（62 个单测 + 八道闸门；`-SkipTests` 只跑闸门）。
+- 验证证据：[八道闸门全绿](docs/images/gates-green.png)、[完整日志](docs/verification/gates-2026-10-24.log)（2026-10-24 实跑，退出码 0）。
 
 ## 许可
 
