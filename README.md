@@ -14,7 +14,7 @@
 ![Redis](https://img.shields.io/badge/Redis-7-DC382D)
 ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-3.x-FF6600)
 ![Elasticsearch](https://img.shields.io/badge/Elasticsearch-7.17-005571)
-![License](https://img.shields.io/badge/License-MIT-green)
+![License](https://img.shields.io/badge/License-MIT-green) ![verify](https://github.com/mortalRain/llmall/actions/workflows/verify.yml/badge.svg)
 
 **三条一眼能看懂的数字**（口径与原始数据见 [§6 实测数据](#6-实测数据)、`benchmark/README.md`、`docs/P-01`~`P-03`）
 
