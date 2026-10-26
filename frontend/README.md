@@ -1,85 +1,110 @@
-# 同城生活电商平台 · 演示前端
+# LLMall 前端 · 同城生活
 
-一个**单文件、零依赖、零构建**的前端演示台，用来展示后端三个亮点：
-**统一鉴权与身份透传**、**跨域最终一致性**、**评价 → 门店热度 → 榜单排序**。
+Vue 3 + TypeScript + Vite + Pinia + Vue Router 4 + Element Plus + Axios 的浅蓝主题企业级演示前端。
 
-## 配色与主题（高级浅蓝 / Steel Blue）
+旧版单文件演示台（`index.html` + `theme.css`）已原样保留在 [`legacy-demo/`](./legacy-demo/)，不再参与构建。
 
-配色集中定义在 **`theme.css` 的 `:root`**（CSS 变量）；`index.html` 内的 `<style>` 是它的内联副本，为了"单文件双击即用"。
+## 快速开始
 
-| 变量 | 值 | 用途 |
-|---|---|---|
-| `--brand-500` / `--brand-600` | `#6695C4` / `#4E7BA9` | 主色：按钮渐变、强调 |
-| `--brand-700` / `--brand-800` | `#3D6489` / `#2E4C6B` | 深色文字（导航激活、统计数字） |
-| `--brand-050` / `--brand-100` | `#F3F8FC` / `#E7F0F8` | 浅底（悬停、选中态） |
-| `--gold-500` | `#C8912F` | **全站唯一暖色**：只用于评分与热度 |
-| `--ink` / `--ink-2` / `--muted` | `#16202E` / `#3A4A5E` / `#6B7C90` | 带蓝调的中性灰，避免灰得发脏 |
-| `--bg` / `--line` | `#F5F9FC` / `#E4EDF5` | 页面底色与分隔线 |
-
-**改配色**：改 `theme.css` 的 `:root`，再用下面命令重新注入 `index.html`（保持单文件）：
-
-```powershell
-# 在本目录（frontend/）下执行；$PSScriptRoot 保证路径相对本文件，clone 到任何机器都能跑
-$enc = New-Object System.Text.UTF8Encoding($false)
-$fe = Join-Path $PSScriptRoot 'index.html'
-$html = [System.IO.File]::ReadAllText($fe, $enc)
-$block = "<style>`r`n" + [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'theme.css'), $enc) + "</style>"
-[System.IO.File]::WriteAllText($fe, [regex]::Replace($html, '(?s)<style>.*?</style>', { param($m) $block }), $enc)
-```
-## 打开方式（三选一）
-
-| 方式 | 做法 | 说明 |
-|---|---|---|
-| **最简单** | 直接双击 `index.html` | 浏览器以 `file://` 打开；网关已开 CORS，可直接调接口 |
-| 走 nginx | 把本目录丢到任意 nginx 的 html 下 | 也可用任意静态服务器 |
-| 本地静态服务 | 任意静态服务器指向本目录 | 例如 IDEA 的 "Open in Browser" |
-
-## 前置：后端要跑起来
-
-最少需要这几个服务（推荐先在 IDEA 里只起这些，省内存）：
-
-```
-gateway(8080) + llmall-shop-service(8087) + llmall-user-service(8084) + llmall-content-service(8089)
-（搜索功能还需要 llmall-search-service(8093)）
-中间件：Nacos + MySQL + Redis + RabbitMQ
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5173
 ```
 
-前端默认访问 `http://localhost:8080`（网关）。**如果后端不在这个地址**，点右上角 **「⚙ 接口」** 改成你的地址即可（会记在浏览器 localStorage）。
+开发服务器把 `/api` 代理到 `http://localhost:8080`，并去掉 `/api` 前缀（与网关路由一致）。
+如果网关不在默认地址，启动前设置 `LLMALL_API_TARGET`：
 
-## 能看到什么（对应三个亮点）
-
-| 页面 | 演示的内容 | 对应亮点 |
-|---|---|---|
-| 首页 | 门店卡片（评分/评价数/人均/热度徽章）、按热度排序、门店类型筛选 | 数据所有权 + 热度排序读路径 |
-| 右侧「门店热度榜」 | Redis ZSet 榜单（1/2/3 名有奖牌配色） | 热度闭环 |
-| 搜索 | 走 `llmall-search-service`（关键词匹配 + 热度加权排序） | 热度闭环（最后一跳） |
-| 附近门店 | Redis GEO 半径查询，卡片上显示距离 | 技术点 |
-| 门店详情 | 门店统计（销量/评价数/热度分）+ 套餐（商品域）+ 评价列表 | 跨域聚合 |
-| **发布评价** | 提交后 1~3 秒，右侧榜单**自动刷新**并提示 "🔥 榜单已更新" | **热度闭环的可视化** |
-| 登录 | 用户名密码 / 手机验证码双通道，拿 JWT 双令牌 | 统一鉴权 |
-| 我的 | `/users/me`（身份来自网关透传的请求头）+ 积分流水 | 统一鉴权 + 最终一致（下单支付后异步发积分） |
-
-## 两个常见问题
-
-**1）「附近门店」是空的？**
-Redis GEO 索引需要初始化一次（登录后调用，需带令牌）：
+```bash
+LLMALL_API_TARGET=http://192.168.1.10:8080 npm run dev
 ```
-POST http://localhost:8080/shops/cache/geo/rebuild
+
+生产构建与本地预览：
+
+```bash
+npm run build      # vue-tsc -b && vite build，产物在 dist/
+npm run preview    # http://localhost:4173，同样代理 /api
 ```
-也可以在浏览器登录后，用控制台执行：
-```js
-fetch('http://localhost:8080/shops/cache/geo/rebuild', {
-  method:'POST',
-  headers:{ authorization: localStorage.getItem('tc_token') }
-}).then(r=>r.json()).then(console.log)
+
+演示账号：**Jack / 123456**；演示支付口令：**888888**（与登录密码不同）。
+
+## 目录结构
+
 ```
-（当前中心点写死在杭州 `120.1519, 30.3100`，与迁移进来的门店坐标一致；换城市改 `renderNearby()` 里的参数即可。）
+frontend/
+├─ index.html
+├─ vite.config.ts          # 5173 dev server + /api 代理
+├─ tsconfig*.json
+├─ src/
+│  ├─ main.ts              # Element Plus 全量引入 + 中文 locale
+│  ├─ App.vue
+│  ├─ style.css            # 设计变量、Element Plus 主题覆盖、响应式
+│  ├─ api/
+│  │  ├─ http.ts           # axios 实例、鉴权头、401 单次刷新队列
+│  │  ├─ modules.ts        # 按业务域拆分的接口
+│  │  └─ types.ts          # 后端 VO/DTO 对应的简单接口
+│  ├─ stores/auth.ts       # 登录态 + 用户信息（localStorage + Pinia）
+│  ├─ router/index.ts      # 路由与登录守卫
+│  ├─ layouts/AppLayout.vue
+│  ├─ components/          # PageHeader / StateBlock / ShopCard / FeedCard / VoucherCard
+│  └─ views/
+│     ├─ Login.vue
+│     ├─ Feed.vue
+│     ├─ Shops.vue         # 门店列表（/shops/page 分页）
+│     ├─ ShopDetail.vue
+│     ├─ Checkout.vue
+│     ├─ Orders.vue
+│     └─ Profile.vue
+└─ legacy-demo/            # 旧单文件演示台，仅留档
+```
 
-**2）页面提示"连接不上后端"？**
-说明网关没起或地址不对：先确认 `GatewayApplication` 已启动（8080），再点右上角「⚙ 接口」核对地址。
+## 页面与接口
 
-## 与旧前端的关系
+| 页面 | 接口 |
+| --- | --- |
+| 登录 | `POST /users/login` |
+| 关注动态 | `GET /follows/feed/v2?size=10`，复合游标 `li/ct/ci/ai` |
+| 门店列表 | `GET /shops/page?page=&size=&keyword=` |
+| 门店详情 | `GET /shops/{id}`、`GET /items/shop/{shopId}`、`GET /vouchers/list?shopId=` |
+| 领券 | `POST /vouchers/{id}/receive`（付费券在请求体带 `pw`） |
+| 下单 | `GET /addresses`、`POST /orders`、`GET /orders/{id}` |
+| 支付 | `POST /pay-orders`、`POST /pay-orders/{id}` |
+| 订单 | `GET /orders`、`GET /orders/{id}`、`PUT /orders/{id}/cancel`、`POST /orders/verify` |
+| 我的 | `GET /users/me`、`GET /vouchers/my`、`POST /users/logout` |
 
-本项目由一个通用商城模板演化而来。该模板自带的 nginx + 静态页前端**不在本仓库内**，也未随仓库发布：它是「商城」形态，演示不了门店/评价/热度榜，且其搜索页调 `/search/list`，与本项目的 `/search?keyword=` 不兼容。
+字段口径以后端代码为准：
 
-本前端是为此项目重写的：**贴合「同城生活电商」主题**，没有任何模板遗留痕迹。
+- 订单侧余额支付是 `paymentType=3`；支付侧是 `PayType.BALANCE=5`，两个枚举不同。
+- `PayApplyDTO` 需要 `bizOrderNo / amount / payChannelCode / payType / orderInfo`。
+- `PayOrderFormDTO` 只需 `pw`，支付单 id 走路径。
+- 核销 `OrderVerifyDTO` 需要 `verifyCode + shopId`。
+- 所有 JSON 响应统一由 `json-bigint` 解析（`storeAsString: true`）：超过 JS 安全整数范围的 Long id 会自动变成字符串。
+  即使后端个别接口把 19 位雪花号作为 JSON number 返回，也不会被 `JSON.parse` 舍入；`types.ts` 里所有 id 字段均为 `string`。
+
+## 鉴权说明（与常见示例的差异）
+
+`http.ts` 默认在 `authorization` 中发送**裸 JWT**，而不是 `Bearer <token>`。
+原因：当前仓库的网关 `AuthGlobalFilter#firstHeader` 按裸 JWT 读取，未剥离 `Bearer ` 前缀；实测发送 `Bearer` 会得到 401 `invalid-token`，后端文档与旧演示台也都使用裸 token。
+
+如果网关后续升级为标准的 `Bearer` 方案，不需要改代码，构建时设置即可：
+
+```bash
+VITE_AUTH_SCHEME=bearer npm run build
+```
+
+401 处理：所有并发 401 共享一个刷新 Promise，只调用一次
+`POST /users/token/refresh`（`X-Refresh-Token` 请求头），刷新成功后重放原请求；
+刷新失败清空本地登录态并跳转 `/login`。
+
+## 交付验收
+
+```bash
+cd frontend
+npm install
+npm run build
+npm run dev
+curl -I http://localhost:5173
+```
+
+构建产物约 1.7 MB（未压缩），Element Plus 全量引入后主 vendor chunk 约 823 KB；
+已在 1440px 与 375px 宽度下检查布局与主要交互。

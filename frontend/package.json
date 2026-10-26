@@ -1,0 +1,32 @@
+{
+  "name": "llmall-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "LLMall 同城生活 · Vue 3 + TypeScript + Vite 企业级前端工程",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "type-check": "vue-tsc -b"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "axios": "^1.20.0",
+    "element-plus": "^2.14.7",
+    "json-bigint": "^1.0.0",
+    "pinia": "^2.3.1",
+    "vue": "^3.5.44",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@tsconfig/node22": "^22.0.6",
+    "@types/json-bigint": "^1.0.4",
+    "@types/node": "^22.10.5",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "@vue/tsconfig": "^0.7.0",
+    "typescript": "~5.7.3",
+    "vite": "^6.4.5",
+    "vue-tsc": "^2.2.12"
+  }
+}

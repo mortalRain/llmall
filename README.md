@@ -416,7 +416,23 @@ llmall/
 
 ---
 
-## 12. 可观测性
+## 12. 前端（Vue 3 + TypeScript）
+
+`frontend/` 是重建后的 SPA：Vue 3 + TS + Vite + Pinia + Vue Router + Element Plus（浅蓝主题），7 个页面（登录 / 关注动态 / 门店列表 / 门店详情 / 结算收银台 / 订单 / 我的）。
+
+![登录](docs/images/frontend-login.png)
+![门店](docs/images/frontend-shops.png)
+![订单](docs/images/frontend-orders.png)
+
+```bash
+cd frontend && npm install && npm run dev   # http://localhost:5173，/api 代理到 8080
+```
+
+- 演示账号 `Jack / 123456`，余额支付口令 `888888`
+- 401 并发单飞刷新、路由守卫、`json-bigint` 解析 19 位 Long id（避免 JS 精度丢失）
+- 网关当前只认裸 JWT（非 `Bearer`），可用 `VITE_AUTH_SCHEME=bearer` 切换
+
+## 13. 可观测性
 
 - 指标：10 个服务统一暴露 `/actuator/prometheus`，覆盖 HTTP、JVM、连接池，以及 7 类业务指标（鉴权降级、验证码失败、登录失败、扣款未知、补偿失败、检索回落、Feed 跳推）。
 - 看板与告警：`deploy/observability/` 提供 Prometheus 抓取配置、7 条告警规则与 Grafana 看板；启动方式见 [`docs/可观测性-看板与告警.md`](docs/可观测性-看板与告警.md)。
