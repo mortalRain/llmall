@@ -244,5 +244,11 @@ onMounted(() => {
     grid-template-columns: minmax(0, 1fr);
     gap: 14px;
   }
+
+  .pagination-wrap :deep(.el-pagination) {
+    --el-pagination-button-width: 26px;
+    --el-pagination-button-height: 26px;
+    --el-pagination-item-gap: 8px;
+  }
 }
 </style>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive } from 'vue'
-import { ChatDotRound, Pointer, Shop as ShopIcon } from '@element-plus/icons-vue'
+import { ChatDotRound, Pointer, Shop as ShopIcon, StarFilled } from '@element-plus/icons-vue'
 import type { FeedItem } from '@/api/types'
 import { formatCount, formatRelativeTime, initialOf, splitImages } from '@/utils/format'
 
@@ -52,7 +52,7 @@ const authorInitial = computed(() => initialOf(authorText.value))
     <footer class="feed-foot">
       <div class="rating" :aria-label="`评分 ${score} 分`">
         <span v-for="index in 5" :key="index" class="star" :class="{ on: index <= Math.round(score) }">
-          ★
+          <el-icon><StarFilled /></el-icon>
         </span>
         <b>{{ score ? score.toFixed(1) : '—' }}</b>
       </div>

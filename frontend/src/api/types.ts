@@ -175,7 +175,13 @@ export interface AddCartPayload {
   image?: string | null
 }
 
-/** GET /blogs/shop/{shopId} 返回项：评价（Blog PO 直接对外） */
+/**
+ * GET /blogs/shop/{shopId} 与 GET /blogs/{id} 的返回项：
+ * Blog 字段 + 后端批量回填的作者昵称/头像（BlogVO）。
+ *
+ * 【昵称/头像可能为空或已回退】后端在昵称为空时回退「同城用户{id}」；前端仍保留同样的兜底，
+ * 以兼容旧后端或用户服务降级的情况。icon 为空时用昵称首字头像。
+ */
 export interface Blog {
   id: Id
   shopId: Id
@@ -189,9 +195,25 @@ export interface Blog {
   comments: number
   /** 0 待审核 1 已发布 2 已屏蔽 */
   status: number
+  /** 作者昵称；为空时前端回退「同城用户{id}」 */
+  nickname?: string | null
+  /** 作者头像 URL；为空时前端用昵称首字 + 稳定背景色 */
+  icon?: string | null
   createTime: string | null
   updateTime: string | null
 }
+
+/** POST /blogs 请求体（BlogFormDTO） */
+export interface CreateBlogPayload {
+  shopId: Id
+  title: string
+  content: string
+  /** 评分 1~5 */
+  score: number
+  /** 图片 URL，多张以逗号分隔 */
+  images?: string
+}
+
 
 export interface Voucher {
   id: Id

@@ -26,6 +26,10 @@ llmall:
   # 【注意】全项目所有服务必须同值，否则请求全部未登录；演示默认值仅用于本地，生产由网关注入或配置中心下发。
   internal:
     token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
+    # 服务间调用凭证：评价列表批量查用户昵称/头像走 /internal/users/profiles，
+    # 该接口只认 x-service-token（网关只剥离、不注入）。DefaultFeignConfig 会在本值非空时自动补齐请求头；
+    # 不配置则该头缺失，用户服务按 fail-closed 返回 403（评价列表会降级成「同城用户{id}」）。
+    service-token: ${LLMALL_SERVICE_TOKEN:llmall-service-demo-token}
 
 # 接口文档：knife4j 4.x 的 openapi3 分支（底层 springdoc-openapi）；UI 地址 /doc.html，OpenAPI JSON /v3/api-docs
 knife4j:

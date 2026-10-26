@@ -1,21 +1,25 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft,
   ChatDotRound,
   Clock,
+  EditPen,
+  Food,
   Location,
   Refresh,
   ShoppingBag,
   Star,
   StarFilled,
+  Ticket,
 } from '@element-plus/icons-vue'
 import StateBlock from '@/components/StateBlock.vue'
 import VoucherCard from '@/components/VoucherCard.vue'
 import { blogApi, favoriteApi, itemApi, shopApi, voucherApi } from '@/api/modules'
 import { getErrorMessage } from '@/api/http'
+import { useAuthStore } from '@/stores/auth'
 import type { Blog, Item, Shop, Voucher } from '@/api/types'
 import {
   formatCount,
@@ -28,6 +32,7 @@ import {
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 
 const shopId = computed(() => String(route.params.id || ''))
 const shop = ref<Shop | null>(null)
@@ -49,13 +54,59 @@ const brokenImages = reactive<Record<number, boolean>>({})
 const favorited = ref(false)
 const favoriteLoading = ref(false)
 
-/** 门店评价：分页拉 /blogs/shop/{shopId}，展示评分/内容/时间 */
+/** 门店评价：分页拉 /blogs/shop/{shopId}，展示头像/昵称/评分/内容/时间 */
 const reviews = ref<Blog[]>([])
 const reviewTotal = ref(0)
 const reviewPage = ref(1)
 const reviewSize = 5
 const reviewLoading = ref(false)
 const reviewError = ref('')
+/** 头像 URL 加载失败时回退首字头像（与昵称缺失时的兜底同一套 UI） */
+const brokenAvatars = reactive<Record<string, boolean>>({})
+const brokenReviewImages = reactive<Record<string, boolean>>({})
+
+/** 首字头像背景色：同一 userId 永远同色，评价列表刷新/翻页不闪色 */
+const AVATAR_COLORS = [
+  '#3b82f6',
+  '#0ea5e9',
+  '#8b5cf6',
+  '#ec4899',
+  '#f59e0b',
+  '#10b981',
+  '#6366f1',
+  '#ef4444',
+] as const
+
+function avatarColor(seed: string | number | null | undefined): string {
+  const text = String(seed ?? '')
+  let hash = 0
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) >>> 0
+  }
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length]
+}
+
+/** 昵称为空回退「同城用户{id}」：后端已回退一次，前端再兜一层以兼容旧数据/用户服务降级 */
+function reviewAuthor(review: Blog): string {
+  const nickname = String(review.nickname ?? '').trim()
+  if (nickname) return nickname
+  const id = String(review.userId ?? '').trim()
+  return id ? `同城用户${id}` : '同城用户'
+}
+
+function reviewAvatar(review: Blog): string {
+  return initialOf(reviewAuthor(review))
+}
+
+function reviewAvatarSrc(review: Blog): string | undefined {
+  const icon = String(review.icon ?? '').trim()
+  if (!icon || brokenAvatars[String(review.id)]) return undefined
+  return icon
+}
+
+function reviewImages(review: Blog): string[] {
+  return splitImages(review.images).slice(0, 3)
+}
 
 const images = computed(() => splitImages(shop.value?.images).slice(0, 3))
 const mainImage = computed(() => images.value[0] || '')
@@ -106,8 +157,13 @@ async function loadDetail(): Promise<void> {
     } else {
       vouchersError.value = getErrorMessage(voucherResult.reason, '优惠券加载失败')
     }
-    void loadReviews(1)
+    // 写评价成功回到本页时，先等评价列表重新拉取，再定位到评价区，用户能立刻看到自己的评价
+    await loadReviews(1)
     void loadFavoriteStatus()
+    if (route.query.reviewed === '1') {
+      await nextTick()
+      document.getElementById('reviews')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
   } catch (error) {
     errorMessage.value = getErrorMessage(error, '门店详情加载失败')
   } finally {
@@ -163,6 +219,19 @@ async function loadReviews(page = 1): Promise<void> {
 
 function changeReviewPage(nextPage: number): void {
   void loadReviews(nextPage)
+}
+
+/**
+ * 写评价入口：登录后可见；双保险处理未登录（路由守卫失效/直接调用）——
+ * 跳登录并把写评价页作为回跳地址，登录成功直接回到表单。
+ */
+function goWriteReview(): void {
+  const target = `/shops/${shopId.value}/review`
+  if (!auth.isLoggedIn) {
+    void router.push({ name: 'login', query: { redirect: target } })
+    return
+  }
+  void router.push({ name: 'shop-review', params: { id: shopId.value } })
 }
 
 async function retryItems(): Promise<void> {
@@ -361,7 +430,7 @@ onMounted(() => {
         <div class="section-head">
           <div>
             <span class="eyebrow">ORDER ONLINE</span>
-            <h2>商品套餐</h2>
+            <h2><el-icon class="h2-icon"><Food /></el-icon>商品套餐</h2>
             <p>选择数量后立即购买，结算时使用余额支付，支付成功即生成核销码。</p>
           </div>
           <span class="section-count">{{ items.length }} 项</span>
@@ -382,7 +451,7 @@ onMounted(() => {
                 loading="lazy"
                 @error="($event.target as HTMLImageElement).style.display = 'none'"
               />
-              <span class="thumb-initial">{{ initialOf(item.name) }}</span>
+              <el-icon v-else class="thumb-icon"><Food /></el-icon>
             </div>
 
             <div class="item-info">
@@ -425,7 +494,7 @@ onMounted(() => {
         <div class="section-head">
           <div>
             <span class="eyebrow">COUPONS</span>
-            <h2>门店优惠券</h2>
+            <h2><el-icon class="h2-icon"><Ticket /></el-icon>门店优惠券</h2>
             <p>先领券再下单，结算时选择使用可抵扣订单金额。</p>
           </div>
           <span class="section-count">{{ vouchers.length }} 张</span>
@@ -448,14 +517,26 @@ onMounted(() => {
         </div>
       </section>
 
-      <section class="section-block review-section" data-testid="review-section">
+      <section id="reviews" class="section-block review-section" data-testid="review-section">
         <div class="section-head">
           <div>
             <span class="eyebrow">REVIEWS</span>
-            <h2>门店评价</h2>
+            <h2><el-icon class="h2-icon"><ChatDotRound /></el-icon>门店评价</h2>
             <p>来自真实到店用户的评分与体验，按发布时间倒序展示。</p>
           </div>
-          <span class="section-count">{{ reviewTotal }} 条</span>
+          <div class="review-head-actions">
+            <span class="section-count">{{ reviewTotal }} 条</span>
+            <el-button
+              v-if="auth.isLoggedIn"
+              type="primary"
+              plain
+              :icon="EditPen"
+              data-testid="write-review"
+              @click="goWriteReview"
+            >
+              写评价
+            </el-button>
+          </div>
         </div>
 
         <div v-if="reviewError" class="inline-error">
@@ -471,7 +552,16 @@ onMounted(() => {
           v-else-if="!reviews.length"
           description="该门店还没有评价，等你来写第一条"
           :image-size="86"
-        />
+        >
+          <el-button
+            v-if="auth.isLoggedIn"
+            type="primary"
+            :icon="EditPen"
+            @click="goWriteReview"
+          >
+            写第一条评价
+          </el-button>
+        </el-empty>
 
         <template v-else>
           <div class="review-list">
@@ -482,11 +572,18 @@ onMounted(() => {
               data-testid="review-item"
             >
               <header class="review-head">
-                <el-avatar :size="40" class="review-avatar">
-                  {{ initialOf(`同城用户 ${review.userId}`) }}
+                <el-avatar
+                  :size="40"
+                  class="review-avatar"
+                  :src="reviewAvatarSrc(review)"
+                  :style="{ background: avatarColor(review.userId) }"
+                  data-testid="review-avatar"
+                  @error="brokenAvatars[String(review.id)] = true"
+                >
+                  {{ reviewAvatar(review) }}
                 </el-avatar>
                 <div class="review-author">
-                  <b>同城用户 {{ review.userId }}</b>
+                  <b data-testid="review-author">{{ reviewAuthor(review) }}</b>
                   <span>{{ formatRelativeTime(review.createTime) }}</span>
                 </div>
                 <div class="review-rating" :aria-label="`评分 ${review.score} 分`">
@@ -505,6 +602,21 @@ onMounted(() => {
 
               <h3 v-if="review.title">{{ review.title }}</h3>
               <p class="review-content">{{ review.content }}</p>
+
+              <div v-if="reviewImages(review).length" class="review-images">
+                <template
+                  v-for="(image, index) in reviewImages(review)"
+                  :key="`${review.id}-${image}`"
+                >
+                  <img
+                    v-if="!brokenReviewImages[`${review.id}-${index}`]"
+                    :src="image"
+                    alt="评价配图"
+                    loading="lazy"
+                    @error="brokenReviewImages[`${review.id}-${index}`] = true"
+                  />
+                </template>
+              </div>
 
               <footer class="review-foot">
                 <span>
@@ -789,10 +901,27 @@ onMounted(() => {
 }
 
 .section-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 3px 0 0;
   font-size: 22px;
   font-weight: 800;
   letter-spacing: -0.025em;
+}
+
+.h2-icon {
+  flex: none;
+  color: var(--brand-500);
+  font-size: 17px;
+}
+
+.review-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  scroll-margin-top: 78px;
 }
 
 .section-head p {
@@ -855,11 +984,9 @@ onMounted(() => {
   object-fit: cover;
 }
 
-.thumb-initial {
-  position: absolute;
+.thumb-icon {
   color: var(--brand-400);
-  font-size: 30px;
-  font-weight: 850;
+  font-size: 27px;
 }
 
 .item-info {
@@ -964,7 +1091,7 @@ onMounted(() => {
 .review-avatar {
   flex: none;
   background: linear-gradient(135deg, #dbeafe, #93c5fd);
-  color: var(--brand-700);
+  color: #fff;
   font-size: 15px;
   font-weight: 800;
 }
@@ -1030,6 +1157,22 @@ onMounted(() => {
   line-height: 1.75;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.review-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.review-images img {
+  width: 92px;
+  height: 92px;
+  object-fit: cover;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--brand-50);
 }
 
 .review-foot {
@@ -1154,6 +1297,20 @@ onMounted(() => {
 
   .item-controls :deep(.el-input-number) {
     width: 100px;
+  }
+
+  .review-head {
+    flex-wrap: wrap;
+  }
+
+  .review-rating {
+    margin-left: auto;
+  }
+
+  .review-pagination :deep(.el-pagination) {
+    --el-pagination-button-width: 26px;
+    --el-pagination-button-height: 26px;
+    --el-pagination-item-gap: 8px;
   }
 }
 </style>

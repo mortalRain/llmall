@@ -4,7 +4,10 @@ import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.llmall.api.client.ShopClient;
+import com.llmall.api.client.UserClient;
 import com.llmall.api.dto.ShopDTO;
+import com.llmall.api.dto.UserProfileDTO;
+import com.llmall.api.dto.UserProfileQueryDTO;
 import com.llmall.api.event.ReviewCreatedEvent;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.common.domain.PageQuery;
@@ -17,6 +20,7 @@ import com.llmall.content.domain.dto.BlogFormDTO;
 import com.llmall.content.domain.po.Blog;
 import com.llmall.content.domain.po.BlogComments;
 import com.llmall.content.domain.po.BlogLike;
+import com.llmall.content.domain.vo.BlogVO;
 import com.llmall.content.mapper.BlogCommentsMapper;
 import com.llmall.content.mapper.BlogLikeMapper;
 import com.llmall.content.mapper.BlogMapper;
@@ -34,7 +38,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.llmall.content.constant.ContentRedisConstants.BLOG_LIKED_KEY;
 import static com.llmall.content.constant.ContentRedisConstants.BLOG_LIKED_TTL;
@@ -45,6 +52,10 @@ import static com.llmall.content.constant.ContentRedisConstants.CACHE_SET_MAX;
  *
  * 发布评价时把 review.created 同事务登记到本地消息表、提交后再投递，门店域消费后重算热度；
  * 登记与投递的可靠性细节见 {@link ContentEventPublisher}。
+ *
+ * 【评价作者资料】blog 表只有 user_id，昵称/头像在用户库；列表与详情都走
+ * {@link UserClient#queryProfiles} 一次批量回填，整页固定 1 次调用，不做 N+1。
+ * 用户服务不可用时只降级作者展示（回退「同城用户{id}」），不影响评价正文的读取。
  */
 @Slf4j
 @Service
@@ -56,6 +67,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     private final BlogCommentsMapper blogCommentsMapper;
     private final BlogLikeMapper blogLikeMapper;
     private final ShopClient shopClient;
+    private final UserClient userClient;
     private final StringRedisTemplate redisTemplate;
     private final ContentEventPublisher eventPublisher;
     private final IFollowService followService;
@@ -106,9 +118,11 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     }
 
     @Override
-    public Blog queryDetail(Long id) {
+    public BlogVO queryDetail(Long id) {
         // 合规要求：对外只可见 status=1（已发布），见 requireVisibleBlog
-        return requireVisibleBlog(id);
+        Blog blog = requireVisibleBlog(id);
+        Map<Long, UserProfileDTO> profiles = loadProfiles(Collections.singletonList(blog));
+        return BlogVO.from(blog, profiles.get(blog.getUserId()));
     }
 
     /**
@@ -134,7 +148,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     }
 
     @Override
-    public PageDTO<Blog> pageByShop(Long shopId, Integer page, Integer size) {
+    public PageDTO<BlogVO> pageByShop(Long shopId, Integer page, Integer size) {
         // 分页上下限统一走公共件：只挡 size<1 挡不住 size=100000 这种"一次拉走半个表"的请求
         int current = PageQuery.normalizePageNo(page);
         int pageSize = PageQuery.normalizeSize(size, 10);
@@ -143,7 +157,47 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .eq(Blog::getStatus, STATUS_PUBLISHED)
                 .orderByDesc(Blog::getCreateTime)
                 .page(new Page<>(current, pageSize));
-        return PageDTO.of(result, Blog.class);
+        // 整页只查一次用户资料：评价条数再多，跨服务调用次数也固定为 1（不是每条一次）
+        Map<Long, UserProfileDTO> profiles = loadProfiles(result.getRecords());
+        List<BlogVO> list = result.getRecords().stream()
+                .map(blog -> BlogVO.from(blog, profiles.get(blog.getUserId())))
+                .collect(Collectors.toList());
+        return PageDTO.of(result, list);
+    }
+
+    /**
+     * 批量加载评价作者昵称/头像。
+     *
+     * 【为什么整页一次】页面大小的放大点必须在服务端收口：逐条调用户服务会让一页 10 条变成 10 次 RPC，
+     * 且评价区是全站高频读路径。这里按 userId 去重后一次调用。
+     *
+     * 【降级口径】用户服务抖动/超时只记录 WARN 并返回空表，调用方把作者回退成「同城用户{id}」；
+     * 评价正文不依赖用户服务，不能因为展示增强字段不可用就让整个列表 500。
+     */
+    private Map<Long, UserProfileDTO> loadProfiles(List<Blog> blogs) {
+        if (CollUtils.isEmpty(blogs)) {
+            return Collections.emptyMap();
+        }
+        List<Long> ids = blogs.stream()
+                .map(Blog::getUserId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .collect(Collectors.toList());
+        if (ids.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        try {
+            List<UserProfileDTO> profiles = userClient.queryProfiles(new UserProfileQueryDTO(ids));
+            if (CollUtils.isEmpty(profiles)) {
+                return Collections.emptyMap();
+            }
+            return profiles.stream()
+                    .filter(profile -> profile != null && profile.getId() != null)
+                    .collect(Collectors.toMap(UserProfileDTO::getId, profile -> profile, (left, right) -> left));
+        } catch (Exception e) {
+            log.warn("批量查询评价作者资料失败，作者昵称将回退为「同城用户{id}」: ids={}", ids, e);
+            return Collections.emptyMap();
+        }
     }
 
     @Override

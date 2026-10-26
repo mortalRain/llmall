@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowRight, Refresh, Tickets, View } from '@element-plus/icons-vue'
+import { ArrowRight, Refresh, Tickets, View, WarningFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { orderApi } from '@/api/modules'
 import { getErrorMessage } from '@/api/http'
@@ -174,7 +174,7 @@ onMounted(() => {
     </div>
 
     <div v-else-if="errorMessage" class="error-card">
-      <div class="error-icon">!</div>
+      <div class="error-icon"><el-icon><WarningFilled /></el-icon></div>
       <h3>订单加载失败</h3>
       <p>{{ errorMessage }}</p>
       <el-button type="primary" :icon="Refresh" @click="loadOrders">重新加载</el-button>

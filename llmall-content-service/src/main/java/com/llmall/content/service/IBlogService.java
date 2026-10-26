@@ -5,6 +5,7 @@ import com.llmall.common.domain.PageDTO;
 import com.llmall.content.domain.dto.BlogFormDTO;
 import com.llmall.content.domain.po.Blog;
 import com.llmall.content.domain.po.BlogComments;
+import com.llmall.content.domain.vo.BlogVO;
 
 import java.util.List;
 
@@ -13,11 +14,11 @@ public interface IBlogService extends IService<Blog> {
     /** 发布探店笔记/评价：落库 + 投递评价事件 + 推送粉丝 Feed */
     Long publishBlog(BlogFormDTO form, Long userId);
 
-    /** 笔记详情 */
-    Blog queryDetail(Long id);
+    /** 笔记详情（含作者昵称/头像，单条同样批量查询，避免前端二次请求） */
+    BlogVO queryDetail(Long id);
 
-    /** 门店下的笔记分页 */
-    PageDTO<Blog> pageByShop(Long shopId, Integer page, Integer size);
+    /** 门店下的笔记分页（含作者昵称/头像；整页一次批量查资料，不做 N+1） */
+    PageDTO<BlogVO> pageByShop(Long shopId, Integer page, Integer size);
 
     /** 点赞（幂等）；返回最新点赞数 */
     int likeBlog(Long blogId, Long userId);

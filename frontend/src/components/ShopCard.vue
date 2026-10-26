@@ -29,7 +29,10 @@ const score = computed(() => scoreOf(props.shop.score))
         <span>{{ initialOf(shop.name) }}</span>
       </div>
       <span class="type-badge">{{ shop.typeName || '精选门店' }}</span>
-      <span v-if="shop.hotScore" class="hot-badge">🔥 {{ Number(shop.hotScore).toFixed(1) }}</span>
+      <span v-if="shop.hotScore" class="hot-badge">
+        <el-icon><StarFilled /></el-icon>
+        热度 {{ Number(shop.hotScore).toFixed(1) }}
+      </span>
     </div>
 
     <div class="shop-body">
@@ -128,7 +131,15 @@ const score = computed(() => scoreOf(props.shop.score))
 
 .hot-badge {
   right: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   background: rgba(217, 119, 6, 0.88);
+  font-size: 10.5px;
+}
+
+.hot-badge .el-icon {
+  font-size: 11px;
 }
 
 .shop-body {

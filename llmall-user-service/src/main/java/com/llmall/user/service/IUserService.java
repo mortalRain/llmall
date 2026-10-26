@@ -1,12 +1,15 @@
 package com.llmall.user.service;
 
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.llmall.api.dto.UserProfileDTO;
 import com.llmall.user.domain.dto.LoginFormDTO;
 import com.llmall.user.domain.dto.LoginPasswordFormDTO;
 import com.llmall.user.domain.dto.PayPasswordFormDTO;
 import com.llmall.user.domain.dto.SmsLoginDTO;
 import com.llmall.user.domain.po.User;
 import com.llmall.user.domain.vo.UserLoginVO;
+
+import java.util.List;
 
 /**
  * 用户账号与余额服务契约：两种登录方式（用户名密码 / 手机验证码）、验证码下发、当前用户查询，
@@ -39,6 +42,16 @@ public interface IUserService extends IService<User> {
 
     /** 获取当前登录用户（身份来自网关注入的 user-info 头，经拦截器放入 UserContext） */
     UserLoginVO currentUser();
+
+    /**
+     * 批量查询用户展示资料（昵称/头像），仅供内容域评价列表等内部调用。
+     *
+     * 【安全边界】只返回昵称与头像；不返回手机号、余额、口令。调用方必须持有服务间凭证。
+     * 【空值口径】用户未填写昵称/头像时返回 null，由调用方回退展示文案。
+     *
+     * @param ids 用户 id 集合；null/空返回空列表，重复 id 自动去重
+     */
+    List<UserProfileDTO> queryProfiles(List<Long> ids);
 
     /**
      * 扣减余额（余额支付 / 付费券购买），供支付域调用。

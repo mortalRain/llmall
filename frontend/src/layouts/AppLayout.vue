@@ -642,14 +642,28 @@ async function handleCommand(command: string): Promise<void> {
   .mobile-link {
     display: flex;
     flex: 1;
+    min-width: 0;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 1px;
+    overflow: hidden;
+    padding: 0;
     border-radius: 10px;
     color: var(--faint);
-    font-size: 10.5px;
+    font-size: 9.5px;
     font-weight: 600;
+  }
+
+  .mobile-link .el-icon {
+    font-size: 18px;
+  }
+
+  .mobile-link span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .mobile-link.active {

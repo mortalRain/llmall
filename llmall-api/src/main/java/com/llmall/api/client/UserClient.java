@@ -1,6 +1,8 @@
 package com.llmall.api.client;
 
 import com.llmall.api.dto.MoneyDeductDTO;
+import com.llmall.api.dto.UserProfileDTO;
+import com.llmall.api.dto.UserProfileQueryDTO;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -8,8 +10,22 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 
+import java.util.List;
+
 @FeignClient("llmall-user-service")
 public interface UserClient {
+
+    /**
+     * 批量查询用户展示资料（内部接口，需服务间凭证 x-service-token）。
+     *
+     * 【为什么批量】评价列表一页最多十几条，逐条查用户资料就是 N+1；本接口让内容域固定一次调用
+     * 取回整页作者的昵称/头像。只返回昵称/头像，不返回手机号/余额等账户字段。
+     *
+     * 【降级】用户服务抖动时应由调用方按"昵称为空"处理（回退同城用户{id}），
+     * 不能让评价列表整体 500；因此这里不配置会改变资金语义的 fallback。
+     */
+    @PostMapping("/internal/users/profiles")
+    List<UserProfileDTO> queryProfiles(@RequestBody UserProfileQueryDTO query);
 
     /** 扣减余额。支付密码只能随请求体传递，不得放进 URL query。 */
     @PostMapping("/users/money/deduct")

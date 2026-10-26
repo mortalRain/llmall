@@ -135,13 +135,16 @@ frontend/
 │     ├─ Cart.vue          # 购物车：选品、改数量、删除、合计、去结算
 │     ├─ Favorites.vue     # 我的收藏：取消收藏 / 进门店
 │     ├─ Shops.vue         # 门店列表（/shops/page 分页）
-│     ├─ ShopDetail.vue    # 门店详情 + 收藏 + 评价分页
-│     ├─ Checkout.vue      # 结算：立即购买 / 购物车多商品
+│     ├─ ShopDetail.vue    # 门店详情 + 收藏 + 评价（头像/昵称/评分/内容）
+│     ├─ ReviewCreate.vue  # 写评价：评分/标题/正文/图片 URL
+│     ├─ Checkout.vue      # 结算：立即购买 / 购物车多商品 / 多门店通用券提示
 │     ├─ Orders.vue        # 顾客订单：核销码 + 到店出示（无核销按钮）
 │     ├─ StaffVerify.vue   # 员工核销台（/staff/verify，任意员工角色）
 │     ├─ StaffManage.vue   # 员工管理（/staff/manage，仅 OWNER/MANAGER）
 │     └─ Profile.vue
-├─ e2e/                    # Playwright 冒烟（7 条：地址 / 核销 / 付费券 / Rose 403 / 商城 / 收藏 / 评价）
+├─ e2e/                    # Playwright 冒烟（9 条：地址 / 核销 / 付费券 / Rose 403 / 商城 / 收藏 /
+│                          #   评价 / 写评价 / 多门店券降级）
+├─ scripts/mobile-smoke.mjs # 375×812 移动端冒烟（npm run test:mobile）
 ├─ playwright.config.ts
 └─ legacy-demo/            # 旧单文件演示台，仅留档
 ```
@@ -157,7 +160,8 @@ frontend/
 | 购物车 | `GET /carts`、`POST /carts`、`PUT /carts`（只改 num）、`DELETE /carts/{id}` |
 | 我的收藏 | `GET /shops/my/favorites`、`DELETE /shops/{id}/favorite` |
 | 门店列表 | `GET /shops/page?page=&size=&keyword=` |
-| 门店详情 | `GET /shops/{id}`、`GET /items/shop/{shopId}`、`GET /vouchers/list?shopId=`、`GET /blogs/shop/{shopId}?page=&size=`、`GET/POST/DELETE /shops/{id}/favorite` |
+| 门店详情 | `GET /shops/{id}`、`GET /items/shop/{shopId}`、`GET /vouchers/list?shopId=`、`GET /blogs/shop/{shopId}?page=&size=`（返回 BlogVO：含 `nickname/icon`）、`GET/POST/DELETE /shops/{id}/favorite` |
+| 写评价 | `POST /blogs`（`shopId/title/content/score/images`） |
 | 领券 | `POST /vouchers/{id}/receive`（付费券在请求体带 `pw`） |
 | 结算/下单 | `GET /addresses`、`POST /orders`（`details` 支持多行）、`GET /orders/{id}` |
 | 支付 | `POST /pay-orders`、`POST /pay-orders/{id}` |
@@ -205,13 +209,21 @@ npm run build
 npm run dev
 curl -I http://localhost:5173
 
-# Playwright 冒烟（7 条：地址 / 核销 / 付费券 / Rose 403 / 商城加购 / 收藏 / 评价）
+# Playwright 冒烟（9 条：地址 / 核销 / 付费券 / Rose 403 / 商城加购 / 收藏 /
+#   评价 / 写评价 / 多门店券降级）
 npm run test:e2e
+
+# 375×812 移动端冒烟（登录/商城/购物车/门店详情/评价/写评价页），输出截图到 docs/images/
+npm run test:mobile
 ```
 
 - 页面：登录 / 关注动态 / 商城 `/mall` / 商品详情 `/item/:id` / 购物车 `/cart` /
-  我的收藏 `/favorites` / 门店列表 / 门店详情 / 结算收银台 / 订单 / 核销台 `/staff/verify` /
-  员工管理 `/staff/manage`（仅 OWNER/MANAGER）/ 我的。
+  我的收藏 `/favorites` / 门店列表 / 门店详情 `/shops/:id` / 写评价 `/shops/:id/review` /
+  结算收银台 / 订单 / 核销台 `/staff/verify` / 员工管理 `/staff/manage`（仅 OWNER/MANAGER）/ 我的。
+- 评价作者资料：后端 `POST /internal/users/profiles` 批量返回昵称/头像，内容域 `BlogVO` 回填；
+  前端昵称为空回退「同城用户{id}」，头像为空用首字 + 稳定背景色。
+- 多门店结算：只展示 `shopId` 为空的通用券，并提示「多门店结算仅支持通用券」。
+- 图标：统一使用 `@element-plus/icons-vue`，尺寸 14~18px，无外部图片。
 - 商城/购物车/收藏/评价的实现细节（接口、幂等、种子数据、验收口径）见
   [`../docs/商城-购物车-收藏与评价.md`](../docs/商城-购物车-收藏与评价.md)。
 
@@ -220,11 +232,18 @@ npm run test:e2e
 - 前置：网关 8080 与 MySQL/Redis/Nacos/RabbitMQ 已运行、演示数据已导入（`sql/merged/README.md`）；
   收藏/评价用例还需要 `sql/merged/34-shop-favorite.sql`、`35-review-seed.sql` 已执行。
 - 用例可重复执行：地址/订单每轮新建；付费券"一人一张"，已领取时断言"已领取"而不重复扣款；
-  商城用例开头通过接口清空购物车；收藏用例开头通过接口删除历史收藏（两个接口本身幂等）。
+  商城用例开头通过接口清空购物车；收藏用例开头通过接口删除历史收藏（两个接口本身幂等）；
+  写评价用例用唯一标题/内容定位新评价，不依赖列表顺序。
+- 移动端脚本用 `elementFromPoint` 检查关键按钮是否被 sticky 顶栏/底部导航遮盖，并逐页断言
+  `scrollWidth <= clientWidth`；脚本只清理自己加购的商品，不影响其他购物车行。
 
 ![商城](../docs/images/frontend-mall.png)
 ![购物车](../docs/images/frontend-cart.png)
-![门店评价](../docs/images/frontend-shop-review.png)
+![门店评价（头像+昵称）](../docs/images/review-author.png)
+![写评价](../docs/images/review-form.png)
+![多门店通用券提示](../docs/images/checkout-multi-shop.png)
+![移动端商城 375×812](../docs/images/mobile-mall.png)
+![移动端门店评价 375×812](../docs/images/mobile-shop.png)
 
 构建产物约 1.7 MB（未压缩），Element Plus 全量引入后主 vendor chunk 约 823 KB；
-已在 1440px 与 375px 宽度下检查布局与主要交互。
+已在 1440px 与 375×812 下检查布局与主要交互（移动端由 Playwright 脚本复跑）。

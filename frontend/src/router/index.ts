@@ -59,6 +59,14 @@ const router = createRouter({
           meta: { title: '门店详情' },
         },
         {
+          // 写评价独立成页：评价内容是 10~500 字的长文本，弹窗在 375px 下会被键盘/视口挤到不可用。
+          // 路由守卫已要求登录；进入后仍会校验登录态，未登录时回跳登录并带回跳地址。
+          path: 'shops/:id/review',
+          name: 'shop-review',
+          component: () => import('@/views/ReviewCreate.vue'),
+          meta: { title: '写评价' },
+        },
+        {
           path: 'checkout',
           name: 'checkout',
           component: () => import('@/views/Checkout.vue'),

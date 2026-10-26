@@ -617,5 +617,12 @@ onMounted(() => {
     grid-template-columns: minmax(0, 1fr);
     gap: 14px;
   }
+
+  /* 375px：默认 32px 的分页按钮 + 外边距会把整行撑到 392px，压缩按钮与间距避免横向溢出 */
+  .pagination-wrap :deep(.el-pagination) {
+    --el-pagination-button-width: 26px;
+    --el-pagination-button-height: 26px;
+    --el-pagination-item-gap: 8px;
+  }
 }
 </style>

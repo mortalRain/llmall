@@ -62,8 +62,9 @@ class BlogCommentsDisplayFilterTest {
                     return null;
                 });
 
-        // 构造参数顺序与 BlogServiceImpl 的 final 字段声明一致：blogCommentsMapper 在最前
-        BlogServiceImpl service = new BlogServiceImpl(mapper, null, null, null, null, null) {
+        // 构造参数顺序与 BlogServiceImpl 的 final 字段声明一致：
+        // blogCommentsMapper、blogLikeMapper、shopClient、userClient、redisTemplate、eventPublisher、followService
+        BlogServiceImpl service = new BlogServiceImpl(mapper, null, null, null, null, null, null) {
             @Override
             public Blog getById(java.io.Serializable id) {
                 // 让 requireVisibleBlog 通过：已发布(status=1) 且作者是当前用户

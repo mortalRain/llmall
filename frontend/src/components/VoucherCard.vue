@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Ticket } from '@element-plus/icons-vue'
 import type { UserVoucher, Voucher } from '@/api/types'
 import { formatDate, formatPrice, parseRules, voucherStatusMeta } from '@/utils/format'
 
@@ -40,6 +41,7 @@ const buttonLabel = computed(() => {
 <template>
   <article class="voucher-card" :class="{ inactive }">
     <div class="voucher-value">
+      <span class="voucher-icon"><el-icon><Ticket /></el-icon></span>
       <span class="value-main">{{ formatPrice(voucher.actualValue) }}</span>
       <span class="value-label">{{ isPaid ? '付费代金券' : '门店代金券' }}</span>
     </div>
@@ -107,6 +109,15 @@ const buttonLabel = computed(() => {
   background: linear-gradient(160deg, #eff6ff 0%, #dbeafe 100%);
   border-right: 1px dashed var(--brand-200);
   color: var(--brand-600);
+}
+
+.voucher-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 3px;
+  color: var(--brand-500);
+  font-size: 15px;
 }
 
 .voucher-value::before,

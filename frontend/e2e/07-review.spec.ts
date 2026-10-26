@@ -43,5 +43,6 @@ test('门店详情评价列表非空并展示评分与内容', async ({ page, re
   expect(content, '评价内容应包含中文').toMatch(/[\u4e00-\u9fa5]/)
 
   const author = (await first.locator('.review-author b').innerText()).trim()
-  expect(author, '评价应展示作者昵称（当前为同城用户 {id}）').toContain('同城用户')
+  expect(author.length, '评价作者昵称不应为空').toBeGreaterThan(0)
+  expect(author, '评价作者应为真实昵称或「同城用户{id}」回退').toMatch(/同城用户|[\u4e00-\u9fa5]/)
 })

@@ -609,6 +609,7 @@ try {
             # 35 必须在 50/51 四步之后：门店 1/3/4/10/11 的评价种子不能被后续 seed 的
             # DELETE 区间清掉；脚本自身用 NOT EXISTS 保证重复执行不翻倍。
             @{ F = "$SqlMerged\35-review-seed.sql";                Why = '演示门店评价种子（5 家 × 6 条，门店详情评价区依赖）' }
+            @{ F = "$SqlMerged\36-user-profile-seed.sql";           Why = '演示用户昵称（评价作者展示）' }
             # 63 排在 60 与全部 seed 之后：它只改 Jack 一行的 pay_password，依赖 60 建出的列与
             # 第 2 步 llmall-user.sql 里的演示账号；放在 seed 尾部可避免将来 seed 脚本新增
             # 对 user 表的写操作时把它改回初始口令（那样冒烟会停在"首次支付前强制改密"）。

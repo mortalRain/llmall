@@ -166,8 +166,8 @@ pwsh -File scripts/verify-auth.ps1          # 鉴权链路端到端验收
 
 ### 4.3 演示前端
 
-`frontend/` 是 Vue 3 + TypeScript + Vite + Element Plus 的 SPA（13 个页面），覆盖登录、关注动态、
-商城搜索/筛选、商品详情、购物车、结算收银台、门店列表/详情、门店收藏、评价浏览、订单、核销台、
+`frontend/` 是 Vue 3 + TypeScript + Vite + Element Plus 的 SPA（14 个页面），覆盖登录、关注动态、
+商城搜索/筛选、商品详情、购物车、结算收银台、门店列表/详情、门店收藏、评价浏览/写评价、订单、核销台、
 员工管理与我的。启动方式与接口清单见 [`frontend/README.md`](frontend/README.md)，
 商城/收藏/评价的实现说明见 [`docs/商城-购物车-收藏与评价.md`](docs/商城-购物车-收藏与评价.md)。
 
@@ -508,15 +508,18 @@ llmall/
 ## 12. 前端（Vue 3 + TypeScript）
 
 `frontend/` 是重建后的 SPA：Vue 3 + TS + Vite + Pinia + Vue Router + Element Plus（浅蓝主题），
-13 个页面（登录 / 关注动态 / 商城 / 商品详情 / 购物车 / 我的收藏 / 门店列表 / 门店详情 / 结算收银台 /
-订单 / 核销台 / 员工管理 / 我的）。
+14 个页面（登录 / 关注动态 / 商城 / 商品详情 / 购物车 / 我的收藏 / 门店列表 / 门店详情 / 写评价 /
+结算收银台 / 订单 / 核销台 / 员工管理 / 我的）。
 
 ![商城](docs/images/frontend-mall.png)
 ![购物车](docs/images/frontend-cart.png)
-![门店评价](docs/images/frontend-shop-review.png)
+![门店评价（头像+昵称）](docs/images/review-author.png)
+![写评价](docs/images/review-form.png)
 ![登录](docs/images/frontend-login.png)
 ![门店](docs/images/frontend-shops.png)
 ![订单](docs/images/frontend-orders.png)
+![移动端商城 375×812](docs/images/mobile-mall.png)
+![移动端门店评价 375×812](docs/images/mobile-shop.png)
 
 ```bash
 cd frontend && npm install && npm run dev   # http://localhost:5173，/api 代理到 8080
@@ -532,24 +535,36 @@ cd frontend && npm install && npm run dev   # http://localhost:5173，/api 代�
   立即购买仍兼容单商品 `itemId + num`。
 - **门店收藏**：门店详情收藏按钮（`GET/POST/DELETE /shops/{id}/favorite`，已收藏高亮），
   `/favorites` 按收藏时间倒序展示并可取消；后端 `shop_favorite` 以 `uk_user_shop` 保证幂等。
-- **门店评价**：门店详情分页拉取 `/blogs/shop/{shopId}`，展示评分/内容/时间与空态；
+- **门店评价与写评价**：门店详情分页拉取 `/blogs/shop/{shopId}`，每条展示头像 + 昵称 + 评分 + 内容 + 时间；
+  内容域通过用户域内部接口 `POST /internal/users/profiles` 批量回填作者昵称/头像（整页 1 次，非 N+1），
+  昵称为空回退「同城用户{id}」，头像为空用昵称首字 + 稳定背景色。独立写评价页
+  `/shops/:id/review`：`el-rate` 1~5 星、标题、10~500 字正文、可选图片 URL；发布后回门店详情并定位评价区。
   演示库由 `sql/merged/35-review-seed.sql` 给 5 家门店各补 6 条评价。
+- **图标统一**：全部使用已安装的 `@element-plus/icons-vue`（代金券 `Ticket`、套餐/商品 `Food`/`Goods`、
+  门店 `Shop`、收藏 `Star/StarFilled`、购物车 `ShoppingCart`、评价 `ChatDotRound`、地址 `Location`、
+  支付 `Wallet`），尺寸 14~18px，未引入外部图片；原 emoji/文字图标（🔥、★、✓、!）已替换。
+- **多门店结算券降级**：购物车行跨多个 `shopId` 时，结算页只展示 `shopId` 为空的通用券，并提示
+  「多门店结算仅支持通用券」；单店购物车保持原逻辑，券模型未改。
 - **核销语义：顾客出示、员工核销**：顾客订单里只展示核销码（到店出示给店员），**没有核销按钮**；
   核销动作集中在员工侧 `/staff/verify`「核销台」，导航项对任意员工角色展示，
   非员工访问会被拦截。后端仍独立判权，非本店员工 403（见 [10.5](#105-核销权限与员工角色ownermanagerstaff)）
 - **员工角色与员工管理**：`OWNER/MANAGER` 可见 `/staff/manage`「员工管理」（列表、按 userId 添加、改角色、删除）；
   `STAFF` 只能核销。最后 OWNER 不可删/降级，店长不能授/撤 OWNER（服务端强制）。
-- **Playwright 冒烟（7 条）**：
+- **Playwright 冒烟（9 条 + 移动端脚本）**：
 
   ```bash
   cd frontend
-  npm run test:e2e     # 地址 / 核销（含 403）/ 付费券 / Rose 403 / 商城加购+改数量+合计 / 收藏 / 评价
+  npm run test:e2e     # 地址 / 核销（含 403）/ 付费券 / Rose 403 / 商城加购+改数量+合计 / 收藏 / 评价 /
+                       # 写评价 / 多门店券降级提示
+  npm run test:mobile  # 375×812 登录/商城/购物车/门店详情/评价/写评价页，截图到 docs/images/
   ```
 
   用本机 Chrome（`channel: 'chrome'`），`baseURL=http://localhost:5173`，`testDir=e2e`；
   dev server 未起时自动 `npm run dev`（已起则复用）。前置：网关 8080 与中间件已运行，演示数据已导入。
   Rose 用例需要 `sql/merged/33-shop-staff-roles.sql` 已执行（账号 `Rose/123456`，非员工）；
   收藏/评价用例需要 `sql/merged/34-shop-favorite.sql`、`35-review-seed.sql` 已执行。
+  移动端脚本以 375×812 检查逐页横向溢出与关键按钮遮挡，输出 `mobile-mall.png`、`mobile-shop.png`
+  （另附 `mobile-review-form.png`）。
 
 ## 13. 可观测性
 

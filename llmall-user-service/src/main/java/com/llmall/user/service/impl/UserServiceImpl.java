@@ -3,6 +3,7 @@ package com.llmall.user.service.impl;
 import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.llmall.api.dto.UserProfileDTO;
 import com.llmall.common.constant.AuthConstants;
 import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.BizIllegalException;
@@ -45,7 +46,12 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * 用户账号入口：两种登录方式（用户名密码 / 手机验证码）、账号口令的修改与弱口令收口，
@@ -319,6 +325,38 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             throw new UnauthorizedException("用户不存在");
         }
         return toVO(user);
+    }
+
+    /**
+     * 批量查询用户展示资料（内部接口专用）。
+     *
+     * 【只读、无登录态】内容域在评价列表里需要作者昵称/头像，调用来自服务间、没有用户登录上下文；
+     * 因此这里只按 id 查展示字段，绝不返回手机号、余额、口令等账户信息。
+     *
+     * 【空值口径】昵称/头像原样返回 null：是否回退成「同城用户{id}」由使用方决定，
+     * 用户服务不替调用方编造展示文案。
+     *
+     * 【去重与上限】ids 去重后一次 IN 查询，避免调用方重复传参放大 SQL；单次最多 200 个，
+     * 与本项目其他批量接口（商品/门店）的上限口径一致，超出部分忽略而不是报错。
+     */
+    @Override
+    public List<UserProfileDTO> queryProfiles(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Set<Long> distinctIds = ids.stream()
+                .filter(Objects::nonNull)
+                .limit(200)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (distinctIds.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return listByIds(distinctIds).stream()
+                .map(user -> new UserProfileDTO()
+                        .setId(user.getId())
+                        .setNickname(user.getNickName())
+                        .setIcon(user.getIcon()))
+                .collect(Collectors.toList());
     }
 
     /**

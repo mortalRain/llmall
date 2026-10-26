@@ -6,8 +6,10 @@ import type { FormInstance, FormRules } from 'element-plus'
 import {
   ArrowLeft,
   Check,
+  Location,
   Lock,
   Plus,
+  Ticket,
   Wallet,
 } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -122,6 +124,17 @@ const commonShopId = computed(() => {
   return ids.length === 1 ? ids[0] : ''
 })
 
+/** 购物车行跨多个 shopId：结算只能使用通用券（shopId 为空），页面需要明确提示降级原因 */
+const multiShop = computed(() => {
+  const ids = new Set(
+    lines.value
+      .map((line) => line.item.shopId)
+      .filter((id): id is Id => Boolean(id))
+      .map(String),
+  )
+  return ids.size > 1
+})
+
 const itemSoldOut = computed(() =>
   lines.value.some(
     (line) => Number(line.item.stock ?? 0) <= 0 || Number(line.num) > Number(line.item.stock ?? 0),
@@ -136,7 +149,10 @@ const availableVouchers = computed(() => {
   return myVouchers.value.filter((voucher) => {
     if (Number(voucher.status) !== 1) return false
     if (isExpired(voucher.expireTime)) return false
+    // 通用券（shopId 为空）在任何结算组合下都可用
     if (!voucher.shopId) return true
+    // 多门店结算只展示通用券：门店券无法同时覆盖多个 shopId，后端也没有"跨店券"模型
+    if (multiShop.value) return false
     if (!commonShopId.value) return false
     return String(voucher.shopId) === String(commonShopId.value)
   })
@@ -472,12 +488,18 @@ onBeforeUnmount(() => {
         <el-button text :icon="ArrowLeft" @click="router.back()">返回</el-button>
         <div class="checkout-steps">
           <div class="checkout-step" :class="{ done: stepActive >= 0, current: stepActive === 0 }">
-            <span class="step-index">{{ stepActive > 0 ? '✓' : '1' }}</span>
+            <span class="step-index">
+              <el-icon v-if="stepActive > 0"><Check /></el-icon>
+              <template v-else>1</template>
+            </span>
             <span>确认订单</span>
           </div>
           <i></i>
           <div class="checkout-step" :class="{ done: stepActive >= 1, current: stepActive === 1 }">
-            <span class="step-index">{{ stepActive > 1 ? '✓' : '2' }}</span>
+            <span class="step-index">
+              <el-icon v-if="stepActive > 1"><Check /></el-icon>
+              <template v-else>2</template>
+            </span>
             <span>余额支付</span>
           </div>
           <i></i>
@@ -500,7 +522,7 @@ onBeforeUnmount(() => {
             <section class="panel checkout-panel">
               <div class="panel-head">
                 <div>
-                  <h2>收货信息</h2>
+                  <h2><el-icon class="h2-icon"><Location /></el-icon>收货信息</h2>
                   <p>选择一个地址，或新增常用地址。</p>
                 </div>
                 <el-button :icon="Plus" size="small" @click="openAddressDialog">新增地址</el-button>
@@ -611,10 +633,30 @@ onBeforeUnmount(() => {
             <section class="panel checkout-panel">
               <div class="panel-head">
                 <div>
-                  <h2>优惠券</h2>
-                  <p>仅展示当前门店可用、未过期的券。</p>
+                  <h2><el-icon class="h2-icon"><Ticket /></el-icon>优惠券</h2>
+                  <p>
+                    {{
+                      multiShop
+                        ? '多门店结算仅展示通用券（无门店限制）。'
+                        : '仅展示当前门店可用、未过期的券。'
+                    }}
+                  </p>
                 </div>
                 <span class="panel-badge">{{ availableVouchers.length }} 张可用</span>
+              </div>
+
+              <div
+                v-if="multiShop"
+                class="multi-shop-hint"
+                data-testid="multi-shop-voucher-hint"
+              >
+                <el-alert
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  title="多门店结算仅支持通用券"
+                  description="购物车商品来自多个门店，本页只展示无门店限制的通用券；门店券请在单店结算时使用。"
+                />
               </div>
 
               <div v-if="availableVouchers.length" class="voucher-options">
@@ -643,7 +685,9 @@ onBeforeUnmount(() => {
                   <el-icon v-if="selectedVoucherId === String(voucher.id)"><Check /></el-icon>
                 </button>
               </div>
-              <div v-else class="voucher-none">本店暂无可用于本单的优惠券</div>
+              <div v-else class="voucher-none">
+                {{ multiShop ? '本单暂无可用通用券' : '本店暂无可用于本单的优惠券' }}
+              </div>
             </section>
           </div>
 
@@ -967,6 +1011,10 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
+.step-index .el-icon {
+  font-size: 12px;
+}
+
 .checkout-step.done {
   color: var(--brand-600);
 }
@@ -1013,10 +1061,22 @@ onBeforeUnmount(() => {
 }
 
 .panel-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   margin: 0;
   font-size: 16px;
   font-weight: 750;
   letter-spacing: -0.01em;
+}
+
+.h2-icon {
+  color: var(--brand-500);
+  font-size: 15px;
+}
+
+.multi-shop-hint {
+  margin-bottom: 11px;
 }
 
 .panel-head p {

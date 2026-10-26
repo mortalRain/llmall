@@ -6,6 +6,7 @@ import type {
   AddressPayload,
   Blog,
   CartItem,
+  CreateBlogPayload,
   CreateOrderPayload,
   FeedPage,
   FeedQuery,
@@ -154,6 +155,13 @@ export const cartApi = {
 export const blogApi = {
   byShop(shopId: Id, page = 1, size = 5): Promise<PageResult<Blog>> {
     return get<PageResult<Blog>>(`/blogs/shop/${shopId}`, { params: { page, size } })
+  },
+  detail(id: Id): Promise<Blog> {
+    return get<Blog>(`/blogs/${id}`)
+  },
+  /** 发布评价：后端返回新评价 id（Long 已序列化为字符串） */
+  create(payload: CreateBlogPayload): Promise<Id> {
+    return post<Id>('/blogs', payload)
   },
 }
 

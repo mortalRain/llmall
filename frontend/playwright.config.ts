@@ -1,8 +1,9 @@
 import { defineConfig } from '@playwright/test'
 
 /**
- * Playwright 冒烟测试配置（7 条：新增地址 / 到店核销 / 付费券购买 / 非员工 Rose 越权 403 /
- * 商城加购+购物车改数量 / 门店收藏 / 门店评价）。
+ * Playwright 冒烟测试配置（9 条：新增地址 / 到店核销 / 付费券购买 / 非员工 Rose 越权 403 /
+ * 商城加购+购物车改数量 / 门店收藏 / 门店评价 / 写评价 / 多门店券降级提示）。
+ * 另：375×812 移动端冒烟独立为 scripts/mobile-smoke.mjs（npm run test:mobile），不占本配置的 9 条。
  *
  * 【运行】cd frontend && npm run test:e2e
  *   前置：后端网关已跑在 8080，Redis/MySQL/Nacos/MQ 已起（演示环境 docker compose）。

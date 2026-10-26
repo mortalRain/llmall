@@ -3,8 +3,8 @@ package com.llmall.content.controller;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.common.utils.UserContext;
 import com.llmall.content.domain.dto.BlogFormDTO;
-import com.llmall.content.domain.po.Blog;
 import com.llmall.content.domain.po.BlogComments;
+import com.llmall.content.domain.vo.BlogVO;
 import com.llmall.content.service.IBlogService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import io.swagger.v3.oas.annotations.Operation;
@@ -34,17 +34,17 @@ public class BlogController {
         return blogService.publishBlog(form, UserContext.getUser());
     }
 
-    @Operation(summary = "查询笔记详情")
+    @Operation(summary = "查询笔记详情（含作者昵称/头像）")
     @GetMapping("/{id}")
-    public Blog queryById(@PathVariable("id") Long id) {
+    public BlogVO queryById(@PathVariable("id") Long id) {
         return blogService.queryDetail(id);
     }
 
-    @Operation(summary = "查询门店下的笔记")
+    @Operation(summary = "查询门店下的笔记（含作者昵称/头像）")
     @GetMapping("/shop/{shopId}")
-    public PageDTO<Blog> pageByShop(@PathVariable("shopId") Long shopId,
-                                    @RequestParam(value = "page", required = false, defaultValue = "1") Integer page,
-                                    @RequestParam(value = "size", required = false, defaultValue = "10") Integer size) {
+    public PageDTO<BlogVO> pageByShop(@PathVariable("shopId") Long shopId,
+                                      @RequestParam(value = "page", required = false, defaultValue = "1") Integer page,
+                                      @RequestParam(value = "size", required = false, defaultValue = "10") Integer size) {
         return blogService.pageByShop(shopId, page, size);
     }
 
