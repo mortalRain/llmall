@@ -1,11 +1,23 @@
 # llmall-pay-service 的服务专属 dataId（dataId = 服务名 + .yaml，与应用 spring.application.name 的默认约定一致）。
-# 内容只覆盖一个键：连接池上限 20，其余配置仍继承 Nacos 上的 shared-*.yaml。
+# 本文件只覆盖 Hikari 的三个键（上限 / 保活下限 / 泄漏检测），其余数据源配置仍继承 Nacos 上的 shared-jdbc.yaml。
 #
 # 【为什么单独一份、而不是改 shared-jdbc.yaml】那份是 9 个服务共用的，共同抬到 20 会变成 9 x 20 = 180，
 #   超过 MySQL max_connections（151 / 本机 100）把库打满。只有"服务专属 dataId"这一层能盖住
 #   shared-configs 里的同名键（覆盖层级与取值依据见 docs/P-01-申请支付单耗时定位-2026-10-17.md 第七节）。
 #
-# 【注意】HikariCP 的 maximum-pool-size 不在 Spring Cloud 动态刷新范围内：改完必须重启
+# 【2026-10-26 复测后的取值】maximum-pool-size 20 -> 25，并补 minimum-idle / leak-detection-threshold。
+#   连接预算（MySQL `max_connections = 100`，实测 Max_used_connections = 43）：
+#     · 其余 8 个有库服务各 5（Nacos shared-jdbc 下发）：8 x 5 = 40
+#     · pay 25：40 + 25 = 65 <= 100，仍留 35 条余量给 root/运维/突发
+#     · 若 pay 也调到 30/50：65 -> 70/90，与"MySQL 侧单次占用已经从 65ms 涨到 210ms"的实测相悖 ——
+#       池越大，同时压到 MySQL 的长事务越多，排队只是从应用池挪到了 DB 锁与 IO 上
+#   minimum-idle 1 -> 10：50 并发下池要从 1 长到 25，建连的抖动都落在预热阶段；
+#     保活到 10 条（低于上限、不额外占用预算）可避免每轮压测/流量回升时的集中建连。
+#   leak-detection-threshold 30000ms：本服务最长正常持有是余额支付事务（事务内含两次 Feign，
+#     读超时 5s、扣款最多 2 次尝试，最坏约 15s）+ 取连接等待 5s，约 20s；
+#     30s 留出 1.5 倍余量，既不误报，又能在连接泄漏把池耗尽前打出持有栈。
+#
+# 【注意】HikariCP 的池参数不在 Spring Cloud 动态刷新范围内：改完必须重启
 #   llmall-pay-service 才生效，导入配置后立刻读指标仍会是旧值。
 #
 # 【为什么要入仓】这份配置曾只存在于 Nacos（运行态手工发布）；2026-10-18 nacos 容器重建
@@ -13,4 +25,6 @@
 spring:
   datasource:
     hikari:
-      maximum-pool-size: 20
+      maximum-pool-size: 25
+      minimum-idle: 10
+      leak-detection-threshold: 30000

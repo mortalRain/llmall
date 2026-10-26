@@ -26,7 +26,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -119,8 +118,13 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
     public String applyPayOrder(PayApplyDTO applyDTO) {
         SegmentTimer timer = new SegmentTimer();
         try {
-            // 先校验交易订单是否可付再生成支付单：越早失败，需要人工对账的差错单越少
+            // 【阶段一：远程校验，不持有任何数据库连接】
+            // 先校验交易订单是否可付再生成支付单：越早失败，需要人工对账的差错单越少。
+            // 这一步只发一次 Feign、只读 ThreadLocal，不取连接、不开事务 —— 顺序不能反：
+            // 本方法刻意不加 @Transactional，任何把 Feign 包进事务的改动都会让一次 4~6 ms 的远程调用
+            // 整段占住一条连接（50 并发下每条连接的平均排队时间远大于这个数，占住即放大排队）。
             checkOrderPayable(applyDTO, timer);
+            // 【阶段二：单次连接完成"查重 + 建单"】见 checkIdempotent；成功路径只取一次连接。
             PayOrder payOrder = checkIdempotent(applyDTO, timer);
             return payOrder.getId().toString();
         } finally {
@@ -658,37 +662,52 @@ public class PayOrderServiceImpl extends ServiceImpl<PayOrderMapper, PayOrder> i
      * 扣款侧的"一单只扣一次"再无从判定。交易订单号是付款依据本身：它相同才是同一笔支付，
      * 因此以它为维度，重复申请一律收敛到同一条支付单。
      *
-     * 【裁决点】查到旧单即复用，渠道不同则原地重置二维码等信息；因此真正的唯一性由
-     * pay_order.biz_order_no 上的唯一键裁决 —— 本方法的"先查后插"在并发申请之间没有任何互斥。
+     * 【一次连接：查重与插入合并】新订单路径只取一次连接 —— 用一条 upsert 同时完成"查重 + 插入"
+     * （SQL 与主键回填口径见 {@link PayOrderMapper#saveOrGetExisting}），不再像旧实现那样
+     * SELECT 借还一次、INSERT 再借还一次。原实现"先查后插"的并发缝隙也一并消掉：
+     * 并发申请由唯一键在同一语句里原子裁决，不再依赖 DuplicateKeyException 回查。
+     *
+     * 【裁决点】查到旧单即复用，渠道不同则原地重置二维码等信息；真正的唯一性仍由
+     * pay_order.biz_order_no 上的唯一键裁决 —— 这一点没有变，变了的是不再需要两次取连接。
      * 【失效条件】该唯一键被删除或降级为普通索引后，同一交易订单会被并发插入两条支付单。
      * 【返回】可继续支付的支付单（新建的、复用的、或重置过的），调用方只需取它的 id。
      * 【异常】BizIllegalException：已支付成功或已关闭等终态不能再发起支付。
      */
     private PayOrder checkIdempotent(PayApplyDTO applyDTO, SegmentTimer timer) {
+        PayOrder candidate = buildPayOrder(applyDTO);
+        // 预生成主键：既是 INSERT 的值，也是"这行是否由本次请求插入"的判据。
+        // 新插入时驱动回填的就是它；命中唯一键时 LAST_INSERT_ID(id) 回填的是已有行 id，两者不同。
+        long newId = IdWorker.getId();
+        candidate.setId(newId);
+        long idBegin = timer.begin();
+        candidate.setPayOrderNo(IdWorker.getId());
+        timer.record("pay.idWorker.getId", idBegin);
+        long saveBegin = timer.begin();
+        try {
+            baseMapper.saveOrGetExisting(candidate);
+        } finally {
+            // 失败路径（唯一键/非空约束）同样要留一段：报错时也得能看出耗时花在 DB 上
+            timer.record("pay.upsert", saveBegin);
+        }
+        Long effectiveId = candidate.getId();
+        if (effectiveId != null && effectiveId.longValue() == newId) {
+            // 新建：candidate 上就是要落库的那份数据，不必再查一次
+            return candidate;
+        }
+        // 走到这里 = 唯一键命中，candidate.id 已被改写成已存在行的 id。
+        // 回查仍按 biz_order_no（与旧实现同一判据），而不是直接采信 candidate.id：
+        // 若 upsert 命中的是 pay_order_no 上另一行（单号碰撞），直接采信会把别人的支付单返回给本次请求。
         long queryBegin = timer.begin();
-        PayOrder oldOrder = queryByBizOrderNo(applyDTO.getBizOrderNo());
-        timer.record("pay.queryByBizOrderNo", queryBegin);
+        PayOrder oldOrder;
+        try {
+            oldOrder = queryByBizOrderNo(applyDTO.getBizOrderNo());
+        } finally {
+            timer.record("pay.queryByBizOrderNo", queryBegin);
+        }
         if (oldOrder == null) {
-            PayOrder payOrder = buildPayOrder(applyDTO);
-            long idBegin = timer.begin();
-            payOrder.setPayOrderNo(IdWorker.getId());
-            timer.record("pay.idWorker.getId", idBegin);
-            long saveBegin = timer.begin();
-            try {
-                save(payOrder);
-            } catch (DuplicateKeyException e) {
-                // 并发申请同一交易订单：由唯一键 biz_order_no 裁决，第二个请求回查并复用已提交的支付单。
-                // 【注意】applyPayOrder 没有事务，所以能看见并发事务刚提交的行；若将来给它加事务，
-                // RR 快照会让这里回查不到，必须把回查放到事务外层或用 REQUIRES_NEW。
-                PayOrder exist = queryByBizOrderNo(applyDTO.getBizOrderNo());
-                if (exist == null) {
-                    throw e;
-                }
-                timer.record("pay.save", saveBegin);
-                return exist;
-            }
-            timer.record("pay.save", saveBegin);
-            return payOrder;
+            // 理论上不可达：唯一键已裁决存在，回查却查不到（例如刚被物理删除）。
+            // 此时绝不能返回 candidate.id —— 它可能指向一条与本次交易订单无关的记录。
+            throw new BizIllegalException("支付单状态异常，请稍后重试");
         }
         // 已支付成功、已关闭都是终态，不能再发起支付
         if (PayStatus.TRADE_SUCCESS.equalsValue(oldOrder.getStatus())) {
