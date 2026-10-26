@@ -5,7 +5,11 @@ import com.llmall.common.domain.PageDTO;
 import com.llmall.common.exception.ForbiddenException;
 import com.llmall.common.exception.UnauthorizedException;
 import com.llmall.common.utils.UserContext;
+import com.llmall.shop.domain.dto.ShopStaffAddDTO;
+import com.llmall.shop.domain.dto.ShopStaffRoleDTO;
 import com.llmall.shop.domain.vo.HotReconcileResultVO;
+import com.llmall.shop.domain.vo.MyShopStaffVO;
+import com.llmall.shop.domain.vo.ShopStaffVO;
 import com.llmall.shop.service.IShopService;
 import com.llmall.shop.service.IShopStaffService;
 import com.llmall.shop.task.ShopStatRollupTask;
@@ -17,6 +21,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 
+import javax.validation.Valid;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -72,22 +77,80 @@ public class ShopController {
     }
 
     /**
-     * 查询当前登录用户任职的门店 id 列表。
+     * 查询当前登录用户任职的门店与角色。
      *
-     * 【用途】前端订单页据此决定是否展示"去核销"入口（非本店员工隐藏并提示）。
-     * 【注意】这只是展示开关，不是权限边界：真正的拦截在交易域的核销接口（它实时调用
-     * {@link InternalShopController} 判权），前端拿到伪造的 id 也核销不了。
+     * 【用途】前端据此决定展示"核销台"（任意角色）与"员工管理"（仅 OWNER/MANAGER）入口。
+     * 【注意】这只是展示开关，不是权限边界：核销由交易域实时调用内部接口判权，
+     * 员工管理由下方接口在服务端再次校验，前端伪造 role 不会带来任何权限。
      * 【鉴权】多段路径，网关不白名单放行，未登录请求到不了这里；直连服务端口时
      * UserContext 只会由合法的内部凭证头填充，取不到即 401（fail-closed）。
      */
-    @Operation(summary = "我任职的门店 id 列表（前端用于展示核销入口）")
+    @Operation(summary = "我任职的门店与角色（前端用于展示核销台/员工管理入口）")
     @GetMapping("/my/staff")
-    public List<Long> queryMyStaffShopIds() {
+    public List<MyShopStaffVO> queryMyStaff() {
+        return shopStaffService.queryMyStaff(requireLogin());
+    }
+
+    /**
+     * 门店员工列表。
+     *
+     * 【权限】仅本店 OWNER/MANAGER；非本店员工（含 STAFF）返回 403。
+     * 【注意】路径 /shops/{shopId}/staff 不在网关只读白名单内（/shops/* 只匹配单段），
+     * 因此未登录请求在网关即被拦截；controller 里再取一次 UserContext 作为直连端口的兜底。
+     */
+    @Operation(summary = "门店员工列表（仅店主/店长）")
+    @GetMapping("/{shopId}/staff")
+    public List<ShopStaffVO> listStaff(@PathVariable("shopId") Long shopId) {
+        return shopStaffService.listStaff(shopId, requireLogin());
+    }
+
+    /**
+     * 新增门店员工。
+     *
+     * 【权限】本店 OWNER/MANAGER；role=OWNER 仅 OWNER 可授予。
+     * 【错误】重复添加返回 409（ConflictException），role 非法返回 400。
+     */
+    @Operation(summary = "新增门店员工（仅店主/店长；授予店主仅店主）")
+    @PostMapping("/{shopId}/staff")
+    public void addStaff(@PathVariable("shopId") Long shopId,
+                         @RequestBody @Valid ShopStaffAddDTO dto) {
+        shopStaffService.addStaff(shopId, requireLogin(), dto.getUserId(), dto.getRole());
+    }
+
+    /**
+     * 修改门店员工角色。
+     *
+     * 【为什么有 PUT】POST 是"新增"，重复添加按需求必须 409；改角色若复用 POST，
+     * 要么破坏"重复即冲突"的语义，要么让前端只能"先删后加"（删最后一个 OWNER 会被拒）。
+     * 单独 PUT 语义清晰，也能独立做权限校验。
+     */
+    @Operation(summary = "修改门店员工角色（仅店主/店长；授予/撤销店主仅店主）")
+    @PutMapping("/{shopId}/staff/{userId}")
+    public void updateStaffRole(@PathVariable("shopId") Long shopId,
+                                @PathVariable("userId") Long userId,
+                                @RequestBody @Valid ShopStaffRoleDTO dto) {
+        shopStaffService.updateStaffRole(shopId, requireLogin(), userId, dto.getRole());
+    }
+
+    /**
+     * 删除门店员工。
+     *
+     * 【权限】本店 OWNER/MANAGER；删除 OWNER 仅 OWNER 可操作；最后一个 OWNER 不可删除（409）。
+     */
+    @Operation(summary = "删除门店员工（仅店主/店长；最后一个店主不可删）")
+    @DeleteMapping("/{shopId}/staff/{userId}")
+    public void removeStaff(@PathVariable("shopId") Long shopId,
+                            @PathVariable("userId") Long userId) {
+        shopStaffService.removeStaff(shopId, requireLogin(), userId);
+    }
+
+    /** 取当前登录人：网关透传 user-info；直连端口取不到时返回 401，而不是把 null 当游客 */
+    private Long requireLogin() {
         Long userId = UserContext.getUser();
         if (userId == null) {
             throw new UnauthorizedException("未登录");
         }
-        return shopStaffService.queryStaffShopIds(userId);
+        return userId;
     }
 
     @Operation(summary = "分页查询门店（按热度排序）")

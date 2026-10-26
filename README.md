@@ -168,6 +168,42 @@ pwsh -File scripts/verify-auth.ps1          # 鉴权链路端到端验收
 `frontend/index.html` 是单文件、零依赖的演示台，双击即可打开（需后端已起），覆盖门店热度榜、
 发布评价后榜单实时变化、登录与积分流水。详见 [`frontend/README.md`](frontend/README.md)。
 
+### 4.4 容器重建（代码改动后让镜像真正生效）
+
+```bash
+# 1) 重新构建全部 jar（Dockerfile 内跑 mvn package；不是只打前端）
+docker build -f deploy/Dockerfile -t local-life/llmall:1.0.0 .
+
+# 2) 用与仓库一致的 env 重建全量应用容器（.env 已有 LLMALL_SERVICE_TOKEN，不要再改 compose 必填项）
+docker compose --env-file deploy/.env -f deploy/docker-compose-apps.yml --profile full up -d --force-recreate
+
+# 3) 等健康（最多 5 分钟；10 个应用服务 + 网关）
+docker compose --env-file deploy/.env -f deploy/docker-compose-apps.yml --profile full ps
+
+# 4) 验证新代码确实进镜像（两个入口都走服务端）
+curl -s http://localhost:8080/actuator/health
+# 需要登录的接口用前端 E2E 覆盖：npm run test:e2e
+```
+
+> **为什么必须重建镜像**：compose 只重建容器、不会重新打包 jar。改了 Java 代码却只 `up -d --force-recreate`，
+> 跑的还是旧镜像里的 jar（表现为"接口 404 / 403 策略没变"）。镜像 ID 与构建耗时可在
+> `docker image inspect local-life/llmall:1.0.0 --format '{{.Id}}'` 与 `docker history` 查看。
+
+### 4.5 清理 E2E 数据并恢复余额
+
+E2E 会不断新建订单/地址/券并消耗 Jack 余额。清理脚本按 `client_token` / `E2E*` 标识精确删除，
+**不写死目标余额**：用待删 `balance_flow` 汇总反推测试前余额。
+
+```bash
+# 盘点 + 清理（脚本会先输出 BEFORE 明细，再删除，最后输出 AFTER 对比）
+docker exec -i mysql mysql --default-character-set=utf8mb4 -uroot -p123 < sql/cleanup-e2e-data.sql
+# 或本机 mysql：mysql -uroot -p < sql/cleanup-e2e-data.sql
+```
+
+脚本细节、识别口径与"种子数据不动"的边界见 [`sql/cleanup-e2e-data.sql`](sql/cleanup-e2e-data.sql) 文件头；
+本轮实测的前后对比（38 单 / 27 地址 / 余额 869200 → 974400）见
+[`docs/verification/e2e-cleanup-2026-10-26.md`](docs/verification/e2e-cleanup-2026-10-26.md)。
+
 ---
 
 ## 5. 工程治理：八道闸门
@@ -401,24 +437,50 @@ llmall/
 - `/actuator/**` **不在网关白名单内**：运维端点只走内网直连，外部经 8080 只放行 `/actuator/health`。
 - 免鉴权路径一律**剥离**客户端提供的 `user-info` 类身份头，只信任网关写入的那一份。
 
-### 10.5 核销权限：只有门店员工能核销（越权修复）
+### 10.5 核销权限与员工角色：OWNER / MANAGER / STAFF
 
 核销决定"券已使用"的终态与门店结算，**必须由后端强制**，不能只靠前端隐藏按钮。
 
-- **落库**：`llmall-shop.shop_staff`（`uk_shop_user(shop_id,user_id)`），脚本 [`sql/merged/32-shop-staff.sql`](sql/merged/32-shop-staff.sql)；
-  演示库种子：Jack（`user_id=1`）是 `shop_id=10` 与 `shop_id=1` 的 `STAFF`。
+- **落库**：`llmall-shop.shop_staff`（`uk_shop_user(shop_id,user_id)`），脚本
+  [`sql/merged/32-shop-staff.sql`](sql/merged/32-shop-staff.sql) 建表 + 演示种子，
+  [`sql/merged/33-shop-staff-roles.sql`](sql/merged/33-shop-staff-roles.sql) 做存量角色升级与 Rose 账号。
+- **角色模型（核销权人人都有，管理权逐级收紧）**：
+
+  | 角色 | 核销 | 查看/增删员工 | 改角色 | 授予/撤销 OWNER |
+  |---|---|---|---|---|
+  | `OWNER` 店主 | ✅ | ✅ | ✅ | ✅ |
+  | `MANAGER` 店长 | ✅ | ✅ | ✅（不能碰 OWNER） | ❌ |
+  | `STAFF` 员工 | ✅ | ❌ | ❌ | ❌ |
+
+  **最后 OWNER 保护**：门店必须至少保留一个 `OWNER`，删除或降级最后一个 OWNER 返回 `409`。
 - **判权**：交易域 `POST /orders/verify` 在核销前调用门店域内部接口
   `GET /internal/shops/{shopId}/staff/{userId}`（`x-service-token` 保护，网关无该路由）。
-- **拒绝口径**：非员工 → `403 {"code":403,"msg":"仅门店员工可核销"}`；
+  管理接口由门店域自己校验操作者角色，**不把管理权限下放给交易域或前端**。
+- **管理接口**（均需登录 + 该店 OWNER/MANAGER）：
+
+  | 方法 | 路径 | 说明 |
+  |---|---|---|
+  | `GET` | `/shops/{shopId}/staff` | 员工列表 `[{userId, role, createTime}]` |
+  | `POST` | `/shops/{shopId}/staff` | 新增 `{userId, role}`；重复 409、role 非法 400、店长授予 OWNER 403 |
+  | `PUT` | `/shops/{shopId}/staff/{userId}` | 改角色 `{role}`；最后一个 OWNER 降级 409 |
+  | `DELETE` | `/shops/{shopId}/staff/{userId}` | 删除；最后 OWNER 409、店长删 OWNER 403 |
+  | `GET` | `/shops/my/staff` | 我任职的门店与角色 `[{shopId, role}]`（含 `role` 才能区分核销台/员工管理入口） |
+
+- **拒绝口径**：非员工核销 → `403 {"code":403,"msg":"仅门店员工可核销"}`；
   门店服务不可用 → `403`（"门店员工校验不可用"），**fail-closed，绝不放行**；两种拒绝都不产生任何写库/发消息副作用。
 - **用户侧（顾客）**：订单卡片与详情**突出展示核销码**，文案为"到店出示给店员"；**没有核销按钮**——
   核销不是顾客的动作。
-- **员工侧**：独立路由 `/staff/verify`「核销台」，导航项仅对 `GET /shops/my/staff` 非空的用户展示；
-  员工选择本店 + 输入顾客核销码执行核销；非员工访问显示"仅门店员工可使用核销台"，
-  后端对非本店员工仍返回 403 并把 `msg` 原样展示。
-- **验证**：`mvn -o -pl llmall-shop-service,llmall-trade-service -am test`（含 5 条核销判权单测 + 6 条员工服务单测）；
-  `cd frontend && npm run test:e2e`（3 条冒烟：新增地址 / 顾客出示+员工核销 / 付费券）。
-- 完整设计与实测响应见 [`docs/核销权限-门店员工.md`](docs/核销权限-门店员工.md)。
+- **员工侧**：独立路由 `/staff/verify`「核销台」，导航项对任意员工角色展示；
+  员工选择本店 + 输入顾客核销码执行核销；非员工访问显示"仅门店员工可使用核销台"。
+- **管理侧**：独立路由 `/staff/manage`「员工管理」，导航项仅对 OWNER/MANAGER 展示；
+  列表、按 userId 添加、改角色、删除；最后一个 OWNER 的删除/降级按钮提前置灰，服务端仍会再拒绝一次。
+- **演示种子**：Jack（`user_id=1`）是 1/10 号店 `OWNER`；Hope 是 10 号店 `MANAGER`；
+  Rose（`user_id=2`，口令复用 Jack 的 bcrypt，明文 `123456`）是**真实非员工**，用于 403 用例。
+- **验证**：`mvn -o test` 全绿（shop 服务 `ShopStaffServiceImplTest` 23 条，覆盖 STAFF 不能管理、
+  MANAGER 不能授/撤 OWNER、最后 OWNER 不可删/降级、重复 409、非法角色 400）；
+  `cd frontend && npm run test:e2e`（4 条冒烟，含 Rose 非员工 403）。
+- 完整设计与实测响应见 [`docs/核销权限-门店员工.md`](docs/核销权限-门店员工.md) 与
+  [`docs/员工角色与员工管理.md`](docs/员工角色与员工管理.md)。
 
 ---
 
@@ -437,7 +499,7 @@ llmall/
 
 ## 12. 前端（Vue 3 + TypeScript）
 
-`frontend/` 是重建后的 SPA：Vue 3 + TS + Vite + Pinia + Vue Router + Element Plus（浅蓝主题），8 个页面（登录 / 关注动态 / 门店列表 / 门店详情 / 结算收银台 / 订单 / 核销台 / 我的）。
+`frontend/` 是重建后的 SPA：Vue 3 + TS + Vite + Pinia + Vue Router + Element Plus（浅蓝主题），9 个页面（登录 / 关注动态 / 门店列表 / 门店详情 / 结算收银台 / 订单 / 核销台 / 员工管理 / 我的）。
 
 ![登录](docs/images/frontend-login.png)
 ![门店](docs/images/frontend-shops.png)
@@ -451,17 +513,20 @@ cd frontend && npm install && npm run dev   # http://localhost:5173，/api 代�
 - 401 并发单飞刷新、路由守卫、`json-bigint` 解析 19 位 Long id（避免 JS 精度丢失）
 - 网关当前只认裸 JWT（非 `Bearer`），可用 `VITE_AUTH_SCHEME=bearer` 切换
 - **核销语义：顾客出示、员工核销**：顾客订单里只展示核销码（到店出示给店员），**没有核销按钮**；
-  核销动作集中在员工侧 `/staff/verify`「核销台」，导航项只对门店员工（`GET /shops/my/staff` 非空）展示，
-  非员工访问会被拦截。后端仍独立判权，非本店员工 403（见 [10.5](#105-核销权限只有门店员工能核销越权修复)）
-- **Playwright 冒烟（3 条）**：
+  核销动作集中在员工侧 `/staff/verify`「核销台」，导航项对任意员工角色展示，
+  非员工访问会被拦截。后端仍独立判权，非本店员工 403（见 [10.5](#105-核销权限与员工角色ownermanagerstaff)）
+- **员工角色与员工管理**：`OWNER/MANAGER` 可见 `/staff/manage`「员工管理」（列表、按 userId 添加、改角色、删除）；
+  `STAFF` 只能核销。最后 OWNER 不可删/降级，店长不能授/撤 OWNER（服务端强制）。
+- **Playwright 冒烟（4 条）**：
 
   ```bash
   cd frontend
-  npm run test:e2e     # 新增地址 / 顾客出示核销码+员工核销台核销（含 403 越权断言）/ 付费券购买
+  npm run test:e2e     # 新增地址 / 顾客出示+员工核销（含 403）/ 付费券购买 / 非员工 Rose 403
   ```
 
   用本机 Chrome（`channel: 'chrome'`），`baseURL=http://localhost:5173`，`testDir=e2e`；
   dev server 未起时自动 `npm run dev`（已起则复用）。前置：网关 8080 与中间件已运行，演示数据已导入。
+  Rose 用例需要 `sql/merged/33-shop-staff-roles.sql` 已执行（账号 `Rose/123456`，非员工）。
 
 ## 13. 可观测性
 

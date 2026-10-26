@@ -250,3 +250,28 @@ export interface PayApplyPayload {
 export interface PayPasswordPayload {
   pw: string
 }
+
+/**
+ * 门店员工角色：核销三种角色都可；管理员工仅 OWNER/MANAGER；
+ * 授予/撤销 OWNER 仅 OWNER。前端只用于展示与禁用按钮，服务端仍强制校验。
+ */
+export type StaffRole = 'OWNER' | 'MANAGER' | 'STAFF'
+
+/** GET /shops/my/staff 的返回项：我任职的门店 + 我在该店的角色 */
+export interface MyShopStaff {
+  shopId: Id
+  role: StaffRole
+}
+
+/** GET /shops/{shopId}/staff 的返回项 */
+export interface ShopStaffMember {
+  userId: Id
+  role: StaffRole
+  createTime: string | null
+}
+
+/** POST /shops/{shopId}/staff 请求体 */
+export interface AddShopStaffPayload {
+  userId: Id
+  role: StaffRole
+}

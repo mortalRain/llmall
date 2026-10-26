@@ -233,4 +233,9 @@ export function put<T>(url: string, data?: unknown, config?: RequestOptions): Pr
   return http.put<T>(url, data, config).then((response) => response.data)
 }
 
+/** DELETE 包装：员工管理删除接口用；与 get/post/put 共用 401 刷新与错误翻译 */
+export function del<T>(url: string, config?: RequestOptions): Promise<T> {
+  return http.delete<T>(url, config).then((response) => response.data)
+}
+
 export default http

@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowRight,
   Compass,
+  Management,
   Shop,
   Stamp,
   SwitchButton,
@@ -15,6 +16,7 @@ import {
 } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { shopApi } from '@/api/modules'
+import type { MyShopStaff } from '@/api/types'
 import { formatMoney } from '@/utils/format'
 
 const auth = useAuthStore()
@@ -22,13 +24,22 @@ const route = useRoute()
 const router = useRouter()
 
 /**
- * 员工模式入口：只有 `shop_staff` 命中的用户才在导航里看到"核销台"。
+ * 员工模式入口：
+ * - 任意角色（OWNER/MANAGER/STAFF）都显示"核销台"；
+ * - 只有 OWNER/MANAGER 显示"员工管理"。
  *
- * 【注意】隐藏入口只是 UX：即便手动敲 /staff/verify，页面会再校验一次身份；
- * 即便伪造身份，交易域核销接口仍会按 `(shopId, userId)` 判权并返回 403。
+ * 【注意】隐藏入口只是 UX：即便手动敲 /staff/verify 或 /staff/manage，页面会再校验一次身份；
+ * 即便伪造身份，服务端仍会按 (shopId, userId, role) 判权（核销 403、管理 403）。
  * 接口失败时按空集合处理（fail-closed），不展示入口。
  */
-const staffShopIds = ref<string[]>([])
+const staffShops = ref<MyShopStaff[]>([])
+
+const staffShopIds = computed(() => staffShops.value.map((item) => String(item.shopId)))
+const managerShopIds = computed(() =>
+  staffShops.value
+    .filter((item) => item.role === 'OWNER' || item.role === 'MANAGER')
+    .map((item) => String(item.shopId)),
+)
 
 const navItems = computed(() => {
   const items = [
@@ -40,15 +51,23 @@ const navItems = computed(() => {
   if (staffShopIds.value.length) {
     items.push({ to: '/staff/verify', label: '核销台', icon: Stamp })
   }
+  if (managerShopIds.value.length) {
+    items.push({ to: '/staff/manage', label: '员工管理', icon: Management })
+  }
   return items
 })
 
 async function loadStaffShops(): Promise<void> {
   try {
-    const shops = await shopApi.myStaffShops()
-    staffShopIds.value = Array.isArray(shops) ? shops.map((id) => String(id)) : []
+    const shops = (await shopApi.myStaffShops()) as unknown as Array<MyShopStaff | string>
+    // 兼容过渡态：老后端返回 ["10"]，新后端返回 [{shopId, role}]
+    staffShops.value = Array.isArray(shops)
+      ? shops.map((item) =>
+          typeof item === 'string' ? { shopId: item, role: 'STAFF' as const } : item,
+        )
+      : []
   } catch {
-    staffShopIds.value = []
+    staffShops.value = []
   }
 }
 

@@ -2,15 +2,20 @@ import { expect, type Page } from '@playwright/test'
 import { DEMO } from './api'
 
 /**
- * 通过登录页真实登录（不是直接塞 token）：三条冒烟都从"用户能登录"开始，
+ * 通过登录页真实登录（不是直接塞 token）：所有冒烟都从"用户能登录"开始，
  * 登录态、Pinia 初始化、路由守卫这些链路才是在测真实路径。
  *
+ * @param username 默认演示账号 Jack；Rose 用例传非员工账号
  * @returns 登录后 localStorage 里的 accessToken，供后续接口造数使用
  */
-export async function loginWithUi(page: Page): Promise<string> {
+export async function loginWithUi(
+  page: Page,
+  username: string = DEMO.username,
+  password: string = DEMO.password,
+): Promise<string> {
   await page.goto('/login')
-  await page.getByPlaceholder('请输入用户名').fill(DEMO.username)
-  await page.getByPlaceholder('请输入登录密码').fill(DEMO.password)
+  await page.getByPlaceholder('请输入用户名').fill(username)
+  await page.getByPlaceholder('请输入登录密码').fill(password)
   await page.getByRole('button', { name: '进入 LLMall' }).click()
 
   // 登录成功会 replace 到 /feed（或 redirect 参数指定的路径）

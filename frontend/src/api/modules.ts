@@ -1,5 +1,6 @@
-import { get, post, put } from '@/api/http'
+import { del, get, post, put } from '@/api/http'
 import type {
+  AddShopStaffPayload,
   Address,
   AddressPayload,
   CreateOrderPayload,
@@ -10,12 +11,15 @@ import type {
   ItemPageQuery,
   LoginPayload,
   LoginResult,
+  MyShopStaff,
   Order,
   OrderPageQuery,
   PageResult,
   PayApplyPayload,
   Shop,
   ShopPageQuery,
+  ShopStaffMember,
+  StaffRole,
   UserProfile,
   UserVoucher,
   VerifyOrderPayload,
@@ -54,13 +58,26 @@ export const shopApi = {
     return get<Shop>(`/shops/${id}`)
   },
   /**
-   * 我任职的门店 id 列表（后端 Long 序列化为字符串）。
+   * 我任职的门店与角色（后端 Long 序列化为字符串）。
    *
-   * 【用途】订单页只对"本店员工"展示核销入口。它是展示开关，不是权限边界：
-   * 真正的拦截在交易域核销接口（非员工返回 403），前端即使拿到伪造列表也核销不了。
+   * 【用途】核销台入口对任意角色开放；员工管理入口只对 OWNER/MANAGER 开放。
+   * 它是展示开关，不是权限边界：核销/管理都会在服务端再判一次。
    */
-  myStaffShops(): Promise<Id[]> {
-    return get<Id[]>('/shops/my/staff')
+  myStaffShops(): Promise<MyShopStaff[]> {
+    return get<MyShopStaff[]>('/shops/my/staff')
+  },
+  /** 门店员工管理：列表 / 新增 / 改角色 / 删除（服务端仅 OWNER/MANAGER 放行） */
+  listStaff(shopId: Id): Promise<ShopStaffMember[]> {
+    return get<ShopStaffMember[]>(`/shops/${shopId}/staff`)
+  },
+  addStaff(shopId: Id, payload: AddShopStaffPayload): Promise<void> {
+    return post<void>(`/shops/${shopId}/staff`, payload)
+  },
+  updateStaffRole(shopId: Id, userId: Id, role: StaffRole): Promise<void> {
+    return put<void>(`/shops/${shopId}/staff/${userId}`, { role })
+  },
+  removeStaff(shopId: Id, userId: Id): Promise<void> {
+    return del<void>(`/shops/${shopId}/staff/${userId}`)
   },
 }
 

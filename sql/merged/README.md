@@ -1,7 +1,7 @@
 # sql/merged · 库表脚本执行说明
 
 > **本文件是执行顺序的唯一权威（single source of truth）。**
-> 目录里共 **29 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
+> 目录里共 **30 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
 > 有一处必须破数字序，见 2.1 的 `23` / `30`）。
 > 其中 `52a` 是只读清点（不是变更脚本）、`63` 是演示 / 冒烟环境专用（生产库不得执行），两者在清单里都单列了用途。
 
@@ -65,8 +65,10 @@ mysql -uroot -p < 22-user-time-default.sql      # 5.7  llmall-user.user 时间�
 mysql -uroot -p < 30-content.sql                # 5.8  内容域建表（blog / blog_comments / blog_like / follow / feed_inbox）
 mysql -uroot -p < 23-content-image-default.sql  # 5.9  ⚠️ 依赖 5.8：blog 表由 30 号建立，23 号必须排在它后面
 mysql -uroot -p < 31-order-alter.sql            # 5.10 交易域改造（order 加 order_type/shop_id/voucher_id/verify_code/verify_time + 索引）
-mysql -uroot -p < 32-shop-staff.sql             # 5.10b 门店员工表 + 核销判权种子（Jack 为 1/10 号店 STAFF）
+mysql -uroot -p < 32-shop-staff.sql             # 5.10b 门店员工表 + 种子（Jack 为 1/10 号店 OWNER，Hope 为 10 号店 MANAGER）
                                                 #      ⚠️ 必须与应用同批上线：未建表时核销接口 fail-closed，员工校验取不到答案会全部拒绝
+mysql -uroot -p < 33-shop-staff-roles.sql       # 5.10c 存量角色升级（STAFF→OWNER）+ Rose 真实非员工账号
+                                                #      幂等；Rose 口令复用 Jack 的 bcrypt，不加入 shop_staff
 mysql -uroot -p < 40-search.sql                 # 5.11 搜索域建表（shop_search_doc / search_hot_word / search_history）
 mysql -uroot -p < 41-search-geo.sql             # 5.12 ⚠️ 依赖 5.11：给 shop_search_doc 补 x/y
 mysql -uroot -p < 62-align-dict-comments.sql    # 5.13 【存量库注释对齐；全新初始化可跳过】7 条纯 ALTER ... COMMENT
@@ -85,6 +87,11 @@ mysql -uroot -p < 63-user-demo-pay-password.sql # 6.6  ★演示 / 冒烟环境�
 #      ⚠️ 必须在 60 号之后执行（依赖 pay_password 列）；⛔ 生产库与任何对外开放的库都不得执行
 #      ⚠️ 52a 是 52 之前的只读清点，不改数据，位置见「已知偏差台账」；本清单不含 52a 的调用
 # 跑完调一次接口：POST /search/view/rebuild 与 POST /shops/cache/geo/rebuild
+
+# ── 6.7) E2E / 冒烟数据清理（演示库，随时可跑；不是建库步骤） ──
+# 按 client_token / E2E* 标识删除测试订单/地址/券/流水，并用 balance_flow 汇总恢复 Jack 余额。
+# 种子订单（1900100000000000001~9）、种子地址 59~63 / 9001~9003、种子券 8101~8104 不动。
+mysql -uroot -p < ../cleanup-e2e-data.sql
 
 # ── 7) 可选：从原点评库迁移门店数据（需要外部库 上游单体工程 已存在） ──
 mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS 上游单体工程 DEFAULT CHARSET utf8mb4;"

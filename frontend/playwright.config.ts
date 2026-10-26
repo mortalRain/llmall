@@ -1,7 +1,7 @@
 import { defineConfig } from '@playwright/test'
 
 /**
- * Playwright 冒烟测试配置（3 条：新增地址 / 到店核销 / 付费券购买）。
+ * Playwright 冒烟测试配置（4 条：新增地址 / 到店核销 / 付费券购买 / 非员工 Rose 越权 403）。
  *
  * 【运行】cd frontend && npm run test:e2e
  *   前置：后端网关已跑在 8080，Redis/MySQL/Nacos/MQ 已起（演示环境 docker compose）。
@@ -11,7 +11,7 @@ import { defineConfig } from '@playwright/test'
  * 不额外下载 Playwright 自带浏览器（体积大、内网常下载失败），直接用开发机上已安装的 Chrome。
  *
  * 【为什么 workers: 1】
- * 三条用例都会操作用户 Jack 的订单/余额/券，并行跑会相互抢库存与余额；
+ * 四条用例都会操作用户 Jack 的订单/余额/券，并行跑会相互抢库存与余额；
  * 串行且独立建数据（唯一后缀、每轮新订单）才能稳定重复执行。
  */
 export default defineConfig({

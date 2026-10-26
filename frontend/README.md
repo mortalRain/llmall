@@ -134,9 +134,10 @@ frontend/
 │     ├─ ShopDetail.vue
 │     ├─ Checkout.vue
 │     ├─ Orders.vue        # 顾客订单：核销码 + 到店出示（无核销按钮）
-│     ├─ StaffVerify.vue   # 员工核销台（/staff/verify，仅门店员工可用）
+│     ├─ StaffVerify.vue   # 员工核销台（/staff/verify，任意员工角色）
+│     ├─ StaffManage.vue   # 员工管理（/staff/manage，仅 OWNER/MANAGER）
 │     └─ Profile.vue
-├─ e2e/                    # Playwright 冒烟（地址 / 核销 / 付费券）
+├─ e2e/                    # Playwright 冒烟（地址 / 核销 / 付费券 / Rose 403）
 ├─ playwright.config.ts
 └─ legacy-demo/            # 旧单文件演示台，仅留档
 ```
@@ -154,11 +155,14 @@ frontend/
 | 支付 | `POST /pay-orders`、`POST /pay-orders/{id}` |
 | 订单（顾客） | `GET /orders`、`GET /orders/{id}`、`PUT /orders/{id}/cancel` |
 | 核销台（员工） | `GET /shops/my/staff`（判断员工身份/任职门店）、`POST /orders/verify` |
+| 员工管理（店主/店长） | `GET /shops/{shopId}/staff`、`POST /shops/{shopId}/staff`、`PUT /shops/{shopId}/staff/{userId}`、`DELETE /shops/{shopId}/staff/{userId}` |
 | 我的 | `GET /users/me`、`GET /vouchers/my`、`POST /users/logout` |
 
 > **核销语义**：核销是门店员工的动作。顾客侧只展示核销码并提示"到店出示给店员"，没有核销按钮；
-> 核销动作在 `/staff/verify` 核销台完成，入口只对 `GET /shops/my/staff` 非空的用户展示。
-> 前端判断只是 UX，后端对非本店员工始终返回 403。
+> 核销动作在 `/staff/verify` 核销台完成，入口对任意员工角色展示。
+> **管理语义**：`/staff/manage` 入口只对 OWNER/MANAGER 展示，可增删员工、改角色；
+> 最后一个 OWNER 不可删/降级，店长不能授予/撤销 OWNER。
+> 前端判断只是 UX，后端对非本店员工/无管理权者始终返回 403。
 
 字段口径以后端代码为准：
 
@@ -193,9 +197,12 @@ npm run build
 npm run dev
 curl -I http://localhost:5173
 
-# Playwright 冒烟（3 条：新增地址 / 顾客出示核销码+员工核销台 / 付费券）
+# Playwright 冒烟（4 条：新增地址 / 顾客出示+员工核销 / 付费券 / 非员工 Rose 403）
 npm run test:e2e
 ```
+
+- 页面：登录 / 关注动态 / 门店列表 / 门店详情 / 结算收银台 / 订单 / 核销台 `/staff/verify` /
+  员工管理 `/staff/manage`（仅 OWNER/MANAGER）/ 我的。
 
 - `npm run test:e2e` 用本机 Chrome（`channel: 'chrome'`），`baseURL=http://localhost:5173`，
   `testDir=e2e`，`webServer` 在 dev server 未启动时自动执行 `npm run dev`（已启动则复用）。

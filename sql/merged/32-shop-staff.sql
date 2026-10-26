@@ -6,7 +6,9 @@
 --
 -- ============================ 一、功能 ============================
 -- 1) 在 llmall-shop 库建出门店员工表 shop_staff：一行 = "某用户是某门店的员工"；
--- 2) 为演示账号 Jack 预置 shop_id = 10 与 shop_id = 1 的 STAFF 身份（仅演示库）。
+-- 2) 为演示账号 Jack 预置 shop_id = 10 与 shop_id = 1 的 OWNER 身份（仅演示库）；
+--    另把已有账号 Hope 种为 10 号店 MANAGER（不存在则不插）。存量库的角色升级与
+--    Rose（真实非员工）账号见 33-shop-staff-roles.sql。
 --
 -- ============================ 二、背景 ============================
 -- 修复「核销越权」：修复前 POST /orders/verify 只校验"已登录 + 核销码存在 + 门店一致"，
@@ -26,7 +28,8 @@
 --
 -- ============================ 三、影响面 ============================
 --   · 受影响：llmall-shop 库新增一张 shop_staff（CREATE TABLE IF NOT EXISTS，已存在则跳过）。
---   · 受影响：仅演示库的 shop_staff 会有 2 行种子（INSERT IGNORE，重复执行不变）。
+--   · 受影响：仅演示库的 shop_staff 会有 3 行种子（Jack 两行 OWNER + Hope 一行 MANAGER；
+--     INSERT IGNORE，重复执行不变）。
 --   · 不受影响：任何既有表结构与数据；不含 ALTER / UPDATE / DELETE。
 --   · 不受影响：其它库 —— 种子只"读"llmall-user.user 的 id，不写它。
 --   · 未执行本脚本就发布应用：shop 服务查不到表，核销接口会因员工校验失败而**拒绝**
@@ -37,7 +40,7 @@
 --   2. 执行：mysql -uroot -p < 32-shop-staff.sql
 --   3. 核对表与唯一键（期望 1 行 uk_shop_user）：
 --        SHOW CREATE TABLE `llmall-shop`.`shop_staff`;
---   4. 核对种子（期望 2 行；user_id 取 llmall-user.user 里 Jack 的真实 id）：
+--   4. 核对种子（期望 3 行；user_id 取 llmall-user.user 里 Jack/Hope 的真实 id）：
 --        SELECT * FROM `llmall-shop`.`shop_staff` ORDER BY id;
 --   5. 核对跨库读权限：种子用 `INSERT ... SELECT` 读 llmall-user.user，
 --      执行账号需对该库有 SELECT 权限（root 默认有；权限不足时报 ERROR 1142）。
@@ -61,22 +64,23 @@
 --   删行是即时生效的（应用每次核销都实时查询，不做缓存），不需要重启服务。
 --
 -- ============================ 附、风险等级 ============================
--- 低 —— 纯新增表 + 2 行演示种子（INSERT IGNORE），不改写任何存量数据，DROP 即可完整回滚。
+-- 低 —— 纯新增表 + 3 行演示种子（INSERT IGNORE），不改写任何存量数据，DROP 即可完整回滚。
 --       风险不在脚本本身，而在"应用先上线、脚本没跑"：届时核销会被 fail-closed 拒绝。
 -- =====================================================================
 
 USE `llmall-shop`;
 
 -- 门店员工表。
---   role：当前代码只判"是不是本店员工"（STAFF / MANAGER 同等放行），保留字段是为了将来
---         "只有店长能退款/核销大额单"这类细分权限；不在此处加 CHECK 约束，取值由应用保证。
+--   role：OWNER 店主 / MANAGER 店长 / STAFF 员工（ShopStaffRole 枚举）。
+--         核销权三种角色都有；管理员工仅 OWNER/MANAGER；授予/撤销 OWNER 仅 OWNER。
+--         不在此处加 CHECK 约束（MySQL 5.7 兼容 / 存量库迁移），取值由应用层校验。
 --   create_time：员工关系的建立时间，审计"某次核销发生时该员工是否已入职"时用得上。
 --   唯一键 uk_shop_user 同时是幂等闸门：同一人重复加入同一门店只会有一行。
 CREATE TABLE IF NOT EXISTS `shop_staff` (
   `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
   `shop_id`     BIGINT UNSIGNED NOT NULL COMMENT '门店 id（llmall-shop.shop.id）',
   `user_id`     BIGINT UNSIGNED NOT NULL COMMENT '员工用户 id（llmall-user.user.id，跨库逻辑外键，无物理外键）',
-  `role`        VARCHAR(16)     NOT NULL DEFAULT 'STAFF' COMMENT '角色：STAFF 员工 / MANAGER 店长（当前鉴权只判是否本店员工）',
+  `role`        VARCHAR(16)     NOT NULL DEFAULT 'STAFF' COMMENT '角色：OWNER 店主 / MANAGER 店长 / STAFF 员工',
   `create_time` TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '成为该门店员工的时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_shop_user` (`shop_id`, `user_id`),
@@ -84,16 +88,24 @@ CREATE TABLE IF NOT EXISTS `shop_staff` (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '门店员工（核销权限的唯一事实来源）';
 
 -- ---------------------------------------------------------------------
--- 演示种子：Jack 是 1 号与 10 号门店的 STAFF（⚠️ 仅演示 / 冒烟库）
+-- 演示种子：Jack 是 1 号与 10 号门店的 OWNER；Hope 是 10 号店的 MANAGER（⚠️ 仅演示 / 冒烟库）
 --
 -- user_id 先查后插：演示库里 Jack 通常是 1，但**不能写死 1** —— 一旦库是重建过的，
 -- 写死就会把 10 号店的核销权限挂到别的账号上（比没有权限更危险）。
--- 用 INSERT ... SELECT 从 llmall-user.user 取真实 id；Jack 不存在时插入 0 行。
+-- 用 INSERT ... SELECT 从 llmall-user.user 取真实 id；账号不存在时插入 0 行。
+--
+-- 角色说明：Jack 作为 OWNER 才能演示"员工管理"页；Hope 作为 MANAGER 用于验证
+-- "店长不能授予 OWNER"。真实非员工账号 Rose 由 33-shop-staff-roles.sql 处理（不加入本表）。
 -- ---------------------------------------------------------------------
 INSERT IGNORE INTO `shop_staff` (`shop_id`, `user_id`, `role`)
-SELECT s.shop_id, u.id, 'STAFF'
+SELECT s.shop_id, u.id, 'OWNER'
 FROM (SELECT 10 AS shop_id UNION ALL SELECT 1) s
 JOIN `llmall-user`.`user` u ON u.username = 'Jack';
 
--- 核对（执行后人工看一眼，期望 2 行）
+INSERT IGNORE INTO `shop_staff` (`shop_id`, `user_id`, `role`)
+SELECT 10, u.id, 'MANAGER'
+FROM `llmall-user`.`user` u
+WHERE u.username = 'Hope';
+
+-- 核对（执行后人工看一眼，期望 3 行：Jack 两家店 OWNER + Hope 10 号店 MANAGER）
 -- SELECT id, shop_id, user_id, role, create_time FROM `llmall-shop`.`shop_staff` ORDER BY id;

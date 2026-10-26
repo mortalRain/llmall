@@ -22,7 +22,8 @@ import { getErrorMessage } from '@/api/http'
 const router = useRouter()
 
 const checking = ref(true)
-const staffShopIds = ref<string[]>([])
+const staffShops = ref<Array<{ shopId: string; role: string }>>([])
+const staffShopIds = computed(() => staffShops.value.map((item) => String(item.shopId)))
 const checkError = ref('')
 const form = reactive({
   verifyCode: '',
@@ -44,15 +45,20 @@ async function loadStaffShops(): Promise<void> {
   checking.value = true
   checkError.value = ''
   try {
-    const shops = await shopApi.myStaffShops()
-    staffShopIds.value = Array.isArray(shops) ? shops.map((id) => String(id)) : []
+    const shops = (await shopApi.myStaffShops()) as unknown as Array<
+      { shopId: string; role: string } | string
+    >
+    // 兼容过渡态：老后端返回 ["10"]，新后端返回 [{shopId, role}]
+    staffShops.value = Array.isArray(shops)
+      ? shops.map((item) => (typeof item === 'string' ? { shopId: item, role: 'STAFF' } : item))
+      : []
     // 默认选中第一家任职门店：多数员工只在一家店，少一次点击
     if (staffShopIds.value.length && !staffShopIds.value.includes(form.shopId)) {
       form.shopId = staffShopIds.value[0]
     }
   } catch (error) {
     // 查不到身份按"无权限"处理（fail-closed）：宁可不展示表单，也不能把查询失败当成有权限
-    staffShopIds.value = []
+    staffShops.value = []
     checkError.value = getErrorMessage(error, '无法确认员工身份')
   } finally {
     checking.value = false

@@ -55,6 +55,14 @@ const router = createRouter({
           meta: { title: '核销台' },
         },
         {
+          // 员工管理：路由只要求登录，页面用 /shops/my/staff 判断是否 OWNER/MANAGER；
+          // 真正的增删改权限由 shop 服务端强制（STAFF 403、店长不能授 OWNER、最后 OWNER 不可删）。
+          path: 'staff/manage',
+          name: 'staff-manage',
+          component: () => import('@/views/StaffManage.vue'),
+          meta: { title: '员工管理' },
+        },
+        {
           path: 'profile',
           name: 'profile',
           component: () => import('@/views/Profile.vue'),

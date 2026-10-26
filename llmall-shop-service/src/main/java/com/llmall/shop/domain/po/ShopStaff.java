@@ -43,10 +43,15 @@ public class ShopStaff implements Serializable {
     private Long userId;
 
     /**
-     * 角色：STAFF 员工 / MANAGER 店长。
+     * 角色：OWNER 店主 / MANAGER 店长 / STAFF 员工（见 {@link com.llmall.shop.domain.enums.ShopStaffRole}）。
      *
-     * 【注意】当前鉴权只回答"是不是本店员工"，STAFF 与 MANAGER 同等放行；保留该字段是为了
-     * 将来做"只有店长能核销大额单/退款"这类细分权限，不要在判权时直接把它当等级比较。
+     * 【权限语义】
+     * - 核销：任意角色都可以，isStaff 只回答"是不是本店员工"，不比较角色高低；
+     * - 管理员工：仅 OWNER/MANAGER；授予/撤销 OWNER 仅 OWNER；
+     * - 门店必须至少保留一个 OWNER，最后一个 OWNER 不能被删除或降级。
+     *
+     * 【注意】不要把 role 当"等级"直接比较（例如 role.ordinal()），判权一律走
+     * {@code ShopStaffRole#canManageStaff()} / {@code isOwner()}，枚举顺序不是权限顺序。
      */
     private String role;
 

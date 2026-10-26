@@ -16,10 +16,13 @@ export const DEMO = {
   username: 'Jack',
   password: '123456',
   payPassword: '888888',
-  /** 演示账号被种子成 10 号店的 STAFF（sql/merged/32-shop-staff.sql） */
+  /** 演示账号是 10 号店的 OWNER（sql/merged/32-shop-staff.sql + 33-shop-staff-roles.sql） */
   staffShopId: '10',
   /** 演示账号**不是**这家店的员工，用于断言"非员工核销被 403 拒绝" */
   nonStaffShopId: '11',
+  /** 真实非员工账号：复用演示库已有用户 Rose，口令对齐 Jack 的 bcrypt（明文 123456） */
+  nonStaffUsername: 'Rose',
+  nonStaffPassword: '123456',
 } as const
 
 export interface LoginSession {
@@ -73,13 +76,22 @@ export function authHeaders(token: string): Record<string, string> {
 
 /** 登录并返回令牌（请求走 Vite 的 /api 代理，与浏览器同一条链路） */
 export async function apiLogin(request: APIRequestContext): Promise<LoginSession> {
+  return apiLoginAs(request, DEMO.username, DEMO.password)
+}
+
+/** 指定账号登录（Rose 等非员工账号的接口造数/断言用） */
+export async function apiLoginAs(
+  request: APIRequestContext,
+  username: string,
+  password: string,
+): Promise<LoginSession> {
   const response = await request.post('/api/users/login', {
-    data: { username: DEMO.username, password: DEMO.password },
+    data: { username, password },
   })
   const text = await response.text()
-  expect(response.ok(), `登录失败 HTTP ${response.status()}：${text}`).toBeTruthy()
+  expect(response.ok(), `${username} 登录失败 HTTP ${response.status()}：${text}`).toBeTruthy()
   const session = parseBig.parse(text) as LoginSession
-  expect(session.accessToken, '登录响应缺少 accessToken').toBeTruthy()
+  expect(session.accessToken, `${username} 登录响应缺少 accessToken`).toBeTruthy()
   return session
 }
 
