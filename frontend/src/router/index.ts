@@ -23,6 +23,30 @@ const router = createRouter({
           meta: { title: '关注动态' },
         },
         {
+          path: 'mall',
+          name: 'mall',
+          component: () => import('@/views/Mall.vue'),
+          meta: { title: '商城' },
+        },
+        {
+          path: 'item/:id',
+          name: 'item-detail',
+          component: () => import('@/views/ItemDetail.vue'),
+          meta: { title: '商品详情' },
+        },
+        {
+          path: 'cart',
+          name: 'cart',
+          component: () => import('@/views/Cart.vue'),
+          meta: { title: '购物车' },
+        },
+        {
+          path: 'favorites',
+          name: 'favorites',
+          component: () => import('@/views/Favorites.vue'),
+          meta: { title: '我的收藏' },
+        },
+        {
           path: 'shops',
           name: 'shops',
           component: () => import('@/views/Shops.vue'),

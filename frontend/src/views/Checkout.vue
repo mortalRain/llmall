@@ -15,11 +15,12 @@ import StateBlock from '@/components/StateBlock.vue'
 import { addressApi, itemApi, orderApi, payApi, shopApi, voucherApi } from '@/api/modules'
 import { getErrorMessage } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
-import type { Address, Item, Order, Shop, UserVoucher } from '@/api/types'
+import type { Address, Id, Item, Order, Shop, UserVoucher } from '@/api/types'
 import {
   formatDate,
   formatMoney,
   formatPrice,
+  formatSpec,
   initialOf,
   isExpired,
   uuid,
@@ -35,15 +36,33 @@ interface AddressForm {
   isDefault: number
 }
 
+/**
+ * 结算行：立即购买只有 1 行；购物车结算可有多行。
+ *
+ * 【为什么以 item 详情为主】购物车只存加入时的价格/名称，结算页必须用商品当前价格与库存，
+ * 否则后端按下单价计算、前端按旧价展示，付款金额会和用户看到的不一致。
+ */
+interface CheckoutLine {
+  itemId: Id
+  num: number
+  item: Item
+  /** 来自购物车时有值；立即购买没有 */
+  cartId?: Id
+}
+
+/** 购物车「去结算」写入 sessionStorage 的键，与 Cart.vue 必须一致 */
+const CHECKOUT_STORAGE_KEY = 'llmall.checkout.lines'
+
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
 const loading = ref(true)
 const errorMessage = ref('')
+/** 主商品：单商品结算时就是那一件；多商品时取第一件，用于兼容既有页面文案/摘要 */
 const item = ref<Item | null>(null)
+const lines = ref<CheckoutLine[]>([])
 const shop = ref<Shop | null>(null)
-const qty = ref(1)
 
 const addresses = ref<Address[]>([])
 const addressError = ref('')
@@ -88,16 +107,38 @@ const itemId = computed(() => {
   return typeof route.query.itemId === 'string' ? route.query.itemId : ''
 })
 
-const goodsTotal = computed(() => Number(item.value?.price || 0) * Number(qty.value || 1))
-const maxQty = computed(() => Math.max(1, Number(item.value?.stock || 1)))
-const itemSoldOut = computed(() => Number(item.value?.stock || 0) <= 0)
+const goodsTotal = computed(() =>
+  lines.value.reduce(
+    (sum, line) => sum + Number(line.item.price || 0) * Number(line.num || 0),
+    0,
+  ),
+)
+
+/** 多商品来自不同门店时为空：此时门店券不可用，只能用无门店限制的券 */
+const commonShopId = computed(() => {
+  const ids = Array.from(
+    new Set(lines.value.map((line) => line.item.shopId).filter((id): id is Id => Boolean(id))),
+  )
+  return ids.length === 1 ? ids[0] : ''
+})
+
+const itemSoldOut = computed(() =>
+  lines.value.some(
+    (line) => Number(line.item.stock ?? 0) <= 0 || Number(line.num) > Number(line.item.stock ?? 0),
+  ),
+)
+
+function maxQtyOf(line: CheckoutLine): number {
+  return Math.max(1, Number(line.item.stock || 1))
+}
 
 const availableVouchers = computed(() => {
   return myVouchers.value.filter((voucher) => {
     if (Number(voucher.status) !== 1) return false
     if (isExpired(voucher.expireTime)) return false
-    if (!voucher.shopId || !item.value?.shopId) return true
-    return String(voucher.shopId) === String(item.value.shopId)
+    if (!voucher.shopId) return true
+    if (!commonShopId.value) return false
+    return String(voucher.shopId) === String(commonShopId.value)
   })
 })
 
@@ -116,59 +157,123 @@ const selectedAddress = computed(() => {
 const orderTotal = computed(() => Number(order.value?.totalFee ?? estimatedTotal.value))
 const balanceEnough = computed(() => auth.balance >= orderTotal.value)
 const stepActive = computed(() => (step.value === 'confirm' ? 0 : step.value === 'pay' ? 1 : 2))
-const emptyPage = computed(() => !loading.value && !errorMessage.value && !item.value)
+const emptyPage = computed(() => !loading.value && !errorMessage.value && !lines.value.length)
 
-async function loadPage(): Promise<void> {
-  if (!itemId.value) {
-    loading.value = false
-    return
+function clampNum(value: unknown, stock: unknown): number {
+  const requestNum = Number(value)
+  const safeNum = Number.isFinite(requestNum) ? requestNum : 1
+  return Math.min(Math.max(1, Math.floor(safeNum)), Math.max(1, Number(stock || 1)))
+}
+
+function readCartLines(): Array<{ itemId: Id; num: number; cartId?: Id }> {
+  const raw = sessionStorage.getItem(CHECKOUT_STORAGE_KEY)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as Array<{ itemId?: string; num?: number; cartId?: string }>
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((entry) => entry && entry.itemId)
+      .map((entry) => ({
+        itemId: String(entry.itemId),
+        num: Number(entry.num || 1),
+        ...(entry.cartId ? { cartId: String(entry.cartId) } : {}),
+      }))
+  } catch {
+    return []
   }
+}
+
+/** 地址与可用券的加载：两种结算来源共用，失败不阻断商品展示 */
+async function loadSupportData(): Promise<void> {
+  const [addressResult, voucherResult] = await Promise.allSettled([
+    addressApi.list(),
+    voucherApi.my(1),
+  ])
+
+  if (addressResult.status === 'fulfilled') {
+    addresses.value = Array.isArray(addressResult.value) ? addressResult.value : []
+    const preferred =
+      addresses.value.find((address) => Number(address.isDefault) === 1) || addresses.value[0]
+    selectedAddressId.value = preferred ? String(preferred.id) : ''
+  } else {
+    addressError.value = getErrorMessage(addressResult.reason, '收货地址加载失败')
+  }
+
+  if (voucherResult.status === 'fulfilled') {
+    myVouchers.value = Array.isArray(voucherResult.value) ? voucherResult.value : []
+  } else {
+    myVouchers.value = []
+  }
+}
+
+/**
+ * 加载结算商品，兼容两种入口：
+ * 1) 立即购买：/checkout?itemId=xxx&num=1 —— 按接口取最新商品，单行结算；
+ * 2) 购物车结算：sessionStorage.llmall.checkout.lines —— 选中条目 [{itemId,num,cartId}]，
+ *    再按 itemId 批量取最新价格/库存；读后即清，避免刷新/回退后重复结算同一批。
+ */
+async function loadPage(): Promise<void> {
   loading.value = true
   errorMessage.value = ''
   addressError.value = ''
   selectedVoucherId.value = ''
+  lines.value = []
+  item.value = null
+  shop.value = null
   try {
-    const detail = await itemApi.byId(itemId.value)
-    item.value = detail
-    const requestNum = Number(route.query.num || 1)
-    const num = Number.isFinite(requestNum) ? requestNum : 1
-    qty.value = Math.min(Math.max(1, num), Math.max(1, Number(detail.stock || 1)))
-
-    const [addressResult, voucherResult] = await Promise.allSettled([
-      addressApi.list(),
-      voucherApi.my(1),
-    ])
-
-    if (addressResult.status === 'fulfilled') {
-      addresses.value = Array.isArray(addressResult.value) ? addressResult.value : []
-      const preferred =
-        addresses.value.find((address) => Number(address.isDefault) === 1) || addresses.value[0]
-      selectedAddressId.value = preferred ? String(preferred.id) : ''
+    if (itemId.value) {
+      const detail = await itemApi.byId(itemId.value)
+      const num = clampNum(route.query.num ?? 1, detail.stock)
+      lines.value = [{ itemId: detail.id, num, item: detail }]
+      item.value = detail
     } else {
-      addressError.value = getErrorMessage(addressResult.reason, '收货地址加载失败')
+      const stored = readCartLines()
+      if (!stored.length) {
+        loading.value = false
+        return
+      }
+      const details = await itemApi.byIds(stored.map((line) => line.itemId))
+      const byId = new Map(details.map((detail) => [String(detail.id), detail]))
+      const next: CheckoutLine[] = []
+      stored.forEach((line) => {
+        const detail = byId.get(String(line.itemId))
+        if (!detail) return
+        next.push({
+          itemId: detail.id,
+          // 购物车数量可能大于当前库存：收敛到库存，下单时由后端再次校验
+          num: clampNum(line.num, detail.stock),
+          item: detail,
+          ...(line.cartId ? { cartId: line.cartId } : {}),
+        })
+      })
+      if (!next.length) {
+        throw new Error('购物车中的商品已失效，请返回购物车重新选择')
+      }
+      lines.value = next
+      item.value = next[0].item
+      sessionStorage.removeItem(CHECKOUT_STORAGE_KEY)
     }
 
-    if (voucherResult.status === 'fulfilled') {
-      myVouchers.value = Array.isArray(voucherResult.value) ? voucherResult.value : []
-    } else {
-      myVouchers.value = []
-    }
+    await loadSupportData()
 
-    if (detail.shopId) {
-      shopApi
-        .detail(detail.shopId)
-        .then((shopDetail) => {
-          shop.value = shopDetail
-        })
-        .catch(() => {
-          shop.value = null
-        })
+    if (commonShopId.value) {
+      try {
+        shop.value = await shopApi.detail(commonShopId.value)
+      } catch {
+        shop.value = null
+      }
     }
   } catch (error) {
     errorMessage.value = getErrorMessage(error, '商品信息加载失败')
   } finally {
     loading.value = false
   }
+}
+
+/** 结算页内改数量：只影响本页（购物车数量不在这里回写，避免用户只是改结算数量却动了购物车） */
+function changeLineNum(line: CheckoutLine, value: number | undefined): void {
+  const next = Number(value || 0)
+  line.num = next > 0 ? Math.min(Math.floor(next), maxQtyOf(line)) : 1
 }
 
 function openAddressDialog(): void {
@@ -212,13 +317,13 @@ async function reloadAddresses(): Promise<void> {
 }
 
 async function submitOrder(): Promise<void> {
-  if (!item.value || submitting.value) return
+  if (!lines.value.length || submitting.value) return
   if (!selectedAddressId.value) {
     ElMessage.warning('请选择或新增收货地址')
     return
   }
   if (itemSoldOut.value) {
-    ElMessage.warning('该商品已售罄')
+    ElMessage.warning('部分商品库存不足，请调整数量或返回购物车')
     return
   }
 
@@ -229,7 +334,11 @@ async function submitOrder(): Promise<void> {
     const payload = {
       addressId: selectedAddressId.value,
       paymentType: 3,
-      details: [{ itemId: item.value.id, num: Number(qty.value) }],
+      // 立即购买与购物车结算共用同一条多行 details；单商品时就是长度为 1 的数组
+      details: lines.value.map((line) => ({
+        itemId: line.itemId,
+        num: Number(line.num),
+      })),
       clientToken: clientToken.value,
       ...(selectedVoucherId.value ? { userVoucherId: selectedVoucherId.value } : {}),
     }
@@ -249,6 +358,7 @@ async function submitOrder(): Promise<void> {
     return
   }
 
+  sessionStorage.removeItem(CHECKOUT_STORAGE_KEY)
   step.value = 'pay'
   submitting.value = false
   window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -262,7 +372,8 @@ async function preparePayment(): Promise<void> {
   try {
     const orderInfo =
       (order.value.details || []).map((detail) => `${detail.name}×${detail.num}`).join(';') ||
-      `${item.value?.name || '商品'}×${qty.value}`
+      lines.value.map((line) => `${line.item.name}×${line.num}`).join(';') ||
+      `${item.value?.name || '商品'}×1`
     const id = await payApi.apply({
       bizOrderNo: order.value.id,
       amount: Number(order.value.totalFee),
@@ -454,36 +565,44 @@ onBeforeUnmount(() => {
                       {{ shop.name }}
                     </router-link>
                   </p>
+                  <p v-else-if="lines.length > 1">多门店商品合并结算</p>
                 </div>
-                <span class="panel-badge">余额支付</span>
+                <span class="panel-badge">{{ lines.length }} 种商品 · 余额支付</span>
               </div>
 
-              <div class="goods-row">
+              <div
+                v-for="line in lines"
+                :key="line.itemId"
+                class="goods-row"
+                data-testid="checkout-line"
+                :data-item-id="line.itemId"
+              >
                 <div class="goods-thumb">
                   <img
-                    v-if="item.image"
-                    :src="item.image"
-                    :alt="item.name"
+                    v-if="line.item.image"
+                    :src="line.item.image"
+                    :alt="line.item.name"
                     @error="($event.target as HTMLImageElement).style.display = 'none'"
                   />
-                  <span class="thumb-initial">{{ initialOf(item.name) }}</span>
+                  <span class="thumb-initial">{{ initialOf(line.item.name) }}</span>
                 </div>
                 <div class="goods-info">
-                  <h3>{{ item.name }}</h3>
-                  <p>{{ item.spec || item.category || '到店核销 · 过期自动退' }}</p>
+                  <h3>{{ line.item.name }}</h3>
+                  <p>{{ formatSpec(line.item.spec) || line.item.category || '到店核销 · 过期自动退' }}</p>
                   <div class="goods-tags">
-                    <span>库存 {{ item.stock }}</span>
-                    <span>已售 {{ item.sold }}</span>
+                    <span>库存 {{ line.item.stock }}</span>
+                    <span>已售 {{ line.item.sold }}</span>
                   </div>
                 </div>
                 <div class="goods-buy">
-                  <span class="goods-price">{{ formatPrice(item.price) }}</span>
+                  <span class="goods-price">{{ formatPrice(line.item.price) }}</span>
                   <el-input-number
-                    v-model="qty"
+                    v-model="line.num"
                     :min="1"
-                    :max="maxQty"
+                    :max="maxQtyOf(line)"
                     size="small"
-                    :disabled="itemSoldOut"
+                    :disabled="Number(line.item.stock) <= 0"
+                    @change="(value: number | undefined) => changeLineNum(line, value)"
                   />
                 </div>
               </div>
@@ -685,16 +804,22 @@ onBeforeUnmount(() => {
               </router-link>
             </div>
 
-            <div class="pay-goods">
+            <div
+              v-for="line in lines"
+              :key="line.itemId"
+              class="pay-goods"
+            >
               <div class="pay-goods-thumb">
-                <img v-if="item.image" :src="item.image" :alt="item.name" />
-                <span v-else>{{ initialOf(item.name) }}</span>
+                <img v-if="line.item.image" :src="line.item.image" :alt="line.item.name" />
+                <span v-else>{{ initialOf(line.item.name) }}</span>
               </div>
               <div class="pay-goods-info">
-                <b>{{ item.name }}</b>
-                <span>{{ formatPrice(item.price) }} × {{ qty }}</span>
+                <b>{{ line.item.name }}</b>
+                <span>{{ formatPrice(line.item.price) }} × {{ line.num }}</span>
               </div>
-              <b class="pay-goods-price">{{ formatMoney(orderTotal) }}</b>
+              <b class="pay-goods-price">
+                {{ formatMoney(Number(line.item.price) * Number(line.num)) }}
+              </b>
             </div>
 
             <div class="pay-summary-rows">
@@ -1000,6 +1125,10 @@ onBeforeUnmount(() => {
   border: 1px solid #eef5ff;
   border-radius: 13px;
   background: var(--surface-soft);
+}
+
+.goods-row + .goods-row {
+  margin-top: 8px;
 }
 
 .goods-thumb {
@@ -1408,6 +1537,10 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   background: var(--surface-soft);
   border: 1px solid #eef5ff;
+}
+
+.pay-goods + .pay-goods {
+  margin-top: 8px;
 }
 
 .pay-goods-thumb {

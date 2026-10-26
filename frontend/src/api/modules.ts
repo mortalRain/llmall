@@ -1,13 +1,17 @@
 import { del, get, post, put } from '@/api/http'
 import type {
+  AddCartPayload,
   AddShopStaffPayload,
   Address,
   AddressPayload,
+  Blog,
+  CartItem,
   CreateOrderPayload,
   FeedPage,
   FeedQuery,
   Id,
   Item,
+  ItemCategory,
   ItemPageQuery,
   LoginPayload,
   LoginResult,
@@ -57,6 +61,11 @@ export const shopApi = {
   detail(id: Id): Promise<Shop> {
     return get<Shop>(`/shops/${id}`)
   },
+  /** 批量查门店（商城商品卡片回填店铺名用）；ids 逗号分隔由 Spring 转成 List<Long> */
+  batch(ids: Id[]): Promise<Shop[]> {
+    if (!ids.length) return Promise.resolve([])
+    return get<Shop[]>('/shops/batch', { params: { ids: ids.join(',') } })
+  },
   /**
    * 我任职的门店与角色（后端 Long 序列化为字符串）。
    *
@@ -81,6 +90,26 @@ export const shopApi = {
   },
 }
 
+/**
+ * 门店收藏：四个接口都是多段路径，网关不会按只读白名单放行，未登录返回 401。
+ * 收藏/取消都是幂等的，前端可以安全重试。
+ */
+export const favoriteApi = {
+  status(shopId: Id): Promise<boolean> {
+    return get<boolean>(`/shops/${shopId}/favorite`)
+  },
+  add(shopId: Id): Promise<void> {
+    return post<void>(`/shops/${shopId}/favorite`)
+  },
+  remove(shopId: Id): Promise<void> {
+    return del<void>(`/shops/${shopId}/favorite`)
+  },
+  /** 我的收藏：返回门店 DTO 列表（后端已按收藏时间倒序） */
+  my(): Promise<Shop[]> {
+    return get<Shop[]>('/shops/my/favorites')
+  },
+}
+
 /** 商品：门店套餐优先走 /items/shop/{shopId}，同时保留分页入口 */
 export const itemApi = {
   byShop(shopId: Id): Promise<Item[]> {
@@ -89,8 +118,42 @@ export const itemApi = {
   byId(id: Id): Promise<Item> {
     return get<Item>(`/items/${id}`)
   },
+  /** 批量查商品（结算页按购物车行取最新价格/库存）；最多 100 个，由后端兜底 */
+  byIds(ids: Id[]): Promise<Item[]> {
+    if (!ids.length) return Promise.resolve([])
+    return get<Item[]>('/items', { params: { ids: ids.join(',') } })
+  },
   page(params: ItemPageQuery): Promise<PageResult<Item>> {
     return get<PageResult<Item>>('/items/page', { params })
+  },
+  categories(type?: number): Promise<ItemCategory[]> {
+    return get<ItemCategory[]>('/items/categories', {
+      params: type ? { type } : undefined,
+    })
+  },
+}
+
+/** 购物车：GET/POST/PUT/DELETE 全部要求登录 */
+export const cartApi = {
+  list(): Promise<CartItem[]> {
+    return get<CartItem[]>('/carts')
+  },
+  add(payload: AddCartPayload): Promise<void> {
+    return post<void>('/carts', payload)
+  },
+  /** 只改数量；归属校验在服务端按当前登录人做，前端传的 userId 不参与 UPDATE */
+  updateNum(id: Id, num: number): Promise<void> {
+    return put<void>('/carts', { id, num })
+  },
+  remove(id: Id): Promise<void> {
+    return del<void>(`/carts/${id}`)
+  },
+}
+
+/** 门店评价：公开读接口，返回 PageResult（total/pages/list） */
+export const blogApi = {
+  byShop(shopId: Id, page = 1, size = 5): Promise<PageResult<Blog>> {
+    return get<PageResult<Blog>>(`/blogs/shop/${shopId}`, { params: { page, size } })
   },
 }
 

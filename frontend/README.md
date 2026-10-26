@@ -130,14 +130,18 @@ frontend/
 │  └─ views/
 │     ├─ Login.vue
 │     ├─ Feed.vue
+│     ├─ Mall.vue          # 商城：关键词/分类/价格区间/分页 + 加购
+│     ├─ ItemDetail.vue    # 商品详情：加购 / 立即购买 / 所属门店
+│     ├─ Cart.vue          # 购物车：选品、改数量、删除、合计、去结算
+│     ├─ Favorites.vue     # 我的收藏：取消收藏 / 进门店
 │     ├─ Shops.vue         # 门店列表（/shops/page 分页）
-│     ├─ ShopDetail.vue
-│     ├─ Checkout.vue
+│     ├─ ShopDetail.vue    # 门店详情 + 收藏 + 评价分页
+│     ├─ Checkout.vue      # 结算：立即购买 / 购物车多商品
 │     ├─ Orders.vue        # 顾客订单：核销码 + 到店出示（无核销按钮）
 │     ├─ StaffVerify.vue   # 员工核销台（/staff/verify，任意员工角色）
 │     ├─ StaffManage.vue   # 员工管理（/staff/manage，仅 OWNER/MANAGER）
 │     └─ Profile.vue
-├─ e2e/                    # Playwright 冒烟（地址 / 核销 / 付费券 / Rose 403）
+├─ e2e/                    # Playwright 冒烟（7 条：地址 / 核销 / 付费券 / Rose 403 / 商城 / 收藏 / 评价）
 ├─ playwright.config.ts
 └─ legacy-demo/            # 旧单文件演示台，仅留档
 ```
@@ -148,10 +152,14 @@ frontend/
 | --- | --- |
 | 登录 | `POST /users/login` |
 | 关注动态 | `GET /follows/feed/v2?size=10`，复合游标 `li/ct/ci/ai` |
+| 商城 | `GET /items/page?pageNo=&pageSize=&key=&category=&minPrice=&maxPrice=`、`GET /items/categories`、`GET /shops/batch?ids=` |
+| 商品详情 | `GET /items/{id}`、`GET /shops/{id}` |
+| 购物车 | `GET /carts`、`POST /carts`、`PUT /carts`（只改 num）、`DELETE /carts/{id}` |
+| 我的收藏 | `GET /shops/my/favorites`、`DELETE /shops/{id}/favorite` |
 | 门店列表 | `GET /shops/page?page=&size=&keyword=` |
-| 门店详情 | `GET /shops/{id}`、`GET /items/shop/{shopId}`、`GET /vouchers/list?shopId=` |
+| 门店详情 | `GET /shops/{id}`、`GET /items/shop/{shopId}`、`GET /vouchers/list?shopId=`、`GET /blogs/shop/{shopId}?page=&size=`、`GET/POST/DELETE /shops/{id}/favorite` |
 | 领券 | `POST /vouchers/{id}/receive`（付费券在请求体带 `pw`） |
-| 下单 | `GET /addresses`、`POST /orders`、`GET /orders/{id}` |
+| 结算/下单 | `GET /addresses`、`POST /orders`（`details` 支持多行）、`GET /orders/{id}` |
 | 支付 | `POST /pay-orders`、`POST /pay-orders/{id}` |
 | 订单（顾客） | `GET /orders`、`GET /orders/{id}`、`PUT /orders/{id}/cancel` |
 | 核销台（员工） | `GET /shops/my/staff`（判断员工身份/任职门店）、`POST /orders/verify` |
@@ -197,17 +205,26 @@ npm run build
 npm run dev
 curl -I http://localhost:5173
 
-# Playwright 冒烟（4 条：新增地址 / 顾客出示+员工核销 / 付费券 / 非员工 Rose 403）
+# Playwright 冒烟（7 条：地址 / 核销 / 付费券 / Rose 403 / 商城加购 / 收藏 / 评价）
 npm run test:e2e
 ```
 
-- 页面：登录 / 关注动态 / 门店列表 / 门店详情 / 结算收银台 / 订单 / 核销台 `/staff/verify` /
+- 页面：登录 / 关注动态 / 商城 `/mall` / 商品详情 `/item/:id` / 购物车 `/cart` /
+  我的收藏 `/favorites` / 门店列表 / 门店详情 / 结算收银台 / 订单 / 核销台 `/staff/verify` /
   员工管理 `/staff/manage`（仅 OWNER/MANAGER）/ 我的。
+- 商城/购物车/收藏/评价的实现细节（接口、幂等、种子数据、验收口径）见
+  [`../docs/商城-购物车-收藏与评价.md`](../docs/商城-购物车-收藏与评价.md)。
 
 - `npm run test:e2e` 用本机 Chrome（`channel: 'chrome'`），`baseURL=http://localhost:5173`，
   `testDir=e2e`，`webServer` 在 dev server 未启动时自动执行 `npm run dev`（已启动则复用）。
-- 前置：网关 8080 与 MySQL/Redis/Nacos/RabbitMQ 已运行、演示数据已导入（`sql/merged/README.md`）。
-- 用例可重复执行：地址/订单每轮新建；付费券"一人一张"，已领取时断言"已领取"而不重复扣款。
+- 前置：网关 8080 与 MySQL/Redis/Nacos/RabbitMQ 已运行、演示数据已导入（`sql/merged/README.md`）；
+  收藏/评价用例还需要 `sql/merged/34-shop-favorite.sql`、`35-review-seed.sql` 已执行。
+- 用例可重复执行：地址/订单每轮新建；付费券"一人一张"，已领取时断言"已领取"而不重复扣款；
+  商城用例开头通过接口清空购物车；收藏用例开头通过接口删除历史收藏（两个接口本身幂等）。
+
+![商城](../docs/images/frontend-mall.png)
+![购物车](../docs/images/frontend-cart.png)
+![门店评价](../docs/images/frontend-shop-review.png)
 
 构建产物约 1.7 MB（未压缩），Element Plus 全量引入后主 vendor chunk 约 823 KB；
 已在 1440px 与 375px 宽度下检查布局与主要交互。

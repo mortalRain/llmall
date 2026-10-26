@@ -597,6 +597,7 @@ try {
             # 必须早于应用启动，否则核销接口查不到员工关系会 fail-closed 全部拒绝；
             # 种子把演示账号 Jack 设为 1 号与 10 号店的 STAFF（仅演示库）。
             @{ F = "$SqlMerged\32-shop-staff.sql";                Why = '门店员工表 + 核销判权种子（Jack 任职 1/10 号店）' }
+            @{ F = "$SqlMerged\34-shop-favorite.sql";             Why = '门店收藏关系表（收藏接口依赖，必须先于应用发布）' }
             @{ F = "$SqlMerged\40-search.sql";                     Why = '搜索域建表' }
             @{ F = "$SqlMerged\41-search-geo.sql";                 Why = '依赖 40，补 x/y' }
             @{ F = "$SqlMerged\62-align-dict-comments.sql";        Why = '字典型注释对齐（纯 ALTER COMMENT，幂等）' }
@@ -605,6 +606,9 @@ try {
             @{ F = "$SqlMerged\51-seed-more-data.sql";             Why = '演示数据（第 1 遍）' }
             @{ F = "$SqlMerged\50-seed-local-life-data.sql";       Why = '为 51 新增的门店再生成套餐与评价' }
             @{ F = "$SqlMerged\51-seed-more-data.sql";             Why = '补齐依赖评价的聚合数据' }
+            # 35 必须在 50/51 四步之后：门店 1/3/4/10/11 的评价种子不能被后续 seed 的
+            # DELETE 区间清掉；脚本自身用 NOT EXISTS 保证重复执行不翻倍。
+            @{ F = "$SqlMerged\35-review-seed.sql";                Why = '演示门店评价种子（5 家 × 6 条，门店详情评价区依赖）' }
             # 63 排在 60 与全部 seed 之后：它只改 Jack 一行的 pay_password，依赖 60 建出的列与
             # 第 2 步 llmall-user.sql 里的演示账号；放在 seed 尾部可避免将来 seed 脚本新增
             # 对 user 表的写操作时把它改回初始口令（那样冒烟会停在"首次支付前强制改密"）。

@@ -1,7 +1,8 @@
 # 同城生活电商平台 · llmall
 
 > **一句话**：**10 个服务、一服务一库**的同城生活电商后端（1 个网关 + 9 个业务域），跑通
-> 「逛门店 → 买套餐 → 下单支付 → 到店核销 → 写评价 → 门店热度/榜单」的完整闭环。
+> 「逛商城 / 逛门店 → 加购 → 下单支付 → 到店核销 → 写评价 → 门店热度/榜单」的完整闭环，
+> 并支持门店收藏与评价浏览。
 >
 > 亮点不在于"写完了"，而在于**每条结论都带可复现的机器判据**：八道工程闸门、端到端 37 项断言（2026-10-24 实跑 34 通过 / 3 项环境跳过）、
 > 压测 + 账实核对。
@@ -165,8 +166,14 @@ pwsh -File scripts/verify-auth.ps1          # 鉴权链路端到端验收
 
 ### 4.3 演示前端
 
-`frontend/index.html` 是单文件、零依赖的演示台，双击即可打开（需后端已起），覆盖门店热度榜、
-发布评价后榜单实时变化、登录与积分流水。详见 [`frontend/README.md`](frontend/README.md)。
+`frontend/` 是 Vue 3 + TypeScript + Vite + Element Plus 的 SPA（13 个页面），覆盖登录、关注动态、
+商城搜索/筛选、商品详情、购物车、结算收银台、门店列表/详情、门店收藏、评价浏览、订单、核销台、
+员工管理与我的。启动方式与接口清单见 [`frontend/README.md`](frontend/README.md)，
+商城/收藏/评价的实现说明见 [`docs/商城-购物车-收藏与评价.md`](docs/商城-购物车-收藏与评价.md)。
+
+```bash
+cd frontend && npm install && npm run dev   # http://localhost:5173
+```
 
 ### 4.4 容器重建（代码改动后让镜像真正生效）
 
@@ -361,7 +368,7 @@ llmall/
 ├── sql/                      建库建表与演示数据（合并版见 sql/merged/）
 ├── benchmark/                JMeter 计划、压测方案与结论
 ├── scripts/                  验收、密钥生成、Redis 高可用演练等脚本
-└── frontend/                 单文件演示前端
+└── frontend/                 Vue 3 SPA（商城/购物车/收藏/门店/订单/核销台）
 ```
 
 ---
@@ -374,6 +381,7 @@ llmall/
 | 怎么部署、怎么验收 | [`deploy/部署说明.md`](deploy/部署说明.md) |
 | 八道闸门细节与基线更新 | [`gates/README.md`](gates/README.md) |
 | 实测数据怎么来的 | [`benchmark/README.md`](benchmark/README.md)、[`docs/P-01`~`P-03`](docs/P-01-申请支付单耗时定位-2026-10-17.md) |
+| 商城/购物车/收藏/评价怎么做的 | [`docs/商城-购物车-收藏与评价.md`](docs/商城-购物车-收藏与评价.md) |
 | 还有哪些已知问题 | [`docs/已知偏差台账-2026-10-15.md`](docs/已知偏差台账-2026-10-15.md) |
 | 每条结论对应哪段代码 | [`docs/项目亮点索引.md`](docs/项目亮点索引.md) |
 | 设计决策的追问与边界 | [`docs/设计决策问答.md`](docs/设计决策问答.md) |
@@ -499,8 +507,13 @@ llmall/
 
 ## 12. 前端（Vue 3 + TypeScript）
 
-`frontend/` 是重建后的 SPA：Vue 3 + TS + Vite + Pinia + Vue Router + Element Plus（浅蓝主题），9 个页面（登录 / 关注动态 / 门店列表 / 门店详情 / 结算收银台 / 订单 / 核销台 / 员工管理 / 我的）。
+`frontend/` 是重建后的 SPA：Vue 3 + TS + Vite + Pinia + Vue Router + Element Plus（浅蓝主题），
+13 个页面（登录 / 关注动态 / 商城 / 商品详情 / 购物车 / 我的收藏 / 门店列表 / 门店详情 / 结算收银台 /
+订单 / 核销台 / 员工管理 / 我的）。
 
+![商城](docs/images/frontend-mall.png)
+![购物车](docs/images/frontend-cart.png)
+![门店评价](docs/images/frontend-shop-review.png)
 ![登录](docs/images/frontend-login.png)
 ![门店](docs/images/frontend-shops.png)
 ![订单](docs/images/frontend-orders.png)
@@ -512,21 +525,31 @@ cd frontend && npm install && npm run dev   # http://localhost:5173，/api 代�
 - 演示账号 `Jack / 123456`，余额支付口令 `888888`
 - 401 并发单飞刷新、路由守卫、`json-bigint` 解析 19 位 Long id（避免 JS 精度丢失）
 - 网关当前只认裸 JWT（非 `Bearer`），可用 `VITE_AUTH_SCHEME=bearer` 切换
+- **商城与购物车**：`/mall` 支持关键词（`key`）、分类（`/items/categories`）、价格区间（分）与
+  `pageNo/pageSize` 分页；商品详情 `/item/:id` 可加购或立即购买；`/cart` 支持单选/全选、
+  `PUT /carts` 改数量、`DELETE /carts/{id}` 删除，合计按"单价 × 数量"实时计算。
+  购物车结算把选中项写入 `sessionStorage`，结算页 `POST /orders` 传多行 `details`；
+  立即购买仍兼容单商品 `itemId + num`。
+- **门店收藏**：门店详情收藏按钮（`GET/POST/DELETE /shops/{id}/favorite`，已收藏高亮），
+  `/favorites` 按收藏时间倒序展示并可取消；后端 `shop_favorite` 以 `uk_user_shop` 保证幂等。
+- **门店评价**：门店详情分页拉取 `/blogs/shop/{shopId}`，展示评分/内容/时间与空态；
+  演示库由 `sql/merged/35-review-seed.sql` 给 5 家门店各补 6 条评价。
 - **核销语义：顾客出示、员工核销**：顾客订单里只展示核销码（到店出示给店员），**没有核销按钮**；
   核销动作集中在员工侧 `/staff/verify`「核销台」，导航项对任意员工角色展示，
   非员工访问会被拦截。后端仍独立判权，非本店员工 403（见 [10.5](#105-核销权限与员工角色ownermanagerstaff)）
 - **员工角色与员工管理**：`OWNER/MANAGER` 可见 `/staff/manage`「员工管理」（列表、按 userId 添加、改角色、删除）；
   `STAFF` 只能核销。最后 OWNER 不可删/降级，店长不能授/撤 OWNER（服务端强制）。
-- **Playwright 冒烟（4 条）**：
+- **Playwright 冒烟（7 条）**：
 
   ```bash
   cd frontend
-  npm run test:e2e     # 新增地址 / 顾客出示+员工核销（含 403）/ 付费券购买 / 非员工 Rose 403
+  npm run test:e2e     # 地址 / 核销（含 403）/ 付费券 / Rose 403 / 商城加购+改数量+合计 / 收藏 / 评价
   ```
 
   用本机 Chrome（`channel: 'chrome'`），`baseURL=http://localhost:5173`，`testDir=e2e`；
   dev server 未起时自动 `npm run dev`（已起则复用）。前置：网关 8080 与中间件已运行，演示数据已导入。
-  Rose 用例需要 `sql/merged/33-shop-staff-roles.sql` 已执行（账号 `Rose/123456`，非员工）。
+  Rose 用例需要 `sql/merged/33-shop-staff-roles.sql` 已执行（账号 `Rose/123456`，非员工）；
+  收藏/评价用例需要 `sql/merged/34-shop-favorite.sql`、`35-review-seed.sql` 已执行。
 
 ## 13. 可观测性
 

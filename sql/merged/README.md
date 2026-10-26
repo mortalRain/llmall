@@ -1,22 +1,23 @@
 # sql/merged · 库表脚本执行说明
 
 > **本文件是执行顺序的唯一权威（single source of truth）。**
-> 目录里共 **30 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
+> 目录里共 **32 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
 > 有一处必须破数字序，见 2.1 的 `23` / `30`）。
-> 其中 `52a` 是只读清点（不是变更脚本）、`63` 是演示 / 冒烟环境专用（生产库不得执行），两者在清单里都单列了用途。
+> 其中 `52a` 是只读清点（不是变更脚本）、`35` / `63` 是演示 / 冒烟环境专用（生产库不得执行），
+> 三者在清单里都单列了用途。
 
 ## 一、库 ↔ 服务对照（一个服务一个库）
 
 | 库 | 服务 | 端口 | 脚本来源 |
 |---|---|---|---|
 | `llmall-user` | llmall-user-service | 8084 | 原商城 `llmall-user.sql` + **本目录 `21-user-alter.sql`、`22-user-time-default.sql`** |
-| `llmall-shop` | llmall-shop-service | 8087 | **本目录 `10-shop.sql`**（由点评 tb_shop 改造） |
+| `llmall-shop` | llmall-shop-service | 8087 | **本目录 `10-shop.sql`**（由点评 tb_shop 改造）+ `32/33-shop-staff*.sql` + `34-shop-favorite.sql` |
 | `llmall-item` | llmall-item-service | 8081 | 原商城 `llmall-item.sql` + **本目录 `11-item-alter.sql`** |
 | `llmall-cart` | llmall-cart-service | 8082 | 原商城 `llmall-cart.sql` |
 | `llmall-trade` | llmall-trade-service（订单域） | 8085 | 原商城 `llmall-trade.sql` + **本目录 `31-order-alter.sql`** |
 | `llmall-pay` | llmall-pay-service | 8086 | 原商城 `llmall-pay.sql` |
 | `llmall-promotion` | llmall-promotion-service | 8088 | **本目录 `20-promotion.sql`**（由点评 tb_voucher 系改造） |
-| `llmall-content` | llmall-content-service | 8089 | **本目录 `30-content.sql`**（由点评 tb_blog 系改造） |
+| `llmall-content` | llmall-content-service | 8089 | **本目录 `30-content.sql`**（由点评 tb_blog 系改造）+ `35-review-seed.sql`（演示评价） |
 | `llmall-search` | llmall-search-service | 8093 | **本目录 `40-search.sql`** + **`41-search-geo.sql`** |
 | `seata` | Seata Server | — | **本目录 `03-seata-server.sql`**（1.5.2）；从 1.4.2 升级用 **`03b-seata-server-1.5.2-upgrade.sql`** |
 
@@ -69,6 +70,8 @@ mysql -uroot -p < 32-shop-staff.sql             # 5.10b 门店员工表 + 种子
                                                 #      ⚠️ 必须与应用同批上线：未建表时核销接口 fail-closed，员工校验取不到答案会全部拒绝
 mysql -uroot -p < 33-shop-staff-roles.sql       # 5.10c 存量角色升级（STAFF→OWNER）+ Rose 真实非员工账号
                                                 #      幂等；Rose 口令复用 Jack 的 bcrypt，不加入 shop_staff
+mysql -uroot -p < 34-shop-favorite.sql          # 5.10d 门店收藏关系表（shop_favorite + uk_user_shop + idx_shop）
+                                                #      ⚠️ 必须早于/同批于应用发布：未建表时收藏接口 500
 mysql -uroot -p < 40-search.sql                 # 5.11 搜索域建表（shop_search_doc / search_hot_word / search_history）
 mysql -uroot -p < 41-search-geo.sql             # 5.12 ⚠️ 依赖 5.11：给 shop_search_doc 补 x/y
 mysql -uroot -p < 62-align-dict-comments.sql    # 5.13 【存量库注释对齐；全新初始化可跳过】7 条纯 ALTER ... COMMENT
@@ -82,6 +85,9 @@ mysql -uroot -p < 50-seed-local-life-data.sql   # 6.1  门店套餐 + 精选实�
 mysql -uroot -p < 51-seed-more-data.sql         # 6.2  补齐 8 个缺失类型的门店 + 各域空表铺数据
 mysql -uroot -p < 50-seed-local-life-data.sql   # 6.3  ★再跑一遍 50：为 51 新增的门店生成套餐与评价
 mysql -uroot -p < 51-seed-more-data.sql         # 6.4  ★再跑一遍 51：补齐依赖"评价"的聚合数据（评论/点赞/Feed）
+mysql -uroot -p < 35-review-seed.sql            # 6.4b ★门店评价种子：门店 1/3/4/10/11 各 6 条（共 30 条）
+                                                #      必须排在 50/51 四步之后，避免被 seed 的 DELETE 区间清掉；
+                                                #      脚本用 (shop_id,user_id,title) NOT EXISTS 保证重复执行不翻倍
 mysql -uroot -p < 52-fix-orphan-pay-orders.sql  # 6.5  清理前端 Number() 精度丢失产生的孤儿支付单并退款
 mysql -uroot -p < 63-user-demo-pay-password.sql # 6.6  ★演示 / 冒烟环境专用：Jack 支付口令预置 888888、登录口令预置 123456
 #      ⚠️ 必须在 60 号之后执行（依赖 pay_password 列）；⛔ 生产库与任何对外开放的库都不得执行
@@ -162,11 +168,13 @@ mysql -uroot -p < 99-migrate-source-data.sql
 | 30 | `30-content.sql` | `CREATE TABLE IF NOT EXISTS` ×5 |
 | 31 | `31-order-alter.sql` | **新增守卫**：`COLUMNS`×1（5 列）+ `STATISTICS`×1（3 索引） |
 | 32 | `32-shop-staff.sql` | 核销判权落库：`CREATE TABLE IF NOT EXISTS`（`shop_staff` + `uk_shop_user(shop_id,user_id)`）+ 演示种子 `INSERT IGNORE ... SELECT`（先按 username 查 `llmall-user.user.id`，Jack 不是写死的 1）。**⚠️ 必须早于/同批于应用发布**：未建表时核销 fail-closed 全部拒绝。**⚠️ 种子仅演示库** |
+| 34 | `34-shop-favorite.sql` | 收藏关系落库：`CREATE TABLE IF NOT EXISTS`（`shop_favorite` + `uk_user_shop(user_id,shop_id)` 幂等闸门 + `idx_shop(shop_id)`）。**不种任何收藏**（收藏是用户行为，预置会让"收藏→取消"用例无法区分本轮数据）。**⚠️ 必须早于/同批于应用发布**：未建表时收藏接口 500 |
 | 40 | `40-search.sql` | `CREATE TABLE IF NOT EXISTS` ×3 |
 | 41 | `41-search-geo.sql` | **新增守卫**：`COLUMNS`×1（x/y） |
 | 50 | `50-seed-local-life-data.sql` | 演示数据：`DELETE`（id 区间）+ 重插；`UPDATE` 幂等收敛；`INSERT` 多带 `NOT EXISTS` 守卫。**⚠️ 会删数据，仅演示库** |
 | 51 | `51-seed-more-data.sql` | 演示数据：7 处 `DELETE`（id 区间）+ 重插；`INSERT IGNORE` / `NOT EXISTS`。**⚠️ 会删数据，仅演示库** |
 | 52 | `52-fix-orphan-pay-orders.sql` | 纯 `UPDATE`（孤儿单退一次款后即无孤儿，重复执行为空操作） |
+| 35 | `35-review-seed.sql` | **演示数据（评价）**：给门店 1/3/4/10/11 各插 6 条真实中文评价（共 30 条），`score` 4~5、`status=1`、`create_time` 近 30 天、`user_id` 取演示库已有用户 1/2/3。`INSERT ... SELECT` + `(shop_id,user_id,title) NOT EXISTS` 保证重复执行不新增、不覆盖已有行。**⚠️ 仅演示库；必须排在 50/51 四步之后** |
 | 60 | `60-user-pay-password.sql` | **新增守卫**：`COLUMNS` 判断 `pay_password` 是否已存在。`ADD COLUMN ... NOT NULL DEFAULT '123456'` 会把**既有行**一并填充，故存量账号余额支付行为不变。**⚠️ 必须早于应用发布** |
 | 61 | `61-user-weak-password-reset.sql` | 存量弱口令重置：第 1 段清点、第 2 段 `UPDATE`（**默认注释，需人工启用**）、第 3 段校验。`WHERE password = '<初始哈希>'` 保证幂等且不误伤已改密账号 |
 | 62 | `62-align-dict-comments.sql` | **存量库注释对齐（全新初始化可跳过）**：7 条纯 `ALTER TABLE ... MODIFY COLUMN ... COMMENT`，把 `stock_flow` / `voucher` / `user_voucher` / `pay_order`(×2) / `order` / `message_log` 的字典型注释改成与代码事实一致。**只改 COMMENT，不动类型/可空性/默认值/数据；可重复执行**。源文件已同步为同一口径，故新库无需执行 |

@@ -107,6 +107,26 @@ export function initialOf(name: string | null | undefined): string {
   return text ? text.charAt(0).toUpperCase() : 'L'
 }
 
+/**
+ * 商品规格：后端 item.spec 是 JSON 字符串（如 {"颜色":"红色","尺码":"21寸"}），
+ * 直接渲染会把大括号和引号一起展示。这里转成"颜色：红色 / 尺码：21寸"；
+ * 非 JSON 的纯文本（如门店套餐的"到店核销 · 有效期30天"）原样返回。
+ */
+export function formatSpec(value: string | null | undefined): string {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return raw
+    const entries = Object.entries(parsed)
+      .filter(([, item]) => item !== null && item !== undefined && String(item).trim() !== '')
+      .map(([key, item]) => `${key}：${String(item)}`)
+    return entries.length ? entries.join(' / ') : ''
+  } catch {
+    return raw
+  }
+}
+
 export function scoreOf(value: unknown): string {
   const num = toNumber(value)
   return num > 0 ? (num / 10).toFixed(1) : '—'

@@ -109,9 +109,11 @@ export interface ShopPageQuery {
 
 export interface Item {
   id: Id
-  shopId: Id
+  /** 实物商品可能没有门店（自营），门店套餐一定有 */
+  shopId: Id | null
   type: number
   name: string
+  /** 价格，单位：分 */
   price: number
   stock: number
   image: string | null
@@ -124,11 +126,71 @@ export interface Item {
   status: number
 }
 
+/**
+ * 后端商品分页参数是 pageNo/pageSize（ItemPageQuery 继承 PageQuery），不是 page/size；
+ * 价格区间单位是分（与 item.price 一致），由页面把用户输入的元换算成分再传。
+ */
 export interface ItemPageQuery {
   pageNo: number
   pageSize: number
   shopId?: Id
   key?: string
+  category?: string
+  brand?: string
+  minPrice?: number
+  maxPrice?: number
+  type?: number
+}
+
+/** GET /items/categories：分类与上架商品数量（count 由 MySQL COUNT 返回，可能是字符串） */
+export interface ItemCategory {
+  category: string
+  count: number | string
+}
+
+/** GET /carts 返回项：购物车条目 + 商品最新价格/状态/库存（CartVO） */
+export interface CartItem {
+  id: Id
+  itemId: Id
+  num: number
+  name: string
+  spec: string | null
+  /** 加入购物车时的价格，单位：分 */
+  price: number
+  /** 商品当前价格，单位：分 */
+  newPrice?: number | null
+  /** 商品最新状态：1 正常 2 下架 3 删除 */
+  status?: number
+  stock?: number
+  image: string | null
+  createTime: string | null
+}
+
+/** POST /carts 请求体（CartFormDTO） */
+export interface AddCartPayload {
+  itemId: Id
+  name: string
+  spec?: string | null
+  price: number
+  image?: string | null
+}
+
+/** GET /blogs/shop/{shopId} 返回项：评价（Blog PO 直接对外） */
+export interface Blog {
+  id: Id
+  shopId: Id
+  userId: Id
+  title: string
+  images: string | null
+  content: string
+  /** 评分 1~5 */
+  score: number
+  liked: number
+  comments: number
+  /** 0 待审核 1 已发布 2 已屏蔽 */
+  status: number
+  createTime: string | null
+  updateTime: string | null
 }
 
 export interface Voucher {

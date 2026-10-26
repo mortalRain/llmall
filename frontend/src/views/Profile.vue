@@ -6,6 +6,8 @@ import {
   ArrowRight,
   Discount,
   Refresh,
+  ShoppingCart,
+  Star,
   SwitchButton,
   Trophy,
   Wallet,
@@ -160,6 +162,25 @@ onMounted(() => {
             <b>{{ unusedCount }}</b>
           </div>
         </div>
+      </div>
+
+      <div class="profile-shortcuts">
+        <router-link to="/favorites" class="shortcut-card">
+          <span class="shortcut-icon favorite"><el-icon><Star /></el-icon></span>
+          <span class="shortcut-text">
+            <b>我的收藏</b>
+            <small>查看收藏的门店，随时取消</small>
+          </span>
+          <el-icon class="shortcut-arrow"><ArrowRight /></el-icon>
+        </router-link>
+        <router-link to="/cart" class="shortcut-card">
+          <span class="shortcut-icon cart"><el-icon><ShoppingCart /></el-icon></span>
+          <span class="shortcut-text">
+            <b>购物车</b>
+            <small>修改数量、选择商品去结算</small>
+          </span>
+          <el-icon class="shortcut-arrow"><ArrowRight /></el-icon>
+        </router-link>
       </div>
 
       <div class="profile-grid">
@@ -371,6 +392,82 @@ onMounted(() => {
   line-height: 1.25;
   letter-spacing: -0.03em;
   white-space: nowrap;
+}
+
+.profile-shortcuts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.shortcut-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition:
+    border-color 0.16s ease,
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.shortcut-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--brand-200);
+  box-shadow: 0 14px 28px rgba(37, 99, 235, 0.1);
+}
+
+.shortcut-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 12px;
+  font-size: 19px;
+}
+
+.shortcut-icon.favorite {
+  background: #fff7ed;
+  color: #d97706;
+}
+
+.shortcut-icon.cart {
+  background: var(--brand-50);
+  color: var(--brand-600);
+}
+
+.shortcut-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.shortcut-text b {
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 750;
+}
+
+.shortcut-text small {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shortcut-arrow {
+  flex: none;
+  color: var(--faint);
 }
 
 .profile-grid {
@@ -623,6 +720,11 @@ onMounted(() => {
 }
 
 @media (max-width: 640px) {
+  .profile-shortcuts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
   .profile-hero {
     padding: 20px 17px;
   }

@@ -6,9 +6,12 @@ import {
   ArrowDown,
   ArrowRight,
   Compass,
+  Goods,
   Management,
   Shop,
+  ShoppingCart,
   Stamp,
+  Star,
   SwitchButton,
   Tickets,
   User,
@@ -44,7 +47,10 @@ const managerShopIds = computed(() =>
 const navItems = computed(() => {
   const items = [
     { to: '/feed', label: '动态', icon: Compass },
+    { to: '/mall', label: '商城', icon: Goods },
     { to: '/shops', label: '门店', icon: Shop },
+    { to: '/cart', label: '购物车', icon: ShoppingCart },
+    { to: '/favorites', label: '我的收藏', icon: Star },
     { to: '/orders', label: '订单', icon: Tickets },
     { to: '/profile', label: '我的', icon: User },
   ]
@@ -84,6 +90,8 @@ const creditText = computed(() => String(auth.credits))
 
 function isActive(path: string): boolean {
   if (path === '/feed') return route.path === '/feed'
+  // 商品详情属于商城链路，导航高亮留在"商城"
+  if (path === '/mall') return route.path === '/mall' || route.path.startsWith('/item/')
   return route.path.startsWith(path)
 }
 

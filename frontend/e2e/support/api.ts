@@ -212,6 +212,35 @@ export async function createPaidOrder(
   }
 }
 
+/**
+ * 清空当前登录用户的购物车。
+ *
+ * 【为什么用例开头要清】合计断言的是"被选中商品"的金额；如果沿用上一次运行留下的条目，
+ * 即便默认全选也只多不少，金额断言会变成对历史数据的依赖。清空后用 UI 重新加购，
+ * 用例才是自洽的、可重复的。
+ */
+export async function clearCart(request: APIRequestContext, token: string): Promise<void> {
+  const response = await request.get('/api/carts', { headers: authHeaders(token) })
+  const text = await response.text()
+  expect(response.ok(), `查询购物车失败 HTTP ${response.status()}：${text}`).toBeTruthy()
+  const rows = parseBig.parse(text) as Array<{ id: string }>
+  for (const row of rows) {
+    const removed = await request.delete(`/api/carts/${row.id}`, { headers: authHeaders(token) })
+    expect(removed.ok(), `删除购物车条目 ${row.id} 失败 HTTP ${removed.status()}`).toBeTruthy()
+  }
+}
+
+/** 查询门店详情（收藏用例取门店名称） */
+export async function getShop(
+  request: APIRequestContext,
+  shopId: string,
+): Promise<{ id: string; name: string }> {
+  const response = await request.get(`/api/shops/${shopId}`)
+  const text = await response.text()
+  expect(response.ok(), `查询门店 ${shopId} 失败 HTTP ${response.status()}：${text}`).toBeTruthy()
+  return parseBig.parse(text) as { id: string; name: string }
+}
+
 /** 查询门店券列表（含当前用户是否已领取） */
 export async function listShopVouchers(
   request: APIRequestContext,

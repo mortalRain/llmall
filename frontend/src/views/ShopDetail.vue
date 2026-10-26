@@ -4,20 +4,23 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft,
+  ChatDotRound,
   Clock,
   Location,
   Refresh,
   ShoppingBag,
+  Star,
   StarFilled,
 } from '@element-plus/icons-vue'
 import StateBlock from '@/components/StateBlock.vue'
 import VoucherCard from '@/components/VoucherCard.vue'
-import { itemApi, shopApi, voucherApi } from '@/api/modules'
+import { blogApi, favoriteApi, itemApi, shopApi, voucherApi } from '@/api/modules'
 import { getErrorMessage } from '@/api/http'
-import type { Item, Shop, Voucher } from '@/api/types'
+import type { Blog, Item, Shop, Voucher } from '@/api/types'
 import {
   formatCount,
   formatPrice,
+  formatRelativeTime,
   initialOf,
   scoreOf,
   splitImages,
@@ -38,6 +41,21 @@ const quantities = reactive<Record<string, number>>({})
 const receivingId = ref('')
 const itemsSection = ref<HTMLElement | null>(null)
 const brokenImages = reactive<Record<number, boolean>>({})
+
+/**
+ * 收藏状态：GET/POST/DELETE /shops/{id}/favorite。
+ * 收藏是登录用户私有数据，路由已要求登录；接口失败按"未收藏"展示，避免按钮骗用户说已收藏。
+ */
+const favorited = ref(false)
+const favoriteLoading = ref(false)
+
+/** 门店评价：分页拉 /blogs/shop/{shopId}，展示评分/内容/时间 */
+const reviews = ref<Blog[]>([])
+const reviewTotal = ref(0)
+const reviewPage = ref(1)
+const reviewSize = 5
+const reviewLoading = ref(false)
+const reviewError = ref('')
 
 const images = computed(() => splitImages(shop.value?.images).slice(0, 3))
 const mainImage = computed(() => images.value[0] || '')
@@ -88,11 +106,63 @@ async function loadDetail(): Promise<void> {
     } else {
       vouchersError.value = getErrorMessage(voucherResult.reason, '优惠券加载失败')
     }
+    void loadReviews(1)
+    void loadFavoriteStatus()
   } catch (error) {
     errorMessage.value = getErrorMessage(error, '门店详情加载失败')
   } finally {
     loading.value = false
   }
+}
+
+async function loadFavoriteStatus(): Promise<void> {
+  try {
+    favorited.value = Boolean(await favoriteApi.status(shopId.value))
+  } catch {
+    // 取不到收藏状态时按未收藏展示；按钮仍可点击，服务端会做最终判定
+    favorited.value = false
+  }
+}
+
+async function toggleFavorite(): Promise<void> {
+  if (favoriteLoading.value) return
+  favoriteLoading.value = true
+  try {
+    if (favorited.value) {
+      await favoriteApi.remove(shopId.value)
+      favorited.value = false
+      ElMessage.success('已取消收藏')
+    } else {
+      await favoriteApi.add(shopId.value)
+      favorited.value = true
+      ElMessage.success('已收藏，可在「我的收藏」中查看')
+    }
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '收藏操作失败'))
+  } finally {
+    favoriteLoading.value = false
+  }
+}
+
+async function loadReviews(page = 1): Promise<void> {
+  reviewLoading.value = true
+  reviewError.value = ''
+  try {
+    const result = await blogApi.byShop(shopId.value, page, reviewSize)
+    reviews.value = Array.isArray(result.list) ? result.list : []
+    reviewTotal.value = Number(result.total || 0)
+    reviewPage.value = page
+  } catch (error) {
+    reviewError.value = getErrorMessage(error, '评价加载失败')
+    reviews.value = []
+    reviewTotal.value = 0
+  } finally {
+    reviewLoading.value = false
+  }
+}
+
+function changeReviewPage(nextPage: number): void {
+  void loadReviews(nextPage)
 }
 
 async function retryItems(): Promise<void> {
@@ -270,6 +340,18 @@ onMounted(() => {
             <el-button type="primary" size="large" :icon="ShoppingBag" @click="scrollToItems">
               开始点单
             </el-button>
+            <el-button
+              size="large"
+              data-testid="favorite-toggle"
+              :class="{ 'favorite-active': favorited }"
+              :type="favorited ? 'warning' : 'default'"
+              :plain="favorited"
+              :icon="favorited ? StarFilled : Star"
+              :loading="favoriteLoading"
+              @click="toggleFavorite"
+            >
+              {{ favorited ? '已收藏' : '收藏门店' }}
+            </el-button>
             <el-button size="large" @click="goOrders">我的订单</el-button>
           </div>
         </div>
@@ -364,6 +446,90 @@ onMounted(() => {
             @receive="receive(voucher)"
           />
         </div>
+      </section>
+
+      <section class="section-block review-section" data-testid="review-section">
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">REVIEWS</span>
+            <h2>门店评价</h2>
+            <p>来自真实到店用户的评分与体验，按发布时间倒序展示。</p>
+          </div>
+          <span class="section-count">{{ reviewTotal }} 条</span>
+        </div>
+
+        <div v-if="reviewError" class="inline-error">
+          <span>{{ reviewError }}</span>
+          <el-button size="small" :icon="Refresh" @click="loadReviews(reviewPage)">重试</el-button>
+        </div>
+
+        <div v-else-if="reviewLoading" class="review-loading">
+          <el-skeleton v-for="index in 2" :key="index" :rows="2" animated />
+        </div>
+
+        <el-empty
+          v-else-if="!reviews.length"
+          description="该门店还没有评价，等你来写第一条"
+          :image-size="86"
+        />
+
+        <template v-else>
+          <div class="review-list">
+            <article
+              v-for="review in reviews"
+              :key="review.id"
+              class="review-item"
+              data-testid="review-item"
+            >
+              <header class="review-head">
+                <el-avatar :size="40" class="review-avatar">
+                  {{ initialOf(`同城用户 ${review.userId}`) }}
+                </el-avatar>
+                <div class="review-author">
+                  <b>同城用户 {{ review.userId }}</b>
+                  <span>{{ formatRelativeTime(review.createTime) }}</span>
+                </div>
+                <div class="review-rating" :aria-label="`评分 ${review.score} 分`">
+                  <span class="review-stars">
+                    <el-icon
+                      v-for="index in 5"
+                      :key="index"
+                      :class="{ on: index <= Math.round(Number(review.score)) }"
+                    >
+                      <StarFilled />
+                    </el-icon>
+                  </span>
+                  <b class="review-score">{{ Number(review.score).toFixed(1) }}</b>
+                </div>
+              </header>
+
+              <h3 v-if="review.title">{{ review.title }}</h3>
+              <p class="review-content">{{ review.content }}</p>
+
+              <footer class="review-foot">
+                <span>
+                  <el-icon><ChatDotRound /></el-icon>
+                  {{ formatCount(review.comments) }} 条评论
+                </span>
+                <span>
+                  <el-icon><Star /></el-icon>
+                  {{ formatCount(review.liked) }} 人觉得有用
+                </span>
+              </footer>
+            </article>
+          </div>
+
+          <div v-if="reviewTotal > reviewSize" class="review-pagination">
+            <el-pagination
+              background
+              layout="prev, pager, next"
+              :current-page="reviewPage"
+              :page-size="reviewSize"
+              :total="reviewTotal"
+              @current-change="changeReviewPage"
+            />
+          </div>
+        </template>
       </section>
     </div>
   </StateBlock>
@@ -764,6 +930,129 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.favorite-active {
+  font-weight: 700;
+}
+
+.review-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.review-item {
+  padding: 15px 16px;
+  border: 1px solid #eef5ff;
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.review-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.review-avatar {
+  flex: none;
+  background: linear-gradient(135deg, #dbeafe, #93c5fd);
+  color: var(--brand-700);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.review-author {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.review-author b {
+  overflow: hidden;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-author span {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.review-rating {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.review-stars {
+  display: inline-flex;
+  gap: 1px;
+  color: #dbe7f8;
+  font-size: 13px;
+}
+
+.review-stars .on {
+  color: #f3b33d;
+}
+
+.review-score {
+  color: var(--gold);
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.review-item h3 {
+  margin: 10px 0 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.review-content {
+  margin: 5px 0 0;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.review-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.review-foot span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.review-pagination {
+  display: flex;
+  justify-content: center;
+  margin-top: 18px;
 }
 
 .inline-error {

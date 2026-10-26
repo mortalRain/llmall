@@ -10,6 +10,7 @@ import com.llmall.shop.domain.dto.ShopStaffRoleDTO;
 import com.llmall.shop.domain.vo.HotReconcileResultVO;
 import com.llmall.shop.domain.vo.MyShopStaffVO;
 import com.llmall.shop.domain.vo.ShopStaffVO;
+import com.llmall.shop.service.IShopFavoriteService;
 import com.llmall.shop.service.IShopService;
 import com.llmall.shop.service.IShopStaffService;
 import com.llmall.shop.task.ShopStatRollupTask;
@@ -31,6 +32,8 @@ import java.util.List;
  * 【注意】鉴权边界与网关 excludePaths 绑定：单段读接口（/shops/{id}、/shops/hot、/shops/page、
  * /shops/nearby、/shops/batch）免鉴权，未登录也能逛门店；多段写/运维接口（/shops/{id}/visit、
  * /shops/{id}/hot/recompute、/shops/cache/**）必须登录，不得把运维入口暴露出去。
+ * 收藏的四个接口（/shops/{id}/favorite、/shops/my/favorites）全部是多段路径，均要求登录：
+ * 收藏是用户私有数据，不能随门店读接口一起公开。
  */
 @Tag(name = "门店相关接口")
 @RestController
@@ -42,6 +45,9 @@ public class ShopController {
 
     /** 门店员工：只用于"我任职的门店"这一读接口，判权本身由内部接口承担 */
     private final IShopStaffService shopStaffService;
+
+    /** 门店收藏：关系放门店域，收藏列表按 shop_id 回门店表取最新展示字段 */
+    private final IShopFavoriteService shopFavoriteService;
 
     /** 对账任务：手动触发入口（定时触发见 ShopSearchReconcileTask#scheduledReconcile） */
     private final ShopSearchReconcileTask shopSearchReconcileTask;
@@ -151,6 +157,45 @@ public class ShopController {
             throw new UnauthorizedException("未登录");
         }
         return userId;
+    }
+
+    /**
+     * 收藏门店（幂等）。
+     *
+     * 【鉴权】路径为多段（/shops/{id}/favorite），不在网关的只读白名单 /shops/* 内，
+     * 未登录请求在网关即被拦截；controller 再取一次 UserContext 作为直连端口的兜底。
+     * 【幂等】重复收藏返回 200，不返回 409：前端按钮连点/重试不应被当成失败。
+     */
+    @Operation(summary = "收藏门店（幂等，重复收藏也返回成功）")
+    @PostMapping("/{id}/favorite")
+    public void favorite(@PathVariable("id") Long id) {
+        shopFavoriteService.addFavorite(id, requireLogin());
+    }
+
+    /** 取消收藏（幂等）：未收藏时同样返回成功。 */
+    @Operation(summary = "取消收藏门店（幂等，未收藏也返回成功）")
+    @DeleteMapping("/{id}/favorite")
+    public void unfavorite(@PathVariable("id") Long id) {
+        shopFavoriteService.removeFavorite(id, requireLogin());
+    }
+
+    /** 当前登录人是否已收藏该门店。 */
+    @Operation(summary = "是否已收藏该门店")
+    @GetMapping("/{id}/favorite")
+    public boolean favoriteStatus(@PathVariable("id") Long id) {
+        return shopFavoriteService.isFavorite(id, requireLogin());
+    }
+
+    /**
+     * 我的收藏门店列表（按收藏时间倒序）。
+     *
+     * 【注意】路径 /shops/my/favorites 是两段，不会被单段白名单 /shops/* 命中；
+     * 与 /shops/my/staff 一样必须登录。
+     */
+    @Operation(summary = "我的收藏门店（按收藏时间倒序）")
+    @GetMapping("/my/favorites")
+    public List<ShopDTO> myFavorites() {
+        return shopFavoriteService.listMyFavorites(requireLogin());
     }
 
     @Operation(summary = "分页查询门店（按热度排序）")
