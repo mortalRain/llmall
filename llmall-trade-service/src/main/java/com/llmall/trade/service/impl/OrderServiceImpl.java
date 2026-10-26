@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.llmall.api.client.ItemClient;
 import com.llmall.api.client.PayClient;
+import com.llmall.api.client.ShopClient;
 import com.llmall.api.client.UserClient;
 import com.llmall.api.client.VoucherClient;
 import com.llmall.api.dto.ItemDTO;
@@ -79,6 +80,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private final VoucherClient voucherClient;
     private final UserClient userClient;
     private final PayClient payClient;
+    private final ShopClient shopClient;
     private final TransactionTemplate transactionTemplate;
 
     @org.springframework.beans.factory.annotation.Value("${llmall.trade.order-timeout-seconds:900}")
@@ -488,6 +490,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     /**
      * 到店核销：status 2（已付款待使用）→ 7（已核销），并发重复核销靠条件更新 WHERE status = 2 由数据库裁决（第二次 affected rows = 0），比"先查再 update"可靠。
      * verify_code 上没有唯一索引：同码命中多单说明数据已不可信，宁可拒绝核销也不取第一条（核销错了要按错的订单退款、给错的门店结算）。
+     *
+     * 【权限】必须是该订单所属门店的在岗员工（修复前的实现只校验登录 + 门店一致，任何登录用户拿到核销码
+     * 都能核销别人的订单）。员工身份由门店域回答（ShopClient#isStaff），交易域不复制员工表；
+     * 判定失败/下游不可用一律按拒绝处理，见 {@link #assertStaffOfOrderShop}。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -514,14 +520,19 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
         Order order = matched.get(0);
 
-        if (order.getStatus() == null || order.getStatus() != Order.STATUS_PAID) {
-            throw new BizIllegalException("核销码已使用或订单状态不允许核销");
-        }
         // 券的适用门店与核销门店必须一致，不一致属于越权
         if (!Objects.equals(order.getShopId(), verifyDTO.getShopId())) {
             log.warn("核销码不属于该门店: orderId={}, orderShopId={}, verifyShopId={}, operator={}",
                     order.getId(), order.getShopId(), verifyDTO.getShopId(), operator);
             throw new ForbiddenException("核销码不属于该门店");
+        }
+
+        // 授权判定必须早于业务状态判定：否则无权限者能通过错误文案探测"这个码是否已被使用/是否付款"。
+        // 门店取自订单（权威值），不取请求参数 —— 请求里的 shopId 此时已校验一致，但权限只认订单侧的门店。
+        assertStaffOfOrderShop(order, operator);
+
+        if (order.getStatus() == null || order.getStatus() != Order.STATUS_PAID) {
+            throw new BizIllegalException("核销码已使用或订单状态不允许核销");
         }
 
         // 受影响行数是唯一的成功判据，并发/重复调用天然幂等
@@ -553,6 +564,43 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             log.error("核销事件投递失败（不影响核销结果，核销已落库）: orderId={}", order.getId(), e);
         }
         return order.getId();
+    }
+
+    /**
+     * 核销前置的授权断言：调用者必须是该订单所属门店的在岗员工。
+     *
+     * 【为什么在交易域做、数据在门店域】员工关系属于门店域（shop_staff 表），交易域只持有订单；
+     * 由交易域在入口处强制、向门店域查询（Feign 内部接口），既保证"所有核销路径都过同一道闸"，
+     * 又不需要在交易库复制一份员工表（复制必然漂移：离职了还能核销）。
+     *
+     * 【fail-closed 的两条断言路径】
+     * 1) 查询返回 false / null → 拒绝（非员工）；
+     * 2) 门店服务不可用或降级方法抛异常（Feign 超时、Sentinel 包装成 AssertionError 等）→ 拒绝并打 ERROR，
+     *    让"核销不可用"在日志里可归因。
+     * 绝不允许"查不到就放行"：修复前的漏洞本质就是把"没校验"当成"校验通过"。
+     *
+     * 【注意】这里抛的是 ForbiddenException（HTTP 403）：语义是"你没有这个权限"，而不是"参数错了"。
+     * 前端据此展示明确文案；监控上 403 属预期内的业务拒绝，不会污染 5xx 告警。
+     */
+    private void assertStaffOfOrderShop(Order order, Long operator) {
+        boolean staff;
+        try {
+            staff = Boolean.TRUE.equals(shopClient.isStaff(order.getShopId(), operator));
+        } catch (RuntimeException | AssertionError e) {
+            // 【为什么连 AssertionError 一起接】Feign 的 fallbackFactory 由 Sentinel 的
+            // SentinelInvocationHandler 调用，它把降级方法抛出的异常包成 AssertionError
+            // （不是 Exception，catch(Exception) 接不到，会一路冒到全局兜底变成 400/500，
+            // 把"门店服务不可用"说成"请求参数有误"）。实测停掉 shop 服务时命中的就是这条。
+            // 降级类抛出的 BizIllegalException 也走这里：门店服务不可用时核销必须不可用，不能 fail-open。
+            log.error("核销鉴权失败：门店员工校验不可用，按拒绝处理: orderId={}, shopId={}, operator={}",
+                    order.getId(), order.getShopId(), operator, e);
+            throw new ForbiddenException("暂时无法核销：门店员工校验不可用，请稍后重试");
+        }
+        if (!staff) {
+            log.warn("核销越权拦截：调用者不是该门店员工: orderId={}, shopId={}, operator={}",
+                    order.getId(), order.getShopId(), operator);
+            throw new ForbiddenException("仅门店员工可核销");
+        }
     }
 
     /**

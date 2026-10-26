@@ -593,6 +593,10 @@ try {
             @{ F = "$SqlMerged\30-content.sql";                    Why = '内容域建表' }
             @{ F = "$SqlMerged\23-content-image-default.sql";      Why = '依赖 30 建出的 blog 表，必须排在后面' }
             @{ F = "$SqlMerged\31-order-alter.sql";                Why = '交易域改造' }
+            # 32 是核销权限的落库脚本：shop_staff 是"谁能核销"的唯一事实来源。
+            # 必须早于应用启动，否则核销接口查不到员工关系会 fail-closed 全部拒绝；
+            # 种子把演示账号 Jack 设为 1 号与 10 号店的 STAFF（仅演示库）。
+            @{ F = "$SqlMerged\32-shop-staff.sql";                Why = '门店员工表 + 核销判权种子（Jack 任职 1/10 号店）' }
             @{ F = "$SqlMerged\40-search.sql";                     Why = '搜索域建表' }
             @{ F = "$SqlMerged\41-search-geo.sql";                 Why = '依赖 40，补 x/y' }
             @{ F = "$SqlMerged\62-align-dict-comments.sql";        Why = '字典型注释对齐（纯 ALTER COMMENT，幂等）' }

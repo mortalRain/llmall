@@ -53,6 +53,15 @@ export const shopApi = {
   detail(id: Id): Promise<Shop> {
     return get<Shop>(`/shops/${id}`)
   },
+  /**
+   * 我任职的门店 id 列表（后端 Long 序列化为字符串）。
+   *
+   * 【用途】订单页只对"本店员工"展示核销入口。它是展示开关，不是权限边界：
+   * 真正的拦截在交易域核销接口（非员工返回 403），前端即使拿到伪造列表也核销不了。
+   */
+  myStaffShops(): Promise<Id[]> {
+    return get<Id[]>('/shops/my/staff')
+  },
 }
 
 /** 商品：门店套餐优先走 /items/shop/{shopId}，同时保留分页入口 */

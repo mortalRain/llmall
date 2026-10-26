@@ -1,7 +1,7 @@
 # sql/merged · 库表脚本执行说明
 
 > **本文件是执行顺序的唯一权威（single source of truth）。**
-> 目录里共 **27 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
+> 目录里共 **29 个 .sql 脚本**（+ 本说明文件），下面是**完整、按依赖排序**的执行清单（不是简单按文件名数字排——
 > 有一处必须破数字序，见 2.1 的 `23` / `30`）。
 > 其中 `52a` 是只读清点（不是变更脚本）、`63` 是演示 / 冒烟环境专用（生产库不得执行），两者在清单里都单列了用途。
 
@@ -65,6 +65,8 @@ mysql -uroot -p < 22-user-time-default.sql      # 5.7  llmall-user.user 时间�
 mysql -uroot -p < 30-content.sql                # 5.8  内容域建表（blog / blog_comments / blog_like / follow / feed_inbox）
 mysql -uroot -p < 23-content-image-default.sql  # 5.9  ⚠️ 依赖 5.8：blog 表由 30 号建立，23 号必须排在它后面
 mysql -uroot -p < 31-order-alter.sql            # 5.10 交易域改造（order 加 order_type/shop_id/voucher_id/verify_code/verify_time + 索引）
+mysql -uroot -p < 32-shop-staff.sql             # 5.10b 门店员工表 + 核销判权种子（Jack 为 1/10 号店 STAFF）
+                                                #      ⚠️ 必须与应用同批上线：未建表时核销接口 fail-closed，员工校验取不到答案会全部拒绝
 mysql -uroot -p < 40-search.sql                 # 5.11 搜索域建表（shop_search_doc / search_hot_word / search_history）
 mysql -uroot -p < 41-search-geo.sql             # 5.12 ⚠️ 依赖 5.11：给 shop_search_doc 补 x/y
 mysql -uroot -p < 62-align-dict-comments.sql    # 5.13 【存量库注释对齐；全新初始化可跳过】7 条纯 ALTER ... COMMENT
@@ -152,6 +154,7 @@ mysql -uroot -p < 99-migrate-source-data.sql
 | 23 | `23-content-image-default.sql` | **新增守卫**：`TABLES`（表不存在要报错，不静默跳过）+ `COLUMNS` 判断 `images` 是否已是 `varchar(2048) NULL DEFAULT ''` |
 | 30 | `30-content.sql` | `CREATE TABLE IF NOT EXISTS` ×5 |
 | 31 | `31-order-alter.sql` | **新增守卫**：`COLUMNS`×1（5 列）+ `STATISTICS`×1（3 索引） |
+| 32 | `32-shop-staff.sql` | 核销判权落库：`CREATE TABLE IF NOT EXISTS`（`shop_staff` + `uk_shop_user(shop_id,user_id)`）+ 演示种子 `INSERT IGNORE ... SELECT`（先按 username 查 `llmall-user.user.id`，Jack 不是写死的 1）。**⚠️ 必须早于/同批于应用发布**：未建表时核销 fail-closed 全部拒绝。**⚠️ 种子仅演示库** |
 | 40 | `40-search.sql` | `CREATE TABLE IF NOT EXISTS` ×3 |
 | 41 | `41-search-geo.sql` | **新增守卫**：`COLUMNS`×1（x/y） |
 | 50 | `50-seed-local-life-data.sql` | 演示数据：`DELETE`（id 区间）+ 重插；`UPDATE` 幂等收敛；`INSERT` 多带 `NOT EXISTS` 守卫。**⚠️ 会删数据，仅演示库** |
@@ -205,7 +208,12 @@ PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
    第二遍执行只会打印 `... 已存在，跳过`，不会有任何 `ERROR`，也不会改表结构。
 6. **`50` / `51` 会删数据**：两个种子脚本用"按 id 区间 DELETE 再重插"保证可重复执行，
    文件头都有 `⚠️ 仅演示库，勿在生产执行` 的警示块。生产库只跑 `00~41`，跳过 `50/51/52/99`。
-7. **改表结构前先在工作副本验证**：`sql/merged/` 是"从零重建"的脚本；对已经在跑的库做变更，
+7. **`32` 是核销权限的落库脚本，必须与应用同批上线**：`32-shop-staff.sql` 建的 `shop_staff`
+   是"谁能核销"的唯一事实来源。应用先上线、脚本没跑 → 核销接口查不到员工关系，按 fail-closed
+   全部拒绝（不会退化成"谁都能核销"，但员工也用不了）。种子里 Jack 被授予 1 号与 10 号店的
+   STAFF，仅演示库需要；生产库只执行建表段、不执行种子段（把种子段整段注释掉，或按实际员工
+   关系自行 `INSERT`）。
+8. **改表结构前先在工作副本验证**：`sql/merged/` 是"从零重建"的脚本；对已经在跑的库做变更，
    请单独写增量脚本并先备份。
-8. **跑完演示数据记得调接口**：`POST /search/view/rebuild`（重建搜索读模型）与
+9. **跑完演示数据记得调接口**：`POST /search/view/rebuild`（重建搜索读模型）与
    `POST /shops/cache/geo/rebuild`（重建门店地理缓存）。

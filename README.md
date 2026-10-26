@@ -401,6 +401,25 @@ llmall/
 - `/actuator/**` **不在网关白名单内**：运维端点只走内网直连，外部经 8080 只放行 `/actuator/health`。
 - 免鉴权路径一律**剥离**客户端提供的 `user-info` 类身份头，只信任网关写入的那一份。
 
+### 10.5 核销权限：只有门店员工能核销（越权修复）
+
+核销决定"券已使用"的终态与门店结算，**必须由后端强制**，不能只靠前端隐藏按钮。
+
+- **落库**：`llmall-shop.shop_staff`（`uk_shop_user(shop_id,user_id)`），脚本 [`sql/merged/32-shop-staff.sql`](sql/merged/32-shop-staff.sql)；
+  演示库种子：Jack（`user_id=1`）是 `shop_id=10` 与 `shop_id=1` 的 `STAFF`。
+- **判权**：交易域 `POST /orders/verify` 在核销前调用门店域内部接口
+  `GET /internal/shops/{shopId}/staff/{userId}`（`x-service-token` 保护，网关无该路由）。
+- **拒绝口径**：非员工 → `403 {"code":403,"msg":"仅门店员工可核销"}`；
+  门店服务不可用 → `403`（"门店员工校验不可用"），**fail-closed，绝不放行**；两种拒绝都不产生任何写库/发消息副作用。
+- **用户侧（顾客）**：订单卡片与详情**突出展示核销码**，文案为"到店出示给店员"；**没有核销按钮**——
+  核销不是顾客的动作。
+- **员工侧**：独立路由 `/staff/verify`「核销台」，导航项仅对 `GET /shops/my/staff` 非空的用户展示；
+  员工选择本店 + 输入顾客核销码执行核销；非员工访问显示"仅门店员工可使用核销台"，
+  后端对非本店员工仍返回 403 并把 `msg` 原样展示。
+- **验证**：`mvn -o -pl llmall-shop-service,llmall-trade-service -am test`（含 5 条核销判权单测 + 6 条员工服务单测）；
+  `cd frontend && npm run test:e2e`（3 条冒烟：新增地址 / 顾客出示+员工核销 / 付费券）。
+- 完整设计与实测响应见 [`docs/核销权限-门店员工.md`](docs/核销权限-门店员工.md)。
+
 ---
 
 ## 11. 路线图
@@ -418,7 +437,7 @@ llmall/
 
 ## 12. 前端（Vue 3 + TypeScript）
 
-`frontend/` 是重建后的 SPA：Vue 3 + TS + Vite + Pinia + Vue Router + Element Plus（浅蓝主题），7 个页面（登录 / 关注动态 / 门店列表 / 门店详情 / 结算收银台 / 订单 / 我的）。
+`frontend/` 是重建后的 SPA：Vue 3 + TS + Vite + Pinia + Vue Router + Element Plus（浅蓝主题），8 个页面（登录 / 关注动态 / 门店列表 / 门店详情 / 结算收银台 / 订单 / 核销台 / 我的）。
 
 ![登录](docs/images/frontend-login.png)
 ![门店](docs/images/frontend-shops.png)
@@ -431,6 +450,18 @@ cd frontend && npm install && npm run dev   # http://localhost:5173，/api 代�
 - 演示账号 `Jack / 123456`，余额支付口令 `888888`
 - 401 并发单飞刷新、路由守卫、`json-bigint` 解析 19 位 Long id（避免 JS 精度丢失）
 - 网关当前只认裸 JWT（非 `Bearer`），可用 `VITE_AUTH_SCHEME=bearer` 切换
+- **核销语义：顾客出示、员工核销**：顾客订单里只展示核销码（到店出示给店员），**没有核销按钮**；
+  核销动作集中在员工侧 `/staff/verify`「核销台」，导航项只对门店员工（`GET /shops/my/staff` 非空）展示，
+  非员工访问会被拦截。后端仍独立判权，非本店员工 403（见 [10.5](#105-核销权限只有门店员工能核销越权修复)）
+- **Playwright 冒烟（3 条）**：
+
+  ```bash
+  cd frontend
+  npm run test:e2e     # 新增地址 / 顾客出示核销码+员工核销台核销（含 403 越权断言）/ 付费券购买
+  ```
+
+  用本机 Chrome（`channel: 'chrome'`），`baseURL=http://localhost:5173`，`testDir=e2e`；
+  dev server 未起时自动 `npm run dev`（已起则复用）。前置：网关 8080 与中间件已运行，演示数据已导入。
 
 ## 13. 可观测性
 

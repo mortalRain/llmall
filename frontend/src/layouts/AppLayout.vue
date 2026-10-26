@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -7,24 +7,54 @@ import {
   ArrowRight,
   Compass,
   Shop,
+  Stamp,
   SwitchButton,
   Tickets,
   User,
   Wallet,
 } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
+import { shopApi } from '@/api/modules'
 import { formatMoney } from '@/utils/format'
 
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-const navItems = [
-  { to: '/feed', label: '动态', icon: Compass },
-  { to: '/shops', label: '门店', icon: Shop },
-  { to: '/orders', label: '订单', icon: Tickets },
-  { to: '/profile', label: '我的', icon: User },
-]
+/**
+ * 员工模式入口：只有 `shop_staff` 命中的用户才在导航里看到"核销台"。
+ *
+ * 【注意】隐藏入口只是 UX：即便手动敲 /staff/verify，页面会再校验一次身份；
+ * 即便伪造身份，交易域核销接口仍会按 `(shopId, userId)` 判权并返回 403。
+ * 接口失败时按空集合处理（fail-closed），不展示入口。
+ */
+const staffShopIds = ref<string[]>([])
+
+const navItems = computed(() => {
+  const items = [
+    { to: '/feed', label: '动态', icon: Compass },
+    { to: '/shops', label: '门店', icon: Shop },
+    { to: '/orders', label: '订单', icon: Tickets },
+    { to: '/profile', label: '我的', icon: User },
+  ]
+  if (staffShopIds.value.length) {
+    items.push({ to: '/staff/verify', label: '核销台', icon: Stamp })
+  }
+  return items
+})
+
+async function loadStaffShops(): Promise<void> {
+  try {
+    const shops = await shopApi.myStaffShops()
+    staffShopIds.value = Array.isArray(shops) ? shops.map((id) => String(id)) : []
+  } catch {
+    staffShopIds.value = []
+  }
+}
+
+onMounted(() => {
+  void loadStaffShops()
+})
 
 const currentTitle = computed(() => {
   return typeof route.meta.title === 'string' ? route.meta.title : '同城生活'

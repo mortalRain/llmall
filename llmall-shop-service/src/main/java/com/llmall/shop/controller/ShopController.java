@@ -3,9 +3,11 @@ package com.llmall.shop.controller;
 import com.llmall.api.dto.ShopDTO;
 import com.llmall.common.domain.PageDTO;
 import com.llmall.common.exception.ForbiddenException;
+import com.llmall.common.exception.UnauthorizedException;
 import com.llmall.common.utils.UserContext;
 import com.llmall.shop.domain.vo.HotReconcileResultVO;
 import com.llmall.shop.service.IShopService;
+import com.llmall.shop.service.IShopStaffService;
 import com.llmall.shop.task.ShopStatRollupTask;
 import com.llmall.shop.task.ShopSearchReconcileTask;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -32,6 +34,9 @@ import java.util.List;
 public class ShopController {
 
     private final IShopService shopService;
+
+    /** 门店员工：只用于"我任职的门店"这一读接口，判权本身由内部接口承担 */
+    private final IShopStaffService shopStaffService;
 
     /** 对账任务：手动触发入口（定时触发见 ShopSearchReconcileTask#scheduledReconcile） */
     private final ShopSearchReconcileTask shopSearchReconcileTask;
@@ -64,6 +69,25 @@ public class ShopController {
     @GetMapping("/batch")
     public List<ShopDTO> queryByIds(@RequestParam("ids") List<Long> ids) {
         return shopService.queryByIds(ids);
+    }
+
+    /**
+     * 查询当前登录用户任职的门店 id 列表。
+     *
+     * 【用途】前端订单页据此决定是否展示"去核销"入口（非本店员工隐藏并提示）。
+     * 【注意】这只是展示开关，不是权限边界：真正的拦截在交易域的核销接口（它实时调用
+     * {@link InternalShopController} 判权），前端拿到伪造的 id 也核销不了。
+     * 【鉴权】多段路径，网关不白名单放行，未登录请求到不了这里；直连服务端口时
+     * UserContext 只会由合法的内部凭证头填充，取不到即 401（fail-closed）。
+     */
+    @Operation(summary = "我任职的门店 id 列表（前端用于展示核销入口）")
+    @GetMapping("/my/staff")
+    public List<Long> queryMyStaffShopIds() {
+        Long userId = UserContext.getUser();
+        if (userId == null) {
+            throw new UnauthorizedException("未登录");
+        }
+        return shopStaffService.queryStaffShopIds(userId);
     }
 
     @Operation(summary = "分页查询门店（按热度排序）")

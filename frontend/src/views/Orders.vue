@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowRight, Refresh, Tickets, View } from '@element-plus/icons-vue'
@@ -38,14 +38,6 @@ const detailVisible = ref(false)
 const detail = ref<Order | null>(null)
 const detailLoading = ref(false)
 const detailError = ref('')
-
-const verifyVisible = ref(false)
-const verifying = ref(false)
-const verifyTarget = ref<Order | null>(null)
-const verifyForm = reactive({
-  verifyCode: '',
-  shopId: '',
-})
 
 const tabs = [
   { label: '全部', value: 'all' },
@@ -144,42 +136,6 @@ async function cancelOrder(order: Order): Promise<void> {
   }
 }
 
-function openVerify(order: Order): void {
-  verifyTarget.value = order
-  verifyForm.verifyCode = order.verifyCode || ''
-  verifyForm.shopId = order.shopId || ''
-  verifyVisible.value = true
-}
-
-async function submitVerify(): Promise<void> {
-  if (!verifyForm.verifyCode.trim()) {
-    ElMessage.warning('请输入核销码')
-    return
-  }
-  if (!verifyForm.shopId.trim()) {
-    ElMessage.warning('请输入核销门店 ID')
-    return
-  }
-
-  verifying.value = true
-  try {
-    await orderApi.verify({
-      verifyCode: verifyForm.verifyCode.trim().toUpperCase(),
-      shopId: verifyForm.shopId.trim(),
-    })
-    ElMessage.success('核销成功')
-    verifyVisible.value = false
-    await loadOrders()
-    if (detailVisible.value && detail.value) {
-      await openDetail(detail.value)
-    }
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, '核销失败'))
-  } finally {
-    verifying.value = false
-  }
-}
-
 function goShops(): void {
   void router.push('/shops')
 }
@@ -194,7 +150,7 @@ onMounted(() => {
     <PageHeader
       eyebrow="MY ORDERS"
       title="我的订单"
-      subtitle="查看订单状态与核销码，未支付订单可取消，已支付订单可到店核销。"
+      subtitle="查看订单状态与核销码；未支付订单可取消，已支付订单请到店出示核销码。"
     >
       <template #actions>
         <el-button :icon="Refresh" :loading="loading" @click="loadOrders">刷新订单</el-button>
@@ -294,7 +250,7 @@ onMounted(() => {
           <div v-if="order.verifyCode && Number(order.status) !== 5" class="verify-strip">
             <span>核销码</span>
             <b class="mono">{{ order.verifyCode }}</b>
-            <small>到店出示，由门店核销</small>
+            <small>到店出示给店员核销</small>
           </div>
 
           <footer class="order-foot">
@@ -310,14 +266,6 @@ onMounted(() => {
                 @click="cancelOrder(order)"
               >
                 取消订单
-              </el-button>
-              <el-button
-                v-if="Number(order.status) === 2"
-                size="small"
-                type="primary"
-                @click="openVerify(order)"
-              >
-                去核销
               </el-button>
             </div>
           </footer>
@@ -361,7 +309,7 @@ onMounted(() => {
         <div v-if="detail.verifyCode" class="big-verify">
           <span>核销码</span>
           <b>{{ detail.verifyCode }}</b>
-          <small>{{ detailStatus.hint }}</small>
+          <small>到店出示给店员，由店员在核销台完成核销</small>
         </div>
 
         <div class="detail-grid">
@@ -419,43 +367,9 @@ onMounted(() => {
           >
             取消订单
           </el-button>
-          <el-button
-            v-if="Number(detail.status) === 2"
-            type="primary"
-            @click="openVerify(detail)"
-          >
-            去核销
-          </el-button>
         </div>
       </div>
     </el-drawer>
-
-    <el-dialog v-model="verifyVisible" title="订单核销" width="480px" append-to-body>
-      <el-alert
-        type="info"
-        :closable="false"
-        show-icon
-        title="核销是门店侧动作"
-        description="核销码由顾客到店出示。演示环境可在此模拟门店核销，核销门店必须与订单门店一致。"
-      />
-      <el-form label-position="top" class="verify-form">
-        <el-form-item label="核销码">
-          <el-input
-            v-model="verifyForm.verifyCode"
-            placeholder="请输入订单核销码"
-            maxlength="16"
-          />
-        </el-form-item>
-        <el-form-item label="核销门店 ID">
-          <el-input v-model="verifyForm.shopId" placeholder="请输入门店 id" />
-        </el-form-item>
-      </el-form>
-      <p v-if="verifyTarget" class="verify-tip">订单 {{ verifyTarget.id }} · 门店 #{{ verifyForm.shopId }}</p>
-      <template #footer>
-        <el-button @click="verifyVisible = false">取消</el-button>
-        <el-button type="primary" :loading="verifying" @click="submitVerify">确认核销</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -948,17 +862,6 @@ onMounted(() => {
   justify-content: flex-end;
   gap: 8px;
   padding-top: 4px;
-}
-
-.verify-form {
-  margin-top: 16px;
-}
-
-.verify-tip {
-  margin: 0;
-  color: var(--faint);
-  font-size: 11px;
-  text-align: right;
 }
 
 @media (max-width: 640px) {

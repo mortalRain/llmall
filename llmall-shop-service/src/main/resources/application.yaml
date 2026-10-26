@@ -31,6 +31,12 @@ llmall:
   # 生产应由网关/配置中心下发并配合内网隔离，不对外暴露。
   internal:
     token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
+    # 【凭证二】llmall.internal.service-token：只给服务间调用用的凭证，用于 /internal/** 下的
+    # 判权接口（交易域核销前查询"调用者是不是该门店员工"）。
+    # 与 x-internal-token 的区别：网关对 x-service-token 只剥离、不注入，外部（哪怕已登录用户）
+    # 永远拿不到，只有真正的服务调用方（交易域的 Feign）持有。
+    # 【注意】必须显式配置：不配置则内部接口一律 403（fail-closed），宁可内部调用报错也不能对外开放。
+    service-token: ${LLMALL_SERVICE_TOKEN:llmall-service-demo-token}
 
   # 门店缓存策略：这些值在代码里都有同值默认值（见 ShopServiceImpl 的 @Value 与 ShopRedisConstants），
   # 此处显式写出是为了调缓存策略时不必翻代码。

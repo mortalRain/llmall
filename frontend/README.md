@@ -133,8 +133,11 @@ frontend/
 │     ├─ Shops.vue         # 门店列表（/shops/page 分页）
 │     ├─ ShopDetail.vue
 │     ├─ Checkout.vue
-│     ├─ Orders.vue
+│     ├─ Orders.vue        # 顾客订单：核销码 + 到店出示（无核销按钮）
+│     ├─ StaffVerify.vue   # 员工核销台（/staff/verify，仅门店员工可用）
 │     └─ Profile.vue
+├─ e2e/                    # Playwright 冒烟（地址 / 核销 / 付费券）
+├─ playwright.config.ts
 └─ legacy-demo/            # 旧单文件演示台，仅留档
 ```
 
@@ -149,8 +152,13 @@ frontend/
 | 领券 | `POST /vouchers/{id}/receive`（付费券在请求体带 `pw`） |
 | 下单 | `GET /addresses`、`POST /orders`、`GET /orders/{id}` |
 | 支付 | `POST /pay-orders`、`POST /pay-orders/{id}` |
-| 订单 | `GET /orders`、`GET /orders/{id}`、`PUT /orders/{id}/cancel`、`POST /orders/verify` |
+| 订单（顾客） | `GET /orders`、`GET /orders/{id}`、`PUT /orders/{id}/cancel` |
+| 核销台（员工） | `GET /shops/my/staff`（判断员工身份/任职门店）、`POST /orders/verify` |
 | 我的 | `GET /users/me`、`GET /vouchers/my`、`POST /users/logout` |
+
+> **核销语义**：核销是门店员工的动作。顾客侧只展示核销码并提示"到店出示给店员"，没有核销按钮；
+> 核销动作在 `/staff/verify` 核销台完成，入口只对 `GET /shops/my/staff` 非空的用户展示。
+> 前端判断只是 UX，后端对非本店员工始终返回 403。
 
 字段口径以后端代码为准：
 
@@ -184,7 +192,15 @@ npm install
 npm run build
 npm run dev
 curl -I http://localhost:5173
+
+# Playwright 冒烟（3 条：新增地址 / 顾客出示核销码+员工核销台 / 付费券）
+npm run test:e2e
 ```
+
+- `npm run test:e2e` 用本机 Chrome（`channel: 'chrome'`），`baseURL=http://localhost:5173`，
+  `testDir=e2e`，`webServer` 在 dev server 未启动时自动执行 `npm run dev`（已启动则复用）。
+- 前置：网关 8080 与 MySQL/Redis/Nacos/RabbitMQ 已运行、演示数据已导入（`sql/merged/README.md`）。
+- 用例可重复执行：地址/订单每轮新建；付费券"一人一张"，已领取时断言"已领取"而不重复扣款。
 
 构建产物约 1.7 MB（未压缩），Element Plus 全量引入后主 vendor chunk 约 823 KB；
 已在 1440px 与 375px 宽度下检查布局与主要交互。

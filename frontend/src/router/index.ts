@@ -47,6 +47,14 @@ const router = createRouter({
           meta: { title: '我的订单' },
         },
         {
+          // 员工核销台：路由本身只要求登录；"是否员工"由页面用 /shops/my/staff 判断，
+          // 真正的核销权限仍由交易域核销接口强制（非本店员工 403）。
+          path: 'staff/verify',
+          name: 'staff-verify',
+          component: () => import('@/views/StaffVerify.vue'),
+          meta: { title: '核销台' },
+        },
+        {
           path: 'profile',
           name: 'profile',
           component: () => import('@/views/Profile.vue'),

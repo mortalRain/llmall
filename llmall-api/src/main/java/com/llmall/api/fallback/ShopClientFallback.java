@@ -45,6 +45,15 @@ public class ShopClientFallback implements FallbackFactory<ShopClient> {
             }
 
             @Override
+            public boolean isStaff(Long shopId, Long userId) {
+                log.warn("远程调用 ShopClient#isStaff 失败, shopId={}, userId={}", shopId, userId, cause);
+                // 判权接口禁止降级成任何布尔值：false 会被当成"不是员工"（安全但会误拒在岗员工，
+                // 且丢失"下游故障"这一事实），true 则是直接放开越权。抛异常让交易域按拒绝处理并打 ERROR，
+                // 这样"门店服务挂了导致核销不可用"在日志里可解释，而不是一片莫名的 403。
+                throw new BizIllegalException("门店服务不可用，无法校验核销权限（按拒绝处理）");
+            }
+
+            @Override
             public ShopPageDTO queryShopPage(Integer page, Integer size) {
                 log.warn("远程调用 ShopClient#queryShopPage 失败, page={}, size={}", page, size, cause);
                 // 视图重建属于可重试的运维动作，返回空页而不是抛异常，避免把调用方拖垮

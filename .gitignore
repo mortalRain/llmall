@@ -13,6 +13,12 @@ target/
 node_modules/
 dist/
 
+# Playwright 冒烟测试产物（失败快照 / trace / HTML 报告）：本地排查用，不入库
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # ---------- 运行日志 ----------
 logs/
 **/logs/

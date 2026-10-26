@@ -31,6 +31,17 @@ public interface ShopClient {
     @GetMapping("/shops/orders/{orderId}/consumed")
     boolean isOrderConsumed(@PathVariable("orderId") Long orderId);
 
+    /**
+     * 判断用户是否为门店员工（内部接口，到店核销的判权依据）。
+     *
+     * 【注意】这是判权接口，不是展示接口：调用方（交易域的核销入口）必须把"取不到明确答案"
+     * 一律当成拒绝（见 ShopClientFallback 的降级实现），不能因为返回 false 与调用失败难以区分
+     * 就默认放行 —— 那正是修复前的越权路径。
+     */
+    @Operation(summary = "判断用户是否为指定门店的员工（内部接口，需服务间凭证）")
+    @GetMapping("/internal/shops/{shopId}/staff/{userId}")
+    boolean isStaff(@PathVariable("shopId") Long shopId, @PathVariable("userId") Long userId);
+
     @Operation(summary = "分页查询门店（供搜索域构建本地搜索视图）")
     @GetMapping("/shops/page")
     ShopPageDTO queryShopPage(@RequestParam("page") Integer page, @RequestParam("size") Integer size);
