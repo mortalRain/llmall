@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-ssr
+.git
+.gitignore
+legacy-demo
+.chrome-profile
+.screenshots
+*.log
+.env
+.env.*
+!.env.example

@@ -28,12 +28,92 @@ npm run preview    # http://localhost:4173，同样代理 /api
 
 演示账号：**Jack / 123456**；演示支付口令：**888888**（与登录密码不同）。
 
+## 启动与联调
+
+### 1. 前置条件
+
+- Node.js **20.19+**（建议 22.x）与 npm 10+
+- 后端网关可访问：默认 `http://localhost:8080`
+- 至少启动网关与用到的业务服务；本仓库 Docker 环境的网关服务名为 `gateway`
+
+### 2. 安装与启动
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+打开 `http://localhost:5173`，使用演示账号登录：
+
+| 项目 | 值 |
+| --- | --- |
+| 登录账号 | `Jack` |
+| 登录密码 | `123456` |
+| 支付口令 | `888888`（与登录密码不同，收银台/付费券会用到） |
+
+### 3. `/api` 代理
+
+开发服务器与 `vite preview` 都会把 `/api` 代理到 `http://localhost:8080`，并去掉 `/api` 前缀：
+
+```text
+浏览器 /api/users/login  ->  Vite proxy  ->  http://localhost:8080/users/login
+```
+
+网关不在默认地址时，用 `LLMALL_API_TARGET` 覆盖：
+
+```bash
+LLMALL_API_TARGET=http://192.168.1.10:8080 npm run dev
+```
+
+### 4. 鉴权头说明（VITE_AUTH_SCHEME）
+
+当前仓库网关按**裸 JWT**读取 `authorization`（不剥离 `Bearer ` 前缀），因此前端默认发送裸 token：
+
+```bash
+# 默认行为，等价于 VITE_AUTH_SCHEME=raw
+npm run dev
+```
+
+如果网关后续升级为标准的 `Bearer <token>` 方案，无需改代码：
+
+```bash
+VITE_AUTH_SCHEME=bearer npm run dev
+VITE_AUTH_SCHEME=bearer npm run build
+```
+
+> 401 处理：并发请求共享同一个刷新 Promise，只调用一次 `POST /users/token/refresh`
+> （`X-Refresh-Token` 请求头），成功后就地重放原请求；失败则清空 localStorage 并跳转 `/login`。
+
+### 5. 构建、预览与 Docker
+
+```bash
+npm run build      # vue-tsc -b && vite build，产物在 dist/
+npm run preview    # http://localhost:4173，同样代理 /api
+```
+
+容器构建（多阶段 Node 22 构建 + Nginx 托管，不修改 deploy 下的 compose）：
+
+```bash
+# 在仓库根目录（llmall/）执行
+docker build -f frontend/Dockerfile -t llmall-frontend:1.0.0 frontend
+
+# 运行时需接入 gateway 所在的 Docker 网络（本项目 external network 为 local-life）
+docker run --rm -p 8081:80 --network local-life llmall-frontend:1.0.0
+```
+
+容器内 Nginx 的 `/api/` 反向代理到 `http://gateway:8080/`，与开发环境的 `/api` 语义一致；
+因此前端容器必须和 `gateway` 处于同一 Docker 网络。
+
 ## 目录结构
 
 ```
 frontend/
 ├─ index.html
 ├─ vite.config.ts          # 5173 dev server + /api 代理
+├─ Dockerfile              # Node 22 构建 + Nginx 运行
+├─ nginx.conf              # SPA 回退 + /api 反代 gateway:8080
+├─ .dockerignore
 ├─ tsconfig*.json
 ├─ src/
 │  ├─ main.ts              # Element Plus 全量引入 + 中文 locale
