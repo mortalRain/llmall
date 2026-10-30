@@ -15,6 +15,11 @@ feign:
         connectTimeout: 2000
         readTimeout: 5000
 spring:
+  rabbitmq:
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
   application:
     name: llmall-pay-service
   profiles:

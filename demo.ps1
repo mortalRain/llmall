@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # llmall 一键运行（demo.ps1）
 #
 # 定位：**只编排仓库里既有的材料**，不重造任何东西。流水线里每一步都对应一份既有文件：
@@ -29,7 +29,7 @@
 #      要按 core 起就传 -Profile core（此时请配 -SkipSmoke，否则冒烟必红）。
 #   2) 冒烟账号用的是 MallE2E 硬编码的演示账号 Jack/123456 —— "专属账号"这一条**未做到**。
 #      原因：MallE2E.java 没有 CLI 参数，改它属于"顺手重构代码"，是红线。
-#      替代做法：冒烟前后取"自增 id 水位线"，finally 里只删本次冒烟新建的行（见 -NoCleanup）。
+#      冒烟数据默认保留；按 id 上界删除无法完整还原资金、库存与异步任务，旧自动清理已停用。
 #
 # 【ES 的两种来源】默认起 addon 容器（docker/docker-compose-addon.yml 的 elasticsearch）。
 #   若 ES 已在本机原生装着（plugins\ik 已就位），
@@ -47,7 +47,7 @@ param(
     [switch]$ForceNacos,            # Nacos 上已有与仓库不一致的配置时，允许覆盖（默认停下问）
     [switch]$SkipEs,                # 跳过 ES 索引与灌数
     [switch]$SkipSmoke,             # 跳过 MallE2E 冒烟
-    [switch]$NoCleanup,             # 不清理冒烟新建的数据
+    [switch]$NoCleanup,             # 兼容旧调用；无论是否传入，冒烟数据均保留
     [switch]$Online,                # 允许 Maven 走网络（默认离线 -o）
     [switch]$WithSourceMigration, # 额外执行 99-migrate-source-data.sql（需要外部上游库_src）
     [switch]$ExternalEs,            # ES 已在别处跑着（宿主原生安装 / VM），不起 addon 容器
@@ -515,10 +515,13 @@ Assert-Docker | Out-Null
 
 # ---------------------------------------------------------------- 运行期状态（供 finally 使用）
 $statsJob = $null
-$watermark = @{}
 $smokeOk = $false
 $summary = New-Object System.Collections.ArrayList
 function Add-Summary { param([string]$Text) [void]$script:summary.Add($Text); Write-Info $Text }
+function Write-SmokeDataPolicy {
+    Write-Info '冒烟数据将保留：旧自动清理已停用，-NoCleanup 仅作兼容。重置方式见 docs/test-data-safety.md。'
+}
+
 
 try {
     # ------------------------------------------------------------ 1. 构建
@@ -602,6 +605,9 @@ try {
             @{ F = "$SqlMerged\41-search-geo.sql";                 Why = '依赖 40，补 x/y' }
             @{ F = "$SqlMerged\62-align-dict-comments.sql";        Why = '字典型注释对齐（纯 ALTER COMMENT，幂等）' }
             @{ F = "$SqlMerged\60-user-pay-password.sql";          Why = 'pay_password 列，必须先于应用发布' }
+            @{ F = "$SqlMerged\33-shop-staff-roles.sql";           Why = '依赖 32 和 60；角色升级与 Rose 演示账号' }
+            @{ F = "$SqlMerged\64-payment-recovery.sql";           Why = '支付尝试与原子撤销账本' }
+            @{ F = "$SqlMerged\65-voucher-purchase.sql";           Why = '依赖 64；旧普通购券净额守卫与持久化领取尝试' }
             @{ F = "$SqlMerged\50-seed-local-life-data.sql";       Why = '演示数据（第 1 遍）' }
             @{ F = "$SqlMerged\51-seed-more-data.sql";             Why = '演示数据（第 1 遍）' }
             @{ F = "$SqlMerged\50-seed-local-life-data.sql";       Why = '为 51 新增的门店再生成套餐与评价' }
@@ -814,29 +820,7 @@ try {
     # ------------------------------------------------------------ 7. 冒烟 + 峰值内存
     if (-not $SkipSmoke) {
         Write-Step '冒烟：scripts/MallE2E.java'
-        # 水位线：只记录，finally 里按它删除"本次冒烟新建的行"
-        $wmTables = @(
-            'llmall-cart.cart',
-            'llmall-trade.order', 'llmall-trade.order_detail',
-            'llmall-pay.pay_order',
-            'llmall-user.balance_flow', 'llmall-user.points_flow',
-            'llmall-item.stock_flow',
-            'llmall-content.blog', 'llmall-content.blog_comments', 'llmall-content.blog_like', 'llmall-content.feed_inbox',
-            'llmall-search.search_history'
-        )
-        # 先问 information_schema 哪些目标表真的存在且有 id 列 —— 免得某个库/表名与预期不符时
-        # 直接把整个 demo 中断在"清理准备"这一步
-        $schemaList = "'llmall-cart','llmall-trade','llmall-pay','llmall-user','llmall-item','llmall-content','llmall-search'"
-        $existOut = Invoke-SqlText -Batch -Sql ("SELECT CONCAT(TABLE_SCHEMA,'.',TABLE_NAME) FROM information_schema.COLUMNS WHERE COLUMN_NAME='id' AND TABLE_SCHEMA IN (" + $schemaList + ")")
-        $existSet = @{}
-        foreach ($l in $existOut) { if ($l) { $existSet[$l.Trim()] = $true } }
-        foreach ($t in $wmTables) {
-            if (-not $existSet.ContainsKey($t)) { Write-Warn2 "冒烟清理水位线跳过 $t（该表不存在或没有 id 列）"; continue }
-            $db, $tb = $t -split '\.', 2
-            $v = Invoke-SqlText -Batch -Sql "SELECT IFNULL(MAX(id),0) FROM ``$db``.``$tb``"
-            if ($v.Count -gt 0) { $watermark[$t] = [int64]$v[0] }
-        }
-        Write-Info ('已记录 ' + $watermark.Count + ' 张表的自增 id 水位线')
+        Write-SmokeDataPolicy
 
         # docker stats 采样（`docker stats --no-stream` 是瞬时值，峰值必须自己采）
         $statsJob = Start-Job -ScriptBlock {
@@ -882,22 +866,12 @@ try {
     }
 }
 finally {
-    # ---------------------------------------------------------- 8. 清理冒烟数据 + 收峰值内存
+    # ---------------------------------------------------------- 8. 收峰值内存与运行报告（保留业务数据）
     if ($statsJob) {
         New-Item -ItemType File -Force -Path ($StatsFile -replace '\.txt$', '.stop') | Out-Null
         Wait-Job $statsJob -Timeout 60 | Out-Null
         Receive-Job $statsJob | Out-Null
         Remove-Job $statsJob -Force
-    }
-    if ($watermark.Count -gt 0 -and -not $NoCleanup) {
-        Write-Host ''
-        Write-Host '清理本次冒烟新建的数据（按自增 id 水位线，只删冒烟之后的行）' -ForegroundColor Cyan
-        foreach ($t in $watermark.Keys) {
-            $db, $tb = $t -split '\.', 2
-            $n = Invoke-SqlText -Sql "DELETE FROM ``$db``.``$tb`` WHERE id > $($watermark[$t])" -Batch
-            Write-Info ("  $t : id > $($watermark[$t]) 已清理")
-        }
-        Write-Info '（删除范围仅限本次冒烟新建的行；种子数据不受影响）'
     }
     if (Test-Path $StatsFile) {
         Write-Host ''
@@ -916,6 +890,7 @@ finally {
     [void]$rep.Add("- JDK：``$(Get-GateJavaHome)``")
     [void]$rep.Add("- 宿主：PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))")
     [void]$rep.Add("- profile：$Profile")
+    [void]$rep.Add('- 数据策略：冒烟业务数据保留；旧自动清理已停用，-NoCleanup 仅作兼容。')
     [void]$rep.Add('')
     [void]$rep.Add('## 各步结果')
     foreach ($s in $summary) { [void]$rep.Add("- $s") }

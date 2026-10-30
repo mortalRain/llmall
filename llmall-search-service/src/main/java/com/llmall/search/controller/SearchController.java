@@ -17,6 +17,8 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
+import static com.llmall.common.constant.AuthConstants.HEADER_SERVICE_TOKEN;
+
 @Tag(name = "搜索接口")
 @RestController
 @RequestMapping("/search")
@@ -25,18 +27,17 @@ public class SearchController {
 
     private final ISearchService searchService;
 
-    /**
-     * 运维接口总开关（llmall.maintenance.enabled）。
-     *
-     * 全量重建是重活：执行期间会经 Feign 逐页拉取门店数据、整表重写搜索读模型并重灌 ES 索引，
-     * 怀疑线上抖动与它有关时改一行配置重启即可停掉，不必发版，也不会误伤同一控制器下的正常搜索接口。
-     */
+    /** 维护动作需同时开启开关并验证服务凭据；登录身份不代表运维权限。 */
     @Value("${llmall.maintenance.enabled:false}")
     private boolean maintenanceEnabled;
 
-    private void checkMaintenanceEnabled() {
-        if (!maintenanceEnabled) {
-            throw new ForbiddenException("运维接口已关闭");
+    @Value("${llmall.internal.service-token:}")
+    private String serviceToken;
+
+    private void checkMaintenanceAccess(String token) {
+        if (!maintenanceEnabled || serviceToken == null || serviceToken.trim().length() < 32
+                || !serviceToken.equals(token)) {
+            throw new ForbiddenException("运维接口未授权或已关闭");
         }
     }
 
@@ -77,8 +78,8 @@ public class SearchController {
 
     @Operation(summary = "全量重建搜索视图（首次部署 / 视图损坏时使用）")
     @PostMapping("/view/rebuild")
-    public int rebuildView() {
-        checkMaintenanceEnabled();
+    public int rebuildView(@RequestHeader(value = HEADER_SERVICE_TOKEN, required = false) String token) {
+        checkMaintenanceAccess(token);
         return searchService.rebuildSearchView();
     }
 
@@ -95,8 +96,8 @@ public class SearchController {
 
     @Operation(summary = "ES 索引全量重建（把 MySQL 读模型灌进 ES）")
     @PostMapping("/index/rebuild")
-    public int rebuildIndex() {
-        checkMaintenanceEnabled();
+    public int rebuildIndex(@RequestHeader(value = HEADER_SERVICE_TOKEN, required = false) String token) {
+        checkMaintenanceAccess(token);
         return searchService.rebuildEsIndex();
     }
 

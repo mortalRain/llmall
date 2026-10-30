@@ -29,6 +29,8 @@ import java.util.List;
 public class PayController {
 
     private final IPayOrderService payOrderService;
+    @org.springframework.beans.factory.annotation.Value("${llmall.internal.service-token:}")
+    private String serviceToken;
 
     @Operation(summary = "查询支付单")
     @GetMapping
@@ -94,12 +96,16 @@ public class PayController {
     /**
      * 关闭支付单（交易订单退款成功后的账本回写）。
      *
-     * 幂等：重复调用只会有一次真正把状态改掉，其余返回"未发生变更"，调用方不应据此判退款失败。
+     * 幂等：已关闭重复调用返回成功；不存在或无法关闭时抛错，交易域保留待办继续恢复。
      */
     @Operation(summary = "关闭支付单（已支付订单退款后回写支付账本）")
     @Parameter(name = "bizOrderNo", description = "交易订单号", in = ParameterIn.PATH, required = true)
     @PutMapping("/{bizOrderNo}/close")
-    public boolean closePayOrder(@PathVariable("bizOrderNo") Long bizOrderNo) {
+    public boolean closePayOrder(@PathVariable("bizOrderNo") Long bizOrderNo,
+            @org.springframework.web.bind.annotation.RequestHeader(value="x-service-token", required=false) String token) {
+        if (!org.springframework.util.StringUtils.hasText(serviceToken) || !serviceToken.equals(token)) {
+            throw new ForbiddenException("内部接口，禁止外部调用");
+        }
         return payOrderService.closePayOrder(bizOrderNo);
     }
 }

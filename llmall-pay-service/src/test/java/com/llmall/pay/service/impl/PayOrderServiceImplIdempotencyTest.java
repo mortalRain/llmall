@@ -68,7 +68,7 @@ class PayOrderServiceImplIdempotencyTest {
 
     @BeforeEach
     void setUp() {
-        payOrderService = new PayOrderServiceImpl(userClient, tradeClient, rabbitTemplate, metrics, redisTemplate);
+        payOrderService = new PayOrderServiceImpl(tradeClient, null, null);
         // ServiceImpl 的 baseMapper 由 Spring 反射注入；单测里手工塞入 Mock
         ReflectionTestUtils.setField(payOrderService, "baseMapper", payOrderMapper);
     }

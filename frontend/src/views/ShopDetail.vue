@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -19,6 +19,8 @@ import StateBlock from '@/components/StateBlock.vue'
 import VoucherCard from '@/components/VoucherCard.vue'
 import { blogApi, favoriteApi, itemApi, shopApi, voucherApi } from '@/api/modules'
 import { getErrorMessage } from '@/api/http'
+import { createVoucherPurchase, isOrdinaryVoucher, type PurchaseResult } from '@/utils/voucherPurchase'
+import { getAccessToken, getStoredUser } from '@/utils/session'
 import { useAuthStore } from '@/stores/auth'
 import type { Blog, Item, Shop, Voucher } from '@/api/types'
 import {
@@ -44,6 +46,56 @@ const itemsError = ref('')
 const vouchersError = ref('')
 const quantities = reactive<Record<string, number>>({})
 const receivingId = ref('')
+const purchaseNotes = reactive<Record<string, string>>({})
+let pageActive = true
+function currentPurchaseUser(): string | undefined {
+  const storedUser = getStoredUser()?.userId
+  return pageActive && getAccessToken() && storedUser === auth.user?.userId ? storedUser : undefined
+}
+const purchases = createVoucherPurchase({
+  storage: () => window.localStorage,
+  currentUser: currentPurchaseUser,
+  newRequestId: () => crypto.randomUUID(),
+  query: requestId => voucherApi.purchase(requestId, currentPurchaseUser()),
+  receive: (id, pw, requestId) => voucherApi.receive(id, pw, requestId, currentPurchaseUser()),
+  wait: () => new Promise(resolve => window.setTimeout(resolve, 2000)),
+})
+
+function showPurchaseResult(voucher: Voucher, result: PurchaseResult): void {
+  switch (result.state) {
+    case 'ISSUED':
+      voucher.received = true
+      purchaseNotes[voucher.id] = '领取成功，可在「我的」中查看优惠券'
+      break
+    case 'ACTIVE':
+    case 'CANCELING':
+      purchaseNotes[voucher.id] = '购买处理中，稍后点击查询结果；请勿重复购买'
+      break
+    case 'CANCELED':
+      purchaseNotes[voucher.id] = '本次购买已取消。如需购买，请再次点击并确认支付'
+      break
+    case 'UNKNOWN':
+      purchaseNotes[voucher.id] = '购买结果暂未确认，记录已保留；稍后点击查询结果'
+      break
+    case 'NOT_FOUND':
+      purchaseNotes[voucher.id] = '尚未提交购买，点击可继续确认支付'
+      break
+  }
+}
+
+async function restorePurchases(): Promise<void> {
+  const userId = currentPurchaseUser()
+  if (!userId) return
+  // 模板价格或活动配置变化后，也应恢复已有购买事实；恢复本身从不支付。
+  await Promise.all(vouchers.value.map(async voucher => {
+    try {
+      const result = await purchases.restore(userId, voucher.id)
+      if (currentPurchaseUser() === userId) showPurchaseResult(voucher, result)
+    } catch (error) {
+      if (currentPurchaseUser() === userId) purchaseNotes[voucher.id] = getErrorMessage(error)
+    }
+  }))
+}
 const itemsSection = ref<HTMLElement | null>(null)
 const brokenImages = reactive<Record<number, boolean>>({})
 
@@ -154,6 +206,7 @@ async function loadDetail(): Promise<void> {
 
     if (voucherResult.status === 'fulfilled') {
       vouchers.value = Array.isArray(voucherResult.value) ? voucherResult.value : []
+      void restorePurchases()
     } else {
       vouchersError.value = getErrorMessage(voucherResult.reason, '优惠券加载失败')
     }
@@ -250,6 +303,7 @@ async function retryVouchers(): Promise<void> {
   vouchersError.value = ''
   try {
     vouchers.value = await voucherApi.list(shopId.value)
+    void restorePurchases()
   } catch (error) {
     vouchersError.value = getErrorMessage(error, '优惠券加载失败')
   }
@@ -258,6 +312,7 @@ async function retryVouchers(): Promise<void> {
 async function refreshVouchers(): Promise<void> {
   try {
     vouchers.value = await voucherApi.list(shopId.value)
+    void restorePurchases()
   } catch (error) {
     vouchersError.value = getErrorMessage(error, '优惠券刷新失败')
   }
@@ -284,10 +339,14 @@ function buy(item: Item): void {
 }
 
 async function receive(voucher: Voucher): Promise<void> {
-  if (voucher.received) return
-
-  let pw: string | undefined
-  if (Number(voucher.payValue) > 0) {
+  if (voucher.received || receivingId.value) return
+  if (!isOrdinaryVoucher(voucher)) {
+    ElMessage.info('该券为秒杀券，请通过秒杀活动入口购买，普通领取不适用')
+    return
+  }
+  receivingId.value = voucher.id
+  const userId = currentPurchaseUser()
+  async function confirmPayment(): Promise<string | undefined> {
     try {
       const result = await ElMessageBox.prompt(
         `该券为付费券，需支付 ${formatPrice(voucher.payValue)}。请输入支付口令（演示支付口令：888888，与登录密码不同）。`,
@@ -301,17 +360,25 @@ async function receive(voucher: Voucher): Promise<void> {
             Boolean(value && value.trim().length >= 6) || '请输入至少 6 位支付口令',
         },
       )
-      pw = result.value
+      return result.value
     } catch {
       return
     }
   }
-
-  receivingId.value = voucher.id
   try {
-    await voucherApi.receive(voucher.id, pw)
-    ElMessage.success('领取成功，可在「我的」中查看优惠券')
-    await refreshVouchers()
+    if (Number(voucher.payValue) > 0) {
+      if (!userId) throw new Error('请刷新并确认登录账号后购买')
+      const result = await purchases.purchase(userId, voucher.id, confirmPayment)
+      if (currentPurchaseUser() !== userId) return
+      showPurchaseResult(voucher, result)
+      if (result.state === 'ISSUED') ElMessage.success(purchaseNotes[voucher.id])
+      else if (result.state !== 'DISMISSED') ElMessage.info(purchaseNotes[voucher.id])
+    } else {
+      if (currentPurchaseUser() !== userId) throw new Error('登录账号已变化，请刷新后重试')
+      await voucherApi.receive(voucher.id)
+      ElMessage.success('领取成功，可在「我的」中查看优惠券')
+      await refreshVouchers()
+    }
   } catch (error) {
     ElMessage.error(getErrorMessage(error, '领取失败'))
   } finally {
@@ -326,6 +393,11 @@ function goOrders(): void {
 onMounted(() => {
   void loadDetail()
 })
+watch(() => auth.user?.userId, () => {
+  Object.keys(purchaseNotes).forEach(key => delete purchaseNotes[key])
+  void restorePurchases()
+})
+onUnmounted(() => { pageActive = false })
 </script>
 
 <template>
@@ -512,6 +584,7 @@ onMounted(() => {
             :voucher="voucher"
             mode="shop"
             :loading="receivingId === voucher.id"
+            :purchase-note="purchaseNotes[voucher.id]"
             @receive="receive(voucher)"
           />
         </div>

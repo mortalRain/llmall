@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.ConflictException;
 import com.llmall.common.exception.ForbiddenException;
+import com.llmall.common.exception.UnauthorizedException;
 import com.llmall.shop.domain.po.ShopStaff;
 import com.llmall.shop.domain.vo.MyShopStaffVO;
 import com.llmall.shop.domain.vo.ShopStaffVO;
@@ -74,6 +75,7 @@ class ShopStaffServiceImplTest {
         shopStaffService = new ShopStaffServiceImpl();
         // ServiceImpl 的 baseMapper 正常由 @Autowired 注入，单测里直接塞 mock
         ReflectionTestUtils.setField(shopStaffService, "baseMapper", shopStaffMapper);
+        org.mockito.Mockito.lenient().when(shopStaffMapper.lockShopForStaffChange(SHOP_ID)).thenReturn(SHOP_ID);
     }
 
     // ------------------------------------------------------------------
@@ -92,6 +94,26 @@ class ShopStaffServiceImplTest {
     void nullUserIdIsNotStaff() {
         assertThat(shopStaffService.isStaff(SHOP_ID, null)).isFalse();
         verifyNoInteractions(shopStaffMapper);
+    }
+
+    @Test
+    void missingManagementIdentityDoesNotAcquireDatabaseLocks() {
+        assertThatThrownBy(() -> shopStaffService.addStaff(null, OWNER_ID, STAFF_ID, "STAFF"))
+                .isInstanceOf(BadRequestException.class);
+        assertThatThrownBy(() -> shopStaffService.removeStaff(SHOP_ID, null, STAFF_ID))
+                .isInstanceOf(UnauthorizedException.class);
+        assertThatThrownBy(() -> shopStaffService.updateStaffRole(SHOP_ID, null, STAFF_ID, "STAFF"))
+                .isInstanceOf(UnauthorizedException.class);
+        verifyNoInteractions(shopStaffMapper);
+    }
+
+    @Test
+    void missingParentShopCannotManageOrReadTargetStaff() {
+        when(shopStaffMapper.lockShopForStaffChange(SHOP_ID)).thenReturn(null);
+        assertThatThrownBy(() -> shopStaffService.addStaff(SHOP_ID, OWNER_ID, STAFF_ID, "STAFF"))
+                .isInstanceOf(ForbiddenException.class);
+        verify(shopStaffMapper, never()).selectOne(any());
+        verify(shopStaffMapper, never()).insert(any(ShopStaff.class));
     }
 
     @Test
@@ -231,7 +253,7 @@ class ShopStaffServiceImplTest {
     void cannotRemoveLastOwner() {
         when(shopStaffMapper.selectOne(any()))
                 .thenReturn(staff(SHOP_ID, OWNER_ID, "OWNER"), staff(SHOP_ID, OWNER_ID, "OWNER"));
-        when(shopStaffMapper.selectCount(any())).thenReturn(1L);
+        when(shopStaffMapper.selectList(any())).thenReturn(List.of(staff(SHOP_ID, OWNER_ID, "OWNER")));
 
         assertThatThrownBy(() -> shopStaffService.removeStaff(SHOP_ID, OWNER_ID, OWNER_ID))
                 .isInstanceOf(ConflictException.class)
@@ -244,7 +266,7 @@ class ShopStaffServiceImplTest {
     void cannotDemoteLastOwner() {
         when(shopStaffMapper.selectOne(any()))
                 .thenReturn(staff(SHOP_ID, OWNER_ID, "OWNER"), staff(SHOP_ID, OWNER_ID, "OWNER"));
-        when(shopStaffMapper.selectCount(any())).thenReturn(1L);
+        when(shopStaffMapper.selectList(any())).thenReturn(List.of(staff(SHOP_ID, OWNER_ID, "OWNER")));
 
         assertThatThrownBy(() -> shopStaffService.updateStaffRole(SHOP_ID, OWNER_ID, OWNER_ID, "MANAGER"))
                 .isInstanceOf(ConflictException.class)
@@ -257,7 +279,8 @@ class ShopStaffServiceImplTest {
     void canDemoteOwnerWhenAnotherExists() {
         when(shopStaffMapper.selectOne(any()))
                 .thenReturn(staff(SHOP_ID, OWNER_ID, "OWNER"), staff(SHOP_ID, 4L, "OWNER"));
-        when(shopStaffMapper.selectCount(any())).thenReturn(2L);
+        when(shopStaffMapper.selectList(any())).thenReturn(List.of(
+                staff(SHOP_ID, OWNER_ID, "OWNER"), staff(SHOP_ID, 4L, "OWNER")));
         when(shopStaffMapper.updateById(any(ShopStaff.class))).thenReturn(1);
 
         shopStaffService.updateStaffRole(SHOP_ID, OWNER_ID, 4L, "MANAGER");
@@ -361,6 +384,7 @@ class ShopStaffServiceImplTest {
 
         assertThat(rows).extracting(ShopStaffVO::getRole)
                 .containsExactly("OWNER", "MANAGER", "STAFF");
+        verify(shopStaffMapper, never()).lockShopForStaffChange(anyLong());
     }
 
     private ShopStaff staff(Long shopId, Long userId, String role) {

@@ -11,6 +11,7 @@ const props = withDefaults(
     voucher: VoucherLike
     mode?: 'shop' | 'mine'
     loading?: boolean
+    purchaseNote?: string
   }>(),
   {
     mode: 'shop',
@@ -34,6 +35,7 @@ const ruleText = computed(() =>
 )
 const buttonLabel = computed(() => {
   if (isReceived.value) return '已领取'
+  if (props.purchaseNote) return '查看 / 继续购买'
   return isPaid.value ? `${formatPrice(payValue.value)} 购买` : '立即领取'
 })
 </script>
@@ -59,6 +61,7 @@ const buttonLabel = computed(() => {
         有效期至 {{ formatDate(expireTime) }}
       </p>
       <p v-else-if="isPaid" class="pay-note">售价 {{ formatPrice(payValue) }}，领取时需支付口令</p>
+      <p v-if="purchaseNote" class="purchase-note" role="status">{{ purchaseNote }}</p>
     </div>
 
     <div class="voucher-action">
@@ -199,6 +202,13 @@ h4 {
   line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.purchase-note {
+  margin: 5px 0 0;
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .expire {

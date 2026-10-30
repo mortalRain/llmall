@@ -16,6 +16,8 @@ import org.apache.ibatis.annotations.Options;
  * @since 2023-05-16
  */
 public interface PayOrderMapper extends BaseMapper<PayOrder> {
+    @org.apache.ibatis.annotations.Select("SELECT * FROM pay_order WHERE id=#{id} FOR UPDATE")
+    PayOrder lockById(@org.apache.ibatis.annotations.Param("id") Long id);
 
     /**
      * 建单或取回已存在的支付单：一条 {@code INSERT ... ON DUPLICATE KEY UPDATE} 完成"查重 + 插入"。
@@ -27,7 +29,7 @@ public interface PayOrderMapper extends BaseMapper<PayOrder> {
      *
      * 【重复时为什么不改已有行】{@code ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)} 把 id 赋成它自己，
      * MySQL 认为"行没有变化"，因此不会改写金额/状态/渠道，也不会触发 update_time 的 ON UPDATE ——
-     * "已存在则复用/重置"的判定仍然留在 Java 侧（终端态报错、渠道不同才重置），SQL 只负责不重复插入。
+     * "已存在则复用/拒绝"的判定仍然留在 Java 侧，禁止重置处理中或终态支付单，SQL只负责不重复插入。
      *
      * 【主键怎么回填】入参对象的 id 由调用方用 IdWorker 预生成：
      *   - 新插入：驱动回填的就是这个预生成 id；

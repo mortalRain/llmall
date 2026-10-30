@@ -3,9 +3,7 @@ package com.llmall.shop.domain.bo;
 /**
  * 门店缓存重建的原因。
  *
- * 【为什么需要区分】旧实现用一个布尔量表达"查库前是否读到过缓存值"，把两种语义混在了一起：
- * 逻辑过期路径天然读到过缓存，却被当成"缓存刚被删除"，于是重建结果不回填，逻辑过期机制实际失效。
- * 这里把原因显式化，只有 EVICT_RACE 才需要放弃回填。
+ * 仅用于诊断；是否可回填由Redis原子比较锁token决定，不根据原因推断权限。
  */
 public enum RebuildReason {
 
@@ -13,8 +11,5 @@ public enum RebuildReason {
     COLD_MISS,
 
     /** 命中但逻辑过期：必须回填新值，否则缓存永远不会被刷新 */
-    LOGICAL_EXPIRE,
-
-    /** 重建期间缓存被并发删除：本次查到的可能是旧值，放弃回填，交给下一次读重建 */
-    EVICT_RACE
+    LOGICAL_EXPIRE
 }

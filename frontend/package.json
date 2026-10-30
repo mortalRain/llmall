@@ -9,6 +9,7 @@
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc -b",
+    "test:unit": "node --test tests/*.test.mjs",
     "test:e2e": "playwright test",
     "test:mobile": "node scripts/mobile-smoke.mjs"
   },

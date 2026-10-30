@@ -76,10 +76,10 @@ public class FollowController {
     }
 
     /**
-     * 我的 Feed 流 v2：收件箱（推）与大V 作者近若干条（拉）归并后分页。
+     * 我的 Feed 流 v2：收件箱（推）与大V 补拉按笔记发布时间/id归并。
      *
-     * 【游标】首页 li / ct / ci 都不传；后续页回传上一页的 nextLi / nextCt / nextCi。
-     * ct 与 ci 必须成对使用，只用发布时间会在同一秒内重行。
+     * 首页不传游标，后续成对回传nextCt/nextCi；用hasMore判断是否继续。
+     * li/ai仅兼容旧参数，不能单独用于翻页。
      * 【与 /feed 的关系】/feed 保持纯推语义不变，v2 是新增能力，两者不改变对方口径。
      */
     @Operation(summary = "我的 Feed 流 v2（推拉结合：收件箱 + 大V 补拉合并，复合游标）")

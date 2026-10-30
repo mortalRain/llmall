@@ -1,6 +1,7 @@
 package com.llmall.shop.service.impl;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper;
 import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.BizIllegalException;
 import com.llmall.common.exception.ConflictException;
@@ -104,7 +105,7 @@ public class ShopStaffServiceImpl extends ServiceImpl<ShopStaffMapper, ShopStaff
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void addStaff(Long shopId, Long operatorId, Long targetUserId, String role) {
-        ShopStaff operator = requireManagerOrOwner(shopId, operatorId);
+        ShopStaff operator = requireManagerOrOwner(shopId, operatorId, true);
         if (targetUserId == null) {
             throw new BadRequestException("userId 不能为空");
         }
@@ -113,7 +114,7 @@ public class ShopStaffServiceImpl extends ServiceImpl<ShopStaffMapper, ShopStaff
             // 店长可以管员工，但不能"造一个和自己平级甚至更高"的店主；否则店长可自我提权
             throw new ForbiddenException("只有店主可以授予店主");
         }
-        if (findRow(shopId, targetUserId) != null) {
+        if (findRow(shopId, targetUserId, true) != null) {
             throw new ConflictException("该用户已是本店员工");
         }
 
@@ -134,7 +135,7 @@ public class ShopStaffServiceImpl extends ServiceImpl<ShopStaffMapper, ShopStaff
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void updateStaffRole(Long shopId, Long operatorId, Long targetUserId, String role) {
-        ShopStaff operator = requireManagerOrOwner(shopId, operatorId);
+        ShopStaff operator = requireManagerOrOwner(shopId, operatorId, true);
         ShopStaff target = requireTarget(shopId, targetUserId);
         ShopStaffRole newRole = ShopStaffRole.require(role);
         ShopStaffRole oldRole = storedRole(target);
@@ -158,7 +159,7 @@ public class ShopStaffServiceImpl extends ServiceImpl<ShopStaffMapper, ShopStaff
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void removeStaff(Long shopId, Long operatorId, Long targetUserId) {
-        ShopStaff operator = requireManagerOrOwner(shopId, operatorId);
+        ShopStaff operator = requireManagerOrOwner(shopId, operatorId, true);
         ShopStaff target = requireTarget(shopId, targetUserId);
         ShopStaffRole targetRole = storedRole(target);
 
@@ -182,13 +183,21 @@ public class ShopStaffServiceImpl extends ServiceImpl<ShopStaffMapper, ShopStaff
      * 绝不允许"角色字段不认识就当店长"。
      */
     private ShopStaff requireManagerOrOwner(Long shopId, Long operatorId) {
+        return requireManagerOrOwner(shopId, operatorId, false);
+    }
+
+    private ShopStaff requireManagerOrOwner(Long shopId, Long operatorId, boolean forUpdate) {
         if (shopId == null) {
             throw new BadRequestException("shopId 不能为空");
         }
         if (operatorId == null) {
             throw new UnauthorizedException("未登录");
         }
-        ShopStaff operator = findRow(shopId, operatorId);
+        // 同店写操作共用父行锁。等锁后必须当前读，不能复用外层RR事务的旧权限快照。
+        if (forUpdate && baseMapper.lockShopForStaffChange(shopId) == null) {
+            throw new ForbiddenException("仅本店店主/店长可管理员工");
+        }
+        ShopStaff operator = findRow(shopId, operatorId, forUpdate);
         if (operator == null || !storedRole(operator).canManageStaff()) {
             throw new ForbiddenException("仅本店店主/店长可管理员工");
         }
@@ -199,26 +208,30 @@ public class ShopStaffServiceImpl extends ServiceImpl<ShopStaffMapper, ShopStaff
         if (targetUserId == null) {
             throw new BadRequestException("userId 不能为空");
         }
-        ShopStaff target = findRow(shopId, targetUserId);
+        ShopStaff target = findRow(shopId, targetUserId, true);
         if (target == null) {
             throw new BizIllegalException("该用户不是本店员工");
         }
         return target;
     }
 
-    private ShopStaff findRow(Long shopId, Long userId) {
-        return lambdaQuery()
+    private ShopStaff findRow(Long shopId, Long userId, boolean forUpdate) {
+        LambdaQueryChainWrapper<ShopStaff> query = lambdaQuery()
                 .eq(ShopStaff::getShopId, shopId)
-                .eq(ShopStaff::getUserId, userId)
-                .one();
+                .eq(ShopStaff::getUserId, userId);
+        if (forUpdate) {
+            query.last("FOR UPDATE");
+        }
+        return query.one();
     }
 
     private long countOwners(Long shopId) {
-        Long owners = lambdaQuery()
+        // 锁定当前OWNER行而非快照COUNT；只读主键，避免加载无关字段。
+        return lambdaQuery().select(ShopStaff::getId)
                 .eq(ShopStaff::getShopId, shopId)
                 .eq(ShopStaff::getRole, ShopStaffRole.OWNER.name())
-                .count();
-        return owners == null ? 0L : owners;
+                .last("FOR UPDATE")
+                .list().size();
     }
 
     /** 已落库角色：未知值按 STAFF 处理（无管理权，fail-closed），并把脏数据留在日志里 */

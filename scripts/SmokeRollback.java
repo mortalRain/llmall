@@ -13,46 +13,20 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 冒烟数据回滚工具：按一份"冒烟前水位线"文件，把冒烟跑完留下的新增行删掉，
- * 并把被冒烟改写的统计列复原，最后输出复核报告。
- *
- * 三种模式：
- *   capture  冒烟开跑前取水位线（每张表的 MAX(id) 与行数）并快照被改写的统计列，落成一份 JSON
- *   rollback 读这份 JSON：DELETE 水位线以上的行 + UPDATE 复原统计列，随后自动跑一遍复核
- *   verify   只做复核，不写库：水位线以上必须 0 行，统计列必须与快照逐值相等
- *
- * 为什么水位线管删除、快照管更新，两者不能互相替代：
- *   冒烟写进库里的东西分两类 —— 一类是纯新增（订单、流水、评价），只能靠"删掉本次新长出来的行"回到
- *   冒烟前的行集合，而这只有在事前记下自增 id 的上界才说得清"哪些是本次长的"；
- *   另一类是就地累加（余额、积分、库存、门店热度），行的 id 没变、只是列值被改写，
- *   删行既删不掉它也不会自己变回去，只能按事前快照写回原值。
- *
- * 连接串带 useAffectedRows=true：只认"真正发生变化的行数"。于是同一份水位数回滚第二遍时
- * UPDATE 命中 0 行，这正是幂等性的判据；不带这个参数则返回的是匹配行数，第二遍会报 1，看起来像没回滚干净。
- *
- * 用法：
- *   java -cp &lt;mysql-connector.jar&gt; SmokeRollback.java capture  主机 用户 口令 水位线文件 [选项]
- *   java -cp &lt;mysql-connector.jar&gt; SmokeRollback.java rollback 主机 用户 口令 水位线文件 [选项]
- *   java -cp &lt;mysql-connector.jar&gt; SmokeRollback.java verify   主机 用户 口令 水位线文件 [选项]
- *
- * 选项：
- *   --user-name 用户名      冒烟账号的用户名，默认 Jack（MallE2E 硬编码的演示账号）
- *   --user-id   用户 id     冒烟账号在 user_info 里的 user_id，默认 1
- *   --items     id 列表     冒烟会动到的商品 id，逗号分隔，默认 900013,900014,900015,900021
- *   --shop      id          冒烟会写评价的门店 id，默认 1
- *   --report    文件        把复核报告另存为 Markdown
- *
- * 退出码：0 = 全部通过；1 = 复核不通过；2 = 参数或连接错误。
+ * 冒烟数据只读快照与核对工具，保留旧类名及 smoke-watermark/1 文件兼容。
+ * capture 记录部分表的行数、最大 id 和选定列；verify 报告与快照的差异。
+ * 这些比较不能证明全域一致性，也不能识别哪些数据属于某次测试。
+ * rollback 已停用：按 id 上界删除、覆盖余额和库存不能安全恢复业务状态。
+ * 用法：java -cp <mysql-connector.jar> SmokeRollback.java capture|verify 主机 用户 口令 快照文件 [选项]
+ * 选项：--user-name --user-id --items --shop --extra-tables --report
+ * 退出码：0=核对通过或快照完成；1=核对有差异；2=参数、连接错误或旧回滚入口被拒绝。
+ * 操作说明：docs/test-data-safety.md。连接使用只读模式，建议另配 SELECT 专用数据库账号。
  */
 public class SmokeRollback {
 
-    /** 水位线文件里 format 字段的值，用来挡住"拿错文件"这种误用。 */
     static final String FORMAT = "smoke-watermark/1";
 
-    /**
-     * 冒烟会追加行、且删除全部水位线以上记录即可复原的 12 张表。
-     * 与 demo.ps1 里 -NoCleanup 分支记录的那份清单同源（都是 MallE2E 的写路径覆盖到的表）。
-     */
+    /** 只读采集的业务表，不代表完整业务影响集。 */
     static final String[] PRIMARY_TABLES = {
             "llmall-cart.cart",
             "llmall-trade.order",
@@ -68,11 +42,7 @@ public class SmokeRollback {
             "llmall-search.search_history"
     };
 
-    /**
-     * 冒烟的业务表之外还会长出两类派生行：消费幂等占位（consume_record）与本地消息表（message_log）。
-     * 它们不影响业务含义，但留着就会让"库里比冒烟前多了几行"这件事说不清，所以一并按水位线清掉。
-     * 单独分一组是因为复核报告要把它们与 12 张业务表分开陈述，免得把"派生行"混进"业务行数"的口径里。
-     */
+    /** 消费幂等记录与消息日志也是业务证据，只做读取。 */
     static final String[] DERIVED_TABLES = {
             "llmall-shop.consume_record",
             "llmall-search.consume_record",
@@ -86,10 +56,14 @@ public class SmokeRollback {
     static final String DEFAULT_ITEMS = "900013,900014,900015,900021";
     static final long DEFAULT_SHOP_ID = 1L;
 
-    static final Map<String, String> COLUMN_TYPES = new LinkedHashMap<>();
     static final List<String> REPORT = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
+        // 在解析凭据、读取快照或连接 JDBC 前拒绝旧回滚命令。
+        if (args.length > 0 && "rollback".equals(args[0])) {
+            System.err.println("CLEANUP_DISABLED: rollback is retired; see docs/test-data-safety.md");
+            System.exit(2);
+        }
         String host = null, user = null, pw = null, file = null, mode = null;
         String userName = DEFAULT_USER_NAME;
         long userId = DEFAULT_USER_ID;
@@ -131,7 +105,7 @@ public class SmokeRollback {
             usage(null);
         }
 
-        if (!"capture".equals(mode) && !"rollback".equals(mode) && !"verify".equals(mode)) {
+        if (!"capture".equals(mode) && !"verify".equals(mode)) {
             usage("未知模式 " + mode);
         }
 
@@ -144,10 +118,10 @@ public class SmokeRollback {
 
         int exit = 0;
         try (Connection c = DriverManager.getConnection(url, user, pw)) {
+            c.setReadOnly(true);
             if ("capture".equals(mode)) {
                 capture(c, host, userName, userId, itemsArg, shopId, extraArg, file);
-            } else if ("rollback".equals(mode)) {
-                rollback(c, host, file);
+
             } else {
                 boolean ok = verify(c, host, file);
                 if (!ok) {
@@ -164,7 +138,7 @@ public class SmokeRollback {
         }
         if (reportPath != null && !REPORT.isEmpty()) {
             List<String> title = new ArrayList<>();
-            title.add("# 冒烟数据回滚报告");
+            title.add("# 冒烟数据只读核对报告");
             title.add("");
             title.addAll(REPORT);
             Files.write(Paths.get(reportPath), title, StandardCharsets.UTF_8);
@@ -180,7 +154,7 @@ public class SmokeRollback {
         }
         System.out.println("用法：");
         System.out.println("  java -cp <mysql-connector.jar> SmokeRollback.java capture  主机 用户 口令 水位线文件 [选项]");
-        System.out.println("  java -cp <mysql-connector.jar> SmokeRollback.java rollback 主机 用户 口令 水位线文件 [选项]");
+        System.out.println("rollback 已停用；参见 docs/test-data-safety.md");
         System.out.println("  java -cp <mysql-connector.jar> SmokeRollback.java verify   主机 用户 口令 水位线文件 [选项]");
         System.out.println("选项：--user-name --user-id --items --shop --extra-tables --report");
         System.exit(2);
@@ -194,7 +168,7 @@ public class SmokeRollback {
         doc.put("format", FORMAT);
         doc.put("createdAt", now());
         doc.put("host", host);
-        doc.put("note", "冒烟开跑前的水位线与统计列快照；rollback 只删 id 大于这里的行、只把这些列写回这里的值");
+        doc.put("note", "只读采集的部分表与列快照；仅用于比较，不可用作完整业务回滚凭据");
 
         Map<String, Object> tables = new LinkedHashMap<>();
         for (String t : PRIMARY_TABLES) {
@@ -211,7 +185,7 @@ public class SmokeRollback {
         doc.put("derivedTables", derived);
 
         // 额外表（例如压测专用账号所在的 llmall-user.user / user_info / address）：
-        // 这些表不在冒烟固定清单里，但"造出来的行"同样要能被同一份水位线清掉。
+        // 额外表仅参与只读快照与比较。
         Map<String, Object> extra = new LinkedHashMap<>();
         if (extraArg != null && !extraArg.trim().isEmpty()) {
             for (String t : extraArg.split(",")) {
@@ -258,96 +232,10 @@ public class SmokeRollback {
         }
     }
 
-    // rollback：删行 + 复原统计列 + 自检
-
+    /** 保留旧方法签名，但任何直接调用同样拒绝，且不访问连接或文件。 */
     static void rollback(Connection c, String host, String file) throws Exception {
-        Path p = Paths.get(file);
-        if (!Files.exists(p)) {
-            System.out.println("水位线文件不存在：" + file);
-            System.exit(2);
-        }
-        @SuppressWarnings("unchecked")
-        Map<String, Object> doc = (Map<String, Object>) new Json(new String(
-                Files.readAllBytes(p), StandardCharsets.UTF_8)).parseRoot();
-        checkFormat(doc);
-        String docHost = str(doc.get("host"));
-        if (docHost != null && !docHost.isEmpty() && !docHost.equals(host)) {
-            System.out.println("水位线文件记录的库主机是 " + docHost + "，而本次连的是 " + host + " —— 停下。");
-            System.exit(2);
-        }
-
-        REPORT.add("### 删除：水位线以上的新增行");
-        REPORT.add("");
-        REPORT.add("| 表 | 水位线 id | 本次删除 |");
-        REPORT.add("|---|---|---|");
-        long totalDeleted = 0;
-
-        Map<String, Object> all = new LinkedHashMap<>();
-        Map<String, Object> tables = map(doc.get("tables"));
-        Map<String, Object> derived = map(doc.get("derivedTables"));
-        all.putAll(tables);
-        all.putAll(derived);
-        all.putAll(map(doc.get("extraTables")));
-
-        c.setAutoCommit(false);
-        try {
-            for (Map.Entry<String, Object> e : all.entrySet()) {
-                String[] st = split(e.getKey().split(":")[0]);
-                if (!tableExists(c, e.getKey().split(":")[0])) {
-                    REPORT.add("| " + e.getKey() + " | - | 跳过（表不存在） |");
-                    continue;
-                }
-                Map<String, Object> w = map(e.getValue());
-                long maxId = num(w.get("maxId"));
-                long n = deleteAbove(c, st[0], st[1], keyColumnOf(w), maxId);
-                totalDeleted += n;
-                REPORT.add("| " + e.getKey() + " | " + maxId + " | " + n + " |");
-            }
-
-            REPORT.add("");
-            REPORT.add("### 更新：复原被冒烟改写的统计列");
-            REPORT.add("");
-            REPORT.add("| 行 | 列 | 写回值 | 实际变化行数 |");
-            REPORT.add("|---|---|---|---|");
-            long totalUpdated = 0;
-            Map<String, List<String>> wantCols = new LinkedHashMap<>();
-            for (Object o : list(doc.get("snapshots"))) {
-                Map<String, Object> snap = map(o);
-                String k = str(snap.get("db")) + "." + str(snap.get("table"));
-                List<String> cols = wantCols.computeIfAbsent(k, x -> new ArrayList<>());
-                cols.addAll(map(snap.get("values")).keySet());
-            }
-            for (Map.Entry<String, List<String>> e : wantCols.entrySet()) {
-                String[] st = split(e.getKey().split(":")[0]);
-                loadColumnTypes(c, st[0], st[1], e.getValue());
-            }
-            for (Object o : list(doc.get("snapshots"))) {
-                Map<String, Object> snap = map(o);
-                Object[] r = restore(c, snap);
-                totalUpdated += (Long) r[1];
-                REPORT.add("| " + r[0] + " | " + r[2] + " | " + r[3] + " | " + r[1] + " |");
-            }
-            c.commit();
-            REPORT.add("");
-            REPORT.add("合计：删除 " + totalDeleted + " 行，更新 " + totalUpdated + " 行（更新数按真实变化的行计）。");
-        } catch (Exception ex) {
-            c.rollback();
-            System.out.println("回滚执行失败，已整体回滚：" + ex.getMessage());
-            System.exit(1);
-        } finally {
-            c.setAutoCommit(true);
-        }
-
-        REPORT.add("");
-        boolean ok = verify(c, host, file);
-        REPORT.add("");
-        REPORT.add(ok ? "结论：复核通过（水位线以上 0 行，统计列与快照逐值相等）"
-                : "结论：复核不通过，见上方 FAIL 行");
-        if (!ok) {
-            System.exit(1);
-        }
+        throw new UnsupportedOperationException("CLEANUP_DISABLED: see docs/test-data-safety.md");
     }
-
     // verify：只读复核
 
     static boolean verify(Connection c, String host, String file) throws Exception {
@@ -512,43 +400,6 @@ public class SmokeRollback {
         return out;
     }
 
-    static Object[] restore(Connection c, Map<String, Object> snap) throws SQLException {
-        String db = str(snap.get("db"));
-        String tb = str(snap.get("table"));
-        String where = str(snap.get("where"));
-        Map<String, Object> values = map(snap.get("values"));
-        StringBuilder set = new StringBuilder();
-        List<String> cols = new ArrayList<>();
-        for (Map.Entry<String, Object> e : values.entrySet()) {
-            String col = e.getKey();
-            cols.add(col);
-            String lit = literal(db, tb, col, e.getValue() == null ? null : str(e.getValue()));
-            if (set.length() > 0) {
-                set.append(", ");
-            }
-            set.append(quote(col)).append(" = ").append(lit);
-        }
-        String sql = "UPDATE " + quote(db) + "." + quote(tb) + " SET " + set + " WHERE " + where;
-        int n;
-        try (Statement s = c.createStatement()) {
-            n = s.executeUpdate(sql);
-        }
-        StringBuilder shown = new StringBuilder();
-        for (String col : cols) {
-            if (shown.length() > 0) {
-                shown.append(", ");
-            }
-            shown.append(col).append('=').append(values.get(col) == null ? "NULL" : values.get(col));
-        }
-        return new Object[]{db + "." + tb + " " + where, (long) n, cols.size() + " 列", shown.toString()};
-    }
-
-    static long deleteAbove(Connection c, String db, String tb, String key, long maxId) throws SQLException {
-        try (Statement s = c.createStatement()) {
-            return s.executeUpdate("DELETE FROM " + quote(db) + "." + quote(tb) + " WHERE " + quote(key) + " > " + maxId);
-        }
-    }
-
     static long count(Connection c, String db, String tb, String where) throws SQLException {
         String sql = "SELECT COUNT(*) FROM " + quote(db) + "." + quote(tb)
                 + (where == null ? "" : " WHERE " + where);
@@ -566,46 +417,6 @@ public class SmokeRollback {
             rs.next();
             return rs.getLong(1) > 0;
         }
-    }
-
-    static boolean isNumeric(String db, String tb, String col) throws SQLException {
-        String key = db + "." + tb + "." + col;
-        String type = COLUMN_TYPES.get(key);
-        if (type == null) {
-            throw new SQLException("取不到列类型：" + key);
-        }
-        return type.matches("(?i)(tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|float|double|real|bit|year)");
-    }
-
-    static void loadColumnTypes(Connection c, String db, String tb, List<String> cols) throws SQLException {
-        StringBuilder in = new StringBuilder();
-        for (String col : cols) {
-            if (in.length() > 0) {
-                in.append(',');
-            }
-            in.append('\'').append(col).append('\'');
-        }
-        String sql = "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '"
-                + db + "' AND TABLE_NAME = '" + tb + "' AND COLUMN_NAME IN (" + in + ")";
-        try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery(sql)) {
-            while (rs.next()) {
-                COLUMN_TYPES.put(db + "." + tb + "." + rs.getString(1), rs.getString(2));
-            }
-        }
-    }
-
-    static String literal(String db, String tb, String col, String value) throws SQLException {
-        String key = db + "." + tb + "." + col;
-        if (!COLUMN_TYPES.containsKey(key)) {
-            throw new SQLException("未知列类型：" + key + "（快照里的库表列与当前库对不上）");
-        }
-        if (value == null) {
-            return "NULL";
-        }
-        if (isNumeric(db, tb, col)) {
-            return value;
-        }
-        return "'" + value.replace("'", "''") + "'";
     }
 
     static String now() {

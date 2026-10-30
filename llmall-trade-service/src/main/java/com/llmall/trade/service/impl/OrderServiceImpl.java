@@ -1,6 +1,5 @@
 package com.llmall.trade.service.impl;
 
-import cn.hutool.core.util.StrUtil;
 import cn.hutool.crypto.digest.DigestUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
@@ -38,6 +37,7 @@ import com.llmall.trade.service.IOrderDetailService;
 import com.llmall.common.mq.IMessageLogService;
 import com.llmall.trade.domain.po.MessageLog;
 import com.llmall.trade.service.IOrderService;
+import com.llmall.trade.support.OrderInputPolicy;
 import io.seata.spring.annotation.GlobalTransactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -110,16 +110,17 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     @GlobalTransactional(name = "llmall-create-order", rollbackFor = Exception.class)
     public Long createOrder(OrderFormDTO orderFormDTO) {
         Long userId = requireLogin();
-        String clientToken = orderFormDTO == null ? null : StrUtil.trimToNull(orderFormDTO.getClientToken());
+        OrderFormDTO request = OrderInputPolicy.copyAndValidate(orderFormDTO);
+        String clientToken = request.getClientToken();
         // 幂等回放：同一用户同一令牌已经下过单，直接返回原订单，不再重复扣库存/锁券
         if (clientToken != null) {
             Order exist = findByIdempotencyKey(userId, clientToken);
             if (exist != null) {
-                return replayOrder(exist, orderFormDTO);
+                return replayOrder(exist, request);
             }
         }
         try {
-            return transactionTemplate.execute(status -> doCreateOrder(orderFormDTO, clientToken));
+            return transactionTemplate.execute(status -> doCreateOrder(request, clientToken));
         } catch (DuplicateKeyException e) {
             // 并发提交同一令牌：唯一键 uk_user_token 裁决，输的一方回查并回放
             if (clientToken == null) {
@@ -129,7 +130,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
             if (exist == null) {
                 throw e;
             }
-            return replayOrder(exist, orderFormDTO);
+            return replayOrder(exist, request);
         }
     }
 
@@ -140,38 +141,14 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
      * REPEATABLE READ 下，同一事务内的快照早于并发提交，捕获唯一键冲突后再查可能查不到那一行。
      */
     private Long doCreateOrder(OrderFormDTO orderFormDTO, String clientToken) {
-        // num 必须在 1~99：num<=0 会让扣库存 SQL 退化成加库存、总价算成负数，落库即脏数据
         List<OrderDetailDTO> detailDTOS = orderFormDTO.getDetails();
-        if (CollUtils.isEmpty(detailDTOS)) {
-            throw new BadRequestException("下单商品不能为空");
-        }
-        for (OrderDetailDTO detail : detailDTOS) {
-            if (detail == null || detail.getNum() == null || detail.getNum() <= 0) {
-                throw new BadRequestException("购买数量必须大于 0");
-            }
-            if (detail.getNum() > 99) {
-                throw new BadRequestException("单个商品一次最多购买 99 件");
-            }
-        }
-        if (orderFormDTO.getPaymentType() == null) {
-            throw new BadRequestException("支付方式不能为空");
-        }
-
         Map<Long, Integer> itemNumMap = detailDTOS.stream()
-                .collect(Collectors.toMap(OrderDetailDTO::getItemId, OrderDetailDTO::getNum, (a, b) -> a));
+                .collect(Collectors.toMap(OrderDetailDTO::getItemId, OrderDetailDTO::getNum));
         Set<Long> itemIds = itemNumMap.keySet();
-
         List<ItemDTO> items = itemClient.queryItemByIds(itemIds);
-        if (items == null || items.size() < itemIds.size()) {
-            throw new BadRequestException("商品不存在");
-        }
+        int total = OrderInputPolicy.calculateTotal(items, itemNumMap);
 
-        int total = 0;
-        for (ItemDTO item : items) {
-            total += item.getPrice() * itemNumMap.getOrDefault(item.getId(), 0);
-        }
-
-        // 订单类型 1 实物 / 2 团购券（本地生活场景套餐挂在门店下）；门店取第一件商品所属门店
+        // 已校验所有商品同门店、同履约类型，第一件商品即可代表订单归属。
         Order order = new Order();
         order.setTotalFee(total);
         order.setPaymentType(orderFormDTO.getPaymentType());
@@ -185,12 +162,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 ? ORDER_TYPE_VOUCHER : ORDER_TYPE_PHYSICAL);
 
         // 券抵扣必须在落库之前算完：total_fee 落库即用户实付，支付侧只做"金额相等"校验（单位：分）
-        // max(0, ...) 保证券面额大于订单金额时 total_fee 不为负；voucher_id 记录本单用了哪张券实例，是取消/退款退券的唯一线索
         Long userVoucherId = orderFormDTO.getUserVoucherId();
         if (userVoucherId != null) {
             UserVoucherDTO voucher = queryUsableVoucher(userVoucherId, firstItem.getShopId());
-            int discount = voucher.getActualValue() == null ? 0 : voucher.getActualValue().intValue();
-            order.setTotalFee(Math.max(0, total - discount));
+            order.setTotalFee(OrderInputPolicy.payable(total, voucher.getActualValue()));
             order.setVoucherId(userVoucherId);
         }
         save(order);
@@ -359,26 +334,39 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public void cancelOrder(Long orderId) {
-        Order exist = getById(orderId);
-        if (exist == null) {
-            throw new BadRequestException("订单不存在");
-        }
-        // 幂等：只有 status=1 能被关闭（已核销被状态条件排除），affected rows=0 时直接早返回；下面的断言再钉死"核销后不得取消"
-        assertNotVerified(exist, "取消");
-        boolean closed = lambdaUpdate()
-                .eq(Order::getId, orderId)
-                .eq(Order::getStatus, Order.STATUS_UNPAID)
-                .set(Order::getStatus, Order.STATUS_CANCELED)
-                .set(Order::getCloseTime, LocalDateTime.now())
-                .update();
-        if (!closed) {
-            log.info("订单已支付或已关闭，无需取消: orderId={}", orderId);
+        Order order = getById(orderId);
+        if (order == null) throw new BadRequestException("订单不存在");
+        if (Integer.valueOf(Order.STATUS_CANCELED).equals(order.getStatus())) return;
+        if (Integer.valueOf(Order.STATUS_CANCELING).equals(order.getStatus())) {
+            recoverCompensation(orderId);
             return;
         }
-        recoverStock(exist);
-        refundVoucherQuietly(exist, "订单取消");
+        if (!Integer.valueOf(Order.STATUS_UNPAID).equals(order.getStatus())) {
+            throw new BizIllegalException("订单已支付或状态不允许取消");
+        }
+        com.llmall.api.dto.TradeOrderDTO snapshot = new com.llmall.api.dto.TradeOrderDTO();
+        snapshot.setId(orderId);
+        snapshot.setUserId(order.getUserId());
+        snapshot.setTotalFee(order.getTotalFee());
+        com.llmall.api.dto.PayOrderStatusDTO closed = payClient.closeUnpaid(snapshot);
+        if (closed == null || !closed.isDetermined() || !Integer.valueOf(2).equals(closed.getPayStatus())) {
+            throw new BizIllegalException("支付处理中或已完成，暂不能取消订单");
+        }
+        boolean accepted = localTransition(orderId, Order.STATUS_UNPAID, Order.STATUS_CANCELING);
+        if (!accepted) throw new BizIllegalException("订单状态已变更，请刷新后重试");
+        try { recoverCompensation(orderId); }
+        catch (RuntimeException | AssertionError e) { log.error("取消已受理，补偿任务将继续恢复: orderId={}", orderId, e); }
+    }
+
+    private boolean localTransition(Long orderId, int from, int to) {
+        org.springframework.transaction.support.TransactionTemplate tx =
+                new org.springframework.transaction.support.TransactionTemplate(transactionTemplate.getTransactionManager());
+        tx.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        return Boolean.TRUE.equals(tx.execute(status -> lambdaUpdate().eq(Order::getId, orderId)
+                .eq(Order::getStatus, from).set(Order::getStatus, to)
+                .set(Order::getUpdateTime, LocalDateTime.now())
+                .set(to == Order.STATUS_CANCELED, Order::getCloseTime, LocalDateTime.now()).update()));
     }
 
     /** 断言订单未被核销：把"核销后不得取消/退款"这条业务不变量写成硬约束，供所有会动到钱或券的路径入口复用 */
@@ -386,10 +374,6 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         if (order.getVerifyTime() != null || (order.getStatus() != null && order.getStatus() == Order.STATUS_VERIFIED)) {
             throw new BizIllegalException("订单已核销，不允许" + action);
         }
-    }
-
-    private void recoverStock(Order order) {
-        recoverStock(order, MqConstants.BIZ_ORDER_CANCELED);
     }
 
     /**
@@ -603,84 +587,50 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
     }
 
-    /**
-     * 已支付订单退款（用户发起）：order 表没有退款专用字段且不允许加列，故复用 status 2 → 5 + close_time 表示"退款关闭"，与"未付款取消"共用 5 是有意的（资金视角同为终态）。
-     * 代价是"是否退过款"须结合 pay_time 判断，因此本方法的幂等不依赖状态语义而依赖条件更新：第二次调用 affected rows = 0，不会重复退钱。
-     * 顺序：条件更新关单（唯一并发闸门）→ 退余额 → 回滚库存 → 退券 → 关支付单；退余额失败必须把订单改回 2 并抛错，绝不允许"订单关了、钱没退"；
-     * 后面几步失败只记日志（钱已退给用户，不可回滚）。
-     */
+    /** 先持久化 2→9 拒绝核销；余额、库存、券和支付账本全部确认后再 9→5。 */
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public void refundMyOrder(Long orderId) {
-        Long userId = requireLogin();
         Order order = getById(orderId);
-        if (order == null) {
-            throw new BadRequestException("订单不存在");
+        if (order == null) throw new BadRequestException("订单不存在");
+        if (!Objects.equals(requireLogin(), order.getUserId())) throw new ForbiddenException("无权操作他人订单");
+        if (Integer.valueOf(Order.STATUS_REFUNDING).equals(order.getStatus())) {
+            recoverCompensation(orderId);
+            return;
         }
-        if (!userId.equals(order.getUserId())) {
-            throw new ForbiddenException("无权操作他人订单");
-        }
-        if (order.getStatus() == null || order.getStatus() != Order.STATUS_PAID) {
-            if (order.getStatus() != null && order.getStatus() == Order.STATUS_UNPAID) {
-                throw new BizIllegalException("订单尚未支付，无法退款（未支付订单请直接取消）");
-            }
-            if (order.getStatus() != null && order.getStatus() == Order.STATUS_VERIFIED) {
-                throw new BizIllegalException("订单已核销，无法退款");
-            }
-            throw new BizIllegalException("订单已关闭或状态不允许退款");
-        }
-        // 双保险：状态为 2 但已有核销时间说明数据不一致，宁可拒绝
         assertNotVerified(order, "退款");
-
-        // 并发闸门：条件更新 2 → 5；affected rows = 0 即"已被别的请求退过/已核销"，这是本方法唯一的幂等保证
-        boolean closed = lambdaUpdate()
-                .eq(Order::getId, orderId)
-                .eq(Order::getStatus, Order.STATUS_PAID)
-                .set(Order::getStatus, Order.STATUS_CANCELED)
-                .set(Order::getCloseTime, LocalDateTime.now())
-                .update();
-        if (!closed) {
-            throw new BizIllegalException("订单状态已变更，退款失败（可能已退款或已核销）");
+        if (!localTransition(orderId, Order.STATUS_PAID, Order.STATUS_REFUNDING)) {
+            throw new BizIllegalException("订单状态不允许退款");
         }
-
-        // 退余额：幂等键按订单维度取（ORDER_REFUND:{orderId}），同一订单并发/人工重试时下游只入账一次；
-        // 失败必须补偿回 status=2 —— "订单关了钱没退"是绝不能接受的中间态
-        try {
-            userClient.refundMoney(order.getUserId(), order.getTotalFee(), "ORDER_REFUND:" + orderId);
-        } catch (Exception e) {
-            log.error("退款失败：余额退回失败，回滚订单状态: orderId={}, userId={}, amount={}",
-                    orderId, order.getUserId(), order.getTotalFee(), e);
-            // Feign 调用没有事务可回滚，只能自己把订单改回去；close_time 用 set 显式置 null，否则会残留"已关闭时间"
-            boolean compensated = lambdaUpdate()
-                    .eq(Order::getId, orderId)
-                    .eq(Order::getStatus, Order.STATUS_CANCELED)
-                    .set(Order::getStatus, Order.STATUS_PAID)
-                    .set(Order::getCloseTime, null)
-                    .update();
-            if (!compensated) {
-                log.error("【需人工介入】退款失败且订单状态回滚失败: orderId={}, userId={}, amount={}",
-                        orderId, order.getUserId(), order.getTotalFee());
-            }
-            throw new BizIllegalException("退款失败，请稍后重试", e);
-        }
-
-        // 业务号用 ORDER_REFUNDED，与"未付款取消"的流水区分开
-        try {
-            recoverStock(order, MqConstants.BIZ_ORDER_REFUNDED);
-        } catch (Exception e) {
-            // 库存少卖不等于钱错，记 ERROR 留痕即可（可由对账任务比对订单与库存流水后补回）
-            log.error("退款成功但库存回滚失败，需补偿: orderId={}", orderId, e);
-        }
-
-        // 退券：下单时锁的券必须还给用户，否则退款只退钱、券被吞掉
-        refundVoucherQuietly(order, "订单退款");
-
-        // 关闭支付单，让支付账本与交易账本收敛（失败只记日志，见 closePayOrderQuietly）
-        closePayOrderQuietly(order);
-        log.info("订单退款完成: orderId={}, userId={}, amount={}", orderId, order.getUserId(), order.getTotalFee());
+        try { recoverCompensation(orderId); }
+        // Sentinel can wrap a throwing Feign fallback in AssertionError.
+        catch (RuntimeException | AssertionError e) { log.error("退款已受理，补偿任务将继续恢复: orderId={}", orderId, e); }
     }
 
-    /** 下单前校验券可用性并返回券的权威信息：归属 / 状态（未使用）/ 有效期 / 适用门店四条缺一不可，判定均在营销域完成，交易域只补充"门店与订单上下文匹配" */
+    @Override
+    public void recoverCompensation(Long orderId) {
+        // afterCommit callbacks still have the outer SqlSession bound. Read in a fresh transaction
+        // so its first-level cache cannot hide the committed 8/9 transition.
+        TransactionTemplate read = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        read.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        Order order = read.execute(status -> getById(orderId));
+        if (order == null) return;
+        boolean refund = Integer.valueOf(Order.STATUS_REFUNDING).equals(order.getStatus());
+        if (!refund && !Integer.valueOf(Order.STATUS_CANCELING).equals(order.getStatus())) return;
+        Long previous = UserContext.getUser();
+        try {
+            UserContext.setUser(order.getUserId());
+            if (refund) userClient.refundMoney(order.getUserId(), order.getTotalFee(), "ORDER_REFUND:" + orderId);
+            recoverStock(order, refund ? MqConstants.BIZ_ORDER_REFUNDED : MqConstants.BIZ_ORDER_CANCELED);
+            if (order.getVoucherId() != null && !Boolean.TRUE.equals(voucherClient.refundMyVoucher(order.getVoucherId(), orderId))) {
+                throw new BizIllegalException("退券未确认，等待重试");
+            }
+            if (refund) payClient.closePayOrder(orderId);
+            localTransition(orderId, refund ? Order.STATUS_REFUNDING : Order.STATUS_CANCELING, Order.STATUS_CANCELED);
+        } finally {
+            if (previous == null) UserContext.removeUser(); else UserContext.setUser(previous);
+        }
+    }
+
     private UserVoucherDTO queryUsableVoucher(Long userVoucherId, Long shopId) {
         UserVoucherDTO voucher;
         try {
@@ -745,79 +695,8 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
 
     /** 锁券失败后的补偿：关闭订单 + 回滚库存。只处理"仍是待支付"的订单；若用户已经付款，绝不能在这里关单，只记 ERROR 交人工/对账 */
     private void compensateVoucherLockFailure(Long orderId) {
-        try {
-            Order order = getById(orderId);
-            if (order == null) {
-                log.error("【需人工介入】锁券失败但订单不存在: orderId={}", orderId);
-                return;
-            }
-            if (order.getStatus() == null || order.getStatus() != Order.STATUS_UNPAID) {
-                log.error("【需人工介入】锁券失败且订单已不是待支付，未自动关单: orderId={}, status={}",
-                        orderId, order.getStatus());
-                return;
-            }
-            boolean closed = lambdaUpdate()
-                    .eq(Order::getId, orderId)
-                    .eq(Order::getStatus, Order.STATUS_UNPAID)
-                    .set(Order::getStatus, Order.STATUS_CANCELED)
-                    .set(Order::getCloseTime, LocalDateTime.now())
-                    .update();
-            if (closed) {
-                log.warn("锁券失败，订单已自动关闭: orderId={}", orderId);
-                recoverStock(order, MqConstants.BIZ_ORDER_CANCELED);
-            }
-        } catch (Exception e) {
-            // 补偿本身失败：订单可能停在"未支付但占着库存"，由超时关单兜底（延迟消息会把它关掉）
-            log.error("【需人工介入】锁券失败后的补偿动作失败: orderId={}", orderId, e);
-        }
-    }
-
-    private void refundVoucherQuietly(Order order, String scene) {
-        if (order == null || order.getVoucherId() == null) {
-            return;
-        }
-        refundVoucherQuietly(order.getVoucherId(), order.getId(), scene);
-    }
-
-    /**
-     * 退还券（幂等）；失败只记 ERROR：调用方此时钱/库存的动作都已完成，为退券失败把整个退款回滚反而会变成"钱退了一半"。
-     * 【注意】必须显式设置 UserContext：退券接口靠 ThreadLocal 里的身份做归属校验，而超时关单跑在 MQ 线程上没有登录态，
-     * Feign 拦截器不会带 user-info 头、营销域直接 401，券永远退不出去；以订单归属人身份调用是安全的（userId 取自本地订单表，券绑定的订单号须与 orderId 一致）。
-     */
-    private void refundVoucherQuietly(Long userVoucherId, Long orderId, String scene) {
-        if (userVoucherId == null) {
-            return;
-        }
-        Long previous = UserContext.getUser();
-        try {
-            Long owner = previous;
-            if (owner == null) {
-                Order order = getById(orderId);
-                owner = order == null ? null : order.getUserId();
-            }
-            if (owner != null) {
-                UserContext.setUser(owner);
-            }
-            voucherClient.refundMyVoucher(userVoucherId, orderId);
-            log.info("{}：优惠券已退回: userVoucherId={}, orderId={}", scene, userVoucherId, orderId);
-        } catch (Exception e) {
-            log.error("{}：优惠券退回失败，需补偿: userVoucherId={}, orderId={}", scene, userVoucherId, orderId, e);
-        } finally {
-            // 恢复线程上下文，避免把身份泄漏给同一线程上的后续逻辑
-            if (previous == null) {
-                UserContext.removeUser();
-            } else {
-                UserContext.setUser(previous);
-            }
-        }
-    }
-
-    private void closePayOrderQuietly(Order order) {
-        try {
-            payClient.closePayOrder(order.getId());
-        } catch (Exception e) {
-            log.error("退款成功但支付单关闭失败，需补偿: orderId={}", order.getId(), e);
-        }
+        try { cancelOrder(orderId); }
+        catch (RuntimeException e) { log.error("锁券失败后的关单暂未完成，超时扫描将重试: orderId={}", orderId, e); }
     }
 
     /** 生成核销码（查重命中则重试）：verify_code 上没有唯一索引，唯一性的最终防线在核销侧 —— 同码命中多条即拒绝核销并告警 */

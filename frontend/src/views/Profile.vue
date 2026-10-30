@@ -15,6 +15,7 @@ import {
 import PageHeader from '@/components/PageHeader.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import VoucherCard from '@/components/VoucherCard.vue'
+import PayPasswordDialog from '@/components/PayPasswordDialog.vue'
 import { voucherApi } from '@/api/modules'
 import { getErrorMessage } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
@@ -27,6 +28,13 @@ const auth = useAuthStore()
 const loading = ref(true)
 const errorMessage = ref('')
 const loggingOut = ref(false)
+const payPasswordVisible = ref(false)
+
+async function passwordChanged(): Promise<void> {
+  auth.reset()
+  ElMessage.success('支付口令已修改，请重新登录')
+  await router.replace('/login')
+}
 
 const vouchers = ref<UserVoucher[]>([])
 const voucherLoading = ref(true)
@@ -221,6 +229,7 @@ onMounted(() => {
           </div>
 
           <div class="account-actions">
+            <el-button @click="payPasswordVisible = true">修改支付口令</el-button>
             <el-button :icon="SwitchButton" :loading="loggingOut" @click="logout">
               退出登录
             </el-button>
@@ -292,6 +301,7 @@ onMounted(() => {
         </section>
       </div>
     </StateBlock>
+    <PayPasswordDialog v-model="payPasswordVisible" @changed="passwordChanged" />
   </div>
 </template>
 

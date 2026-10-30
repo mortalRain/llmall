@@ -21,10 +21,9 @@ llmall:
     package: com.llmall.shop.controller
   db:
     database: llmall-shop
-  # 运维接口总开关：false 时 /shops/cache/** 与 /shops/{id}/hot/recompute 一律 403。
-  # 默认 true（演示环境需直接调用），线上怀疑重建类接口引发抖动时改此处一键关闭。
+  # 维护接口默认关闭；开启后仍需强服务令牌，不能只凭登录调用。
   maintenance:
-    enabled: true
+    enabled: false
   # 服务间内部调用凭证：UserInfoInterceptor 仅在该请求头与下面的值完全一致时才采信 user-info 头
   # （服务监听 0.0.0.0，直连端口可以自己伪造 user-info，必须靠这个凭证区分是不是"自己人"）。
   # 【注意】全项目所有服务必须配成同一个值，否则表现为"请求全部未登录"；

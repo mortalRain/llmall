@@ -11,6 +11,7 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.ImmediateRequeueAmqpException;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -28,6 +29,9 @@ import org.springframework.context.annotation.Configuration;
 @ConditionalOnClass(RabbitTemplate.class)
 public class MqDeadLetterConfig {
 
+    @Value("${spring.application.name:unknown-service}")
+    private String applicationName = "unknown-service";
+
     private static final Logger log = LoggerFactory.getLogger(MqDeadLetterConfig.class);
 
     @Bean
@@ -44,7 +48,7 @@ public class MqDeadLetterConfig {
     @Bean
     public Binding deadLetterBinding(Queue deadLetterQueue, TopicExchange deadLetterExchange) {
         return BindingBuilder.bind(deadLetterQueue).to(deadLetterExchange)
-                .with("#" + DeadLetterPublisher.DEAD_LETTER_ROUTING_KEY_SUFFIX);
+                .with(deadLetterQueue.getName());
     }
 
     /**
@@ -66,9 +70,12 @@ public class MqDeadLetterConfig {
                         message.getMessageProperties().getConsumerQueue(),
                         message.getMessageProperties().getHeaders().get(TraceContext.HEADER),
                         cause == null ? "未知" : cause.toString());
-                return;
+                throw new ImmediateRequeueAmqpException("Dead-letter marked message failed; retain for operator recovery", cause);
             }
-            DeadLetterPublisher.publish(rabbitTemplate, message, message.getMessageProperties().getConsumerQueue(), cause);
+            boolean confirmed = DeadLetterPublisher.publish(rabbitTemplate, message,
+                    message.getMessageProperties().getConsumerQueue(), cause,
+                    applicationName + DeadLetterPublisher.DEAD_LETTER_QUEUE_SUFFIX);
+            if (!confirmed) throw new ImmediateRequeueAmqpException("Dead-letter forwarding unconfirmed; retain original", cause);
         };
     }
 }

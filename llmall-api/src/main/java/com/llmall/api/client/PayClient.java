@@ -8,6 +8,8 @@ import org.springframework.web.bind.annotation.PutMapping;
 
 @FeignClient(value = "llmall-pay-service", fallbackFactory = PayClientFallback.class)
 public interface PayClient {
+    @org.springframework.web.bind.annotation.PostMapping("/internal/pay-orders/close-unpaid")
+    PayOrderStatusDTO closeUnpaid(@org.springframework.web.bind.annotation.RequestBody com.llmall.api.dto.TradeOrderDTO order);
     /**
      * 根据交易订单id查询支付状态。
      *

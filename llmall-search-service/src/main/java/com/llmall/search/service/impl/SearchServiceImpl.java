@@ -12,6 +12,7 @@ import com.llmall.common.domain.PageQuery;
 import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.metrics.BizMetrics;
 import com.llmall.common.utils.CollUtils;
+import com.llmall.common.tx.TxAfterCommit;
 import com.llmall.search.constant.SearchRedisScripts;
 import com.llmall.search.domain.po.ConsumeRecord;
 import com.llmall.search.domain.po.SearchHistory;
@@ -29,15 +30,17 @@ import com.llmall.search.mapper.SearchHotWordMapper;
 import com.llmall.search.mapper.ShopSearchDocMapper;
 import com.llmall.search.service.ISearchService;
 import com.llmall.search.support.SearchPagingPolicy;
+import com.llmall.search.support.EmptyIndexFallbackProbe;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -74,12 +77,9 @@ import static com.llmall.search.constant.SearchRedisConstants.*;
  * 3. 幂等闸门不在本类：事件幂等由 {@code consume_record} 的唯一键
  *    {@code (biz_type, biz_id, consumer)} 裁决，见 {@code ShopHotChangedListener}。
  *
- * 【注意】ES 的写是整文档替换，没有局部更新语义：每次落库之后必须重新读回完整行再写索引
- * （见 {@link #syncToEs}），拿局部 doc 去写会把名称、地址、坐标全刷成 null。
- *
- * 【风险】ES 文档同步是 best-effort（{@link #syncToEs} 失败只 warn），
- * 而对账判据只看读模型与 {@code consume_record}，两者都不含 ES → 索引可能永久陈旧，
- * 而 {@link #engineStatus} 仍报"一致"。位数一致不代表内容一致，重建是唯一可靠的收敛手段。
+ * ES按版本替换完整文档：提交前读取当前完整行，提交后发送，不能用局部事件直接替换索引。
+ * 同步仍是best-effort，consume_record不证明ES已写入；engineStatus数量相等也不代表内容一致。
+ * 失败需受控重建等修复，本轮没有为ES增加持久重试账本。
  */
 @Slf4j
 @Service
@@ -92,18 +92,8 @@ public class SearchServiceImpl implements ISearchService {
     private static final int REBUILD_PAGE_SIZE = 100;
     /** 全量重建的页数上限，防止对端分页异常时死循环 */
     private static final int REBUILD_MAX_PAGES = 100;
-    /**
-     * 空索引降级判定的缓存时长。取 10 秒而不是分钟级：索引被清空后，用户最多等这么久就能看到正确结果
-     * （60 秒的窗口太长：清空索引后一分钟内搜索页仍然是空的，用户体感就是"坏了"）。
-     * 成本可忽略：只有"本次命中 0 条"的检索才会触发判定，且最多每 10 秒一次。
-     * 另外"命中非 0 条"的检索会把判定时刻清零（见 doSearch），所以"原来有数据、随后被清空"这一
-     * 最常见的变化会被立即识别，不受这个时长限制。
-     */
-    private static final long EMPTY_INDEX_CHECK_TTL_MS = 10_000L;
-
-    /** 上一次"空索引/读模型非空"判定的时刻与结论（volatile 即可：最坏情况是并发多探测一次） */
-    private volatile long emptyIndexCheckedAt = 0L;
-    private volatile boolean emptyIndexDetected = false;
+    /** Only global index/read-model evidence is cached; search results are never cached. */
+    private final EmptyIndexFallbackProbe emptyIndexProbe = new EmptyIndexFallbackProbe(Duration.ofSeconds(10));
 
     private final ShopSearchDocMapper shopSearchDocMapper;
     private final SearchHotWordMapper hotWordMapper;
@@ -181,10 +171,9 @@ public class SearchServiceImpl implements ISearchService {
                     metrics.increment("llmall.search.fallback", "reason", "empty-index");
                 }
                 else {
-                    // 反向失效：这次 ES 确实查出了数据，说明索引不是空的 —— 把负向缓存的时刻清零，
-                    // 于是"索引随后被清空"后的第一次 0 命中检索会立刻重新判定，而不是等缓存到期。
+                    // A real hit proves the global index is nonempty, including recovery after a rebuild.
                     if (result != null && result.getList() != null && !result.getList().isEmpty()) {
-                        emptyIndexCheckedAt = 0L;
+                        emptyIndexProbe.observeNonEmpty();
                     }
                     recordSearch(kw, userId);
                     return result;
@@ -226,38 +215,20 @@ public class SearchServiceImpl implements ISearchService {
         return result == null || result.getTotal() == null || result.getTotal() == 0L;
     }
 
-    /**
-     * 判定"索引为空、而 MySQL 读模型有数据"—— 这是"检索静默返回空列表"的唯一判据。
-     *
-     * 【为什么不是"命中 0 条就回落"】关键词本来就可能没有门店命中（例如搜一个不存在的词），
-     * 那种情况下 ES 与 MySQL 都应当返回空。只有"索引里一条文档都没有、读模型却有一堆"才说明
-     * 索引没灌数，此时回落到读模型才是把正确结果还给用户。
-     *
-     * 【为什么要缓存 60 秒】"命中 0 条"的检索一旦高发（例如索引真的丢了），每次检索都会多打
-     * 一次 ES count + 一次 MySQL count 两次往返；索引状态按分钟级变化，缓存 60 秒足够跟上，
-     * 也不会让"检索"这条热路径多出稳定开销。
-     */
+    /** Share one global probe per instance/TTL; a missing keyword alone is not an index outage. */
     private boolean isEmptyIndexButReadModelNotEmpty() {
-        long now = System.currentTimeMillis();
-        if (now - emptyIndexCheckedAt < EMPTY_INDEX_CHECK_TTL_MS) {
-            return emptyIndexDetected;
-        }
-        boolean detected = false;
-        try {
-            if (esGateway.count() == 0L) {
+        return emptyIndexProbe.shouldFallback(() -> {
+            try {
+                if (esGateway.count() != 0L) return false;
                 Long docs = shopSearchDocMapper.selectCount(null);
-                detected = docs != null && docs > 0L;
+                return docs != null && docs > 0L;
+            } catch (Exception e) {
+                // Preserve the existing failure policy: do not switch engines on an inconclusive probe.
+                log.warn("[ES] 空索引降级判定失败，按不降级处理: {}", e.getMessage());
+                return false;
             }
-        }
-        catch (Exception e) {
-            // 判定本身失败时不降级：宁可返回空结果，也不要因为一次探测异常把检索打到 MySQL 上
-            log.warn("[ES] 空索引降级判定失败，按不降级处理: {}", e.getMessage());
-        }
-        emptyIndexDetected = detected;
-        emptyIndexCheckedAt = now;
-        return detected;
+        });
     }
-
     /** 关键词统计与历史记录：ES / MySQL 两条检索分支共用，避免换引擎后统计口径出现差异 */
     private void recordSearch(String kw, Long userId) {
         if (kw == null) {
@@ -294,15 +265,16 @@ public class SearchServiceImpl implements ISearchService {
     }
 
     private void saveHistory(Long userId, String keyword) {
-        // 去重依赖表上的唯一键 (user_id, keyword)：先查后插在并发下必然写入重复行，
-        // 而重复历史会让"最近搜索"出现两条一样的词。冲突本身即代表"已经有了"，直接吞掉。
+        // varchar(64) counts Unicode characters, not UTF-16 code units. Keep the search itself unchanged.
+        if (keyword.codePointCount(0, keyword.length()) > 64) {
+            return;
+        }
         try {
-            historyMapper.insert(new SearchHistory().setUserId(userId).setKeyword(keyword));
-        } catch (DuplicateKeyException e) {
-            // 正常路径不应刷 warn，冲突日志降级到 debug
-            if (log.isDebugEnabled()) {
-                log.debug("搜索历史已存在，忽略: userId={}, kw={}", userId, keyword);
-            }
+            historyMapper.insertIfAbsent(userId, keyword);
+        } catch (DataAccessException e) {
+            // History is optional: its outage must not turn a successful ES search into a retry/fallback.
+            metrics.increment("llmall.search.history.failure", "reason", "database");
+            log.warn("搜索历史写入失败，不影响检索: userId={}, failure={}", userId, e.getClass().getSimpleName());
         }
     }
 
@@ -365,33 +337,17 @@ public class SearchServiceImpl implements ISearchService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void applyShopHotChanged(ShopDocChangedEvent event) {
-        if (event == null || event.getShopId() == null) {
-            return;
+        if (event == null || event.getShopId() == null) return;
+        if (event.getOccurredAt() == null || event.getOccurredAt() <= 0) {
+            throw new BadRequestException("门店变更事件缺少有效的毫秒发生时间");
         }
-        LocalDateTime eventTime = event.getOccurredAt() == null
-                ? LocalDateTime.now()
-                : LocalDateTime.ofInstant(Instant.ofEpochMilli(event.getOccurredAt()), ZoneId.systemDefault());
-        // 【注意】事件时间必须先截断到秒：shop_search_doc.event_time 是 DATETIME（无小数秒），
-        // 带毫秒写入会被 MySQL 四舍五入到下一秒，读回值比事件时间大，同一条事件重投（对账补发）时
-        // 就会被下面的防乱序判断误判成过期而丢弃 —— consume_record 已记账，读模型却停在旧值。
-        // 截断后写入值与读回值一致（.000）。防乱序仍有效，只是精度降到 1 秒，跨秒乱序照旧拦截。
-        eventTime = eventTime.truncatedTo(ChronoUnit.SECONDS);
-
-        ShopSearchDoc exist = shopSearchDocMapper.selectById(event.getShopId());
-        // 防乱序：MQ 不保证顺序，旧事件后到会把新数据覆盖回去
-        if (exist != null && exist.getEventTime() != null && eventTime.isBefore(exist.getEventTime())) {
-            log.info("收到过期的热度事件，忽略: shopId={}, eventTime={} < 已处理 {}",
-                    event.getShopId(), eventTime, exist.getEventTime());
-            return;
-        }
-
+        LocalDateTime eventTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(event.getOccurredAt()),
+                ZoneId.systemDefault()).truncatedTo(ChronoUnit.MILLIS);
         ShopSearchDoc doc = new ShopSearchDoc().setShopId(event.getShopId()).setEventTime(eventTime);
         fillFromEvent(doc, event);
-
-        if (exist == null) {
+        // 此快照只判断是否需要初始化，不能用于版本裁决；外层RR可能早已建立旧快照。
+        if (shopSearchDocMapper.selectById(event.getShopId()) == null) {
             if (!hasFullRow(event)) {
-                // 兼容队列中只带热点字段的旧格式事件：回源门店详情补全整行，
-                // 否则 NOT NULL 的 name/address/type_id 会让 insert 直接失败
                 ShopDTO shop = shopClient.queryShopById(event.getShopId());
                 if (shop == null) {
                     log.warn("视图补全失败：门店不存在, shopId={}", event.getShopId());
@@ -399,16 +355,15 @@ public class SearchServiceImpl implements ISearchService {
                 }
                 fillFromShop(doc, shop);
             }
-            shopSearchDocMapper.insert(doc);
-            log.info("搜索视图新增: shopId={}, hotScore={}, sold={}",
-                    event.getShopId(), doc.getHotScore(), doc.getSold());
-        } else {
-            shopSearchDocMapper.updateById(doc);
-            log.info("搜索视图更新: shopId={}, hotScore={}, sold={}, comments={}",
-                    event.getShopId(), doc.getHotScore(), doc.getSold(), doc.getComments());
+            // 并发首次创建用duplicate-key no-op拿排他锁，不靠两个INSERT争抢后的异常收敛。
+            shopSearchDocMapper.insertIfAbsent(doc);
         }
-
-        // 重新读回落库后的权威行再写 ES（内存 doc 里可能含被 not_null 跳过的 null 字段）
+        ShopSearchDoc current = shopSearchDocMapper.selectForUpdate(event.getShopId());
+        if (current == null) throw new IllegalStateException("搜索读模型初始化后不存在");
+        if (current.getEventTime() == null || eventTime.isAfter(current.getEventTime())) {
+            shopSearchDocMapper.updateById(doc);
+        }
+        // 相同时间保留首个已提交快照；迟到/重投也可用当前权威行修复ES。
         syncToEs(event.getShopId());
     }
 
@@ -521,21 +476,19 @@ public class SearchServiceImpl implements ISearchService {
         }
     }
 
-    /** 把某门店的最新读模型行同步到 ES（best-effort：失败只告警，权威数据始终在 MySQL） */
+    /** 提交前捕获完整当前行，提交后再写ES；回调不复用旧MyBatis会话查询。 */
     private void syncToEs(Long shopId) {
-        if (shopId == null || !esGateway.enabled()) {
-            return;
-        }
-        try {
-            ShopSearchDoc latest = shopSearchDocMapper.selectById(shopId);
-            if (latest == null) {
-                return;
+        if (shopId == null || !esGateway.enabled()) return;
+        ShopSearchDoc current = shopSearchDocMapper.selectForUpdate(shopId);
+        if (current == null) return;
+        com.llmall.search.es.ShopSearchDocument snapshot = EsShopSearchGatewayImpl.toDocument(current);
+        TxAfterCommit.run("sync search document id=" + shopId, () -> {
+            try {
+                esGateway.saveDocument(snapshot);
+            } catch (Exception e) {
+                log.warn("[ES] 文档同步失败（MySQL已提交，可重建修复）shopId={}, failure={}", shopId, e.getClass().getSimpleName());
             }
-            esGateway.saveDocument(EsShopSearchGatewayImpl.toDocument(latest));
-        } catch (Exception e) {
-            log.warn("[ES] 文档同步失败（读模型已更新；可用 POST /search/index/rebuild 补齐）shopId={}, cause={}",
-                    shopId, e.getMessage());
-        }
+        });
     }
 
     /** 重建索引的静默版：供读模型重建流程内部调用，失败不阻断主流程 */

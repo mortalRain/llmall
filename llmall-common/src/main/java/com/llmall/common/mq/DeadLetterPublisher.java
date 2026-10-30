@@ -49,9 +49,15 @@ public final class DeadLetterPublisher {
      * @return true 表示已成功搬运
      */
     public static boolean publish(RabbitTemplate rabbitTemplate, Message message, String originalQueue, Throwable cause) {
+        String queue = (originalQueue == null || originalQueue.isEmpty()) ? "unknown" : originalQueue;
+        return publish(rabbitTemplate, message, originalQueue, cause, queue + DEAD_LETTER_ROUTING_KEY_SUFFIX);
+    }
+
+    /** Destination is the owning application's existing dead-letter queue binding. */
+    public static boolean publish(RabbitTemplate rabbitTemplate, Message message, String originalQueue, Throwable cause, String destination) {
         MessageProperties original = message.getMessageProperties();
         String queue = (originalQueue == null || originalQueue.isEmpty()) ? "unknown" : originalQueue;
-        String routingKey = queue + DEAD_LETTER_ROUTING_KEY_SUFFIX;
+        String routingKey = destination;
 
         MessageProperties out = new MessageProperties();
         // 只保留"业务相关"的属性：contentType 决定下游能否反序列化，messageId/timestamp 用于对账；
@@ -75,14 +81,14 @@ public final class DeadLetterPublisher {
         out.setHeader("x-exception-stacktrace", stackTrace(cause));
 
         try {
-            rabbitTemplate.send(DEAD_LETTER_EXCHANGE, routingKey, new Message(message.getBody(), out));
+            ConfirmedMessagePublisher.send(rabbitTemplate, DEAD_LETTER_EXCHANGE, routingKey, new Message(message.getBody(), out), 5000);
             log.error("消息重试耗尽，已转入死信队列（需人工或补偿流程处理）: 原队列={} 死信路由键={} traceId={} 原因={}",
                     queue, routingKey, traceIdOf(original), cause == null ? "未知" : cause.toString());
             return true;
         } catch (Exception e) {
             // 搬运失败也不能把原始异常吞掉：这里只补一条 ERROR，原始失败仍由调用方抛出/记录，
             // 否则"死信都没进"这件事会被掩盖成"消息处理过了"。
-            log.error("消息重试耗尽但转入死信队列失败（消息将随原队列的 reject 一起丢失，请检查 MQ 与 llmall.dlx）: 原队列={} traceId={}",
+            log.error("消息转入死信队列未确认，调用方必须保留原消息: 原队列={} traceId={}",
                     queue, traceIdOf(original), e);
             return false;
         }

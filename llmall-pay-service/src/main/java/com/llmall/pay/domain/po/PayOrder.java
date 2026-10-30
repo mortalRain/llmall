@@ -40,7 +40,7 @@ public class PayOrder implements Serializable {
     /** 支付类型，取值见 PayType：1 网页支付JS、2 小程序支付、3 APP支付、4 扫码支付、5 余额支付 */
     private Integer payType;
 
-    /** 支付状态，取值见 PayStatus：0 未提交、1 待支付、2 已关闭、3 支付成功 */
+    /** 支付状态：0 未提交、1 待支付、2 已关闭、3 支付成功、4 处理中（包括待撤销） */
     private Integer status;
 
     private String expandJson;

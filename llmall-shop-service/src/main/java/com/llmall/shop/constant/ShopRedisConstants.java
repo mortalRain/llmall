@@ -64,9 +64,6 @@ public interface ShopRedisConstants {
     /** 同一门店两次榜单成员写入的最小间隔（分钟），进程内兜底节流，不作为正确性依赖 */
     long RANK_WRITE_MIN_INTERVAL_MINUTES = 1;
 
-    /** 门店不存在时写空值哨兵前的合并窗口（毫秒），把并发未命中收敛为一次写入 */
-    long NULL_SENTINEL_MERGE_MILLIS = 50;
-
     /** 访问计数器保留天数，uv/pv key 都按天新建，无 TTL 会按天累积 */
     long UV_TTL_DAYS = 2;
 }

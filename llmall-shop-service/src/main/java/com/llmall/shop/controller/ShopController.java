@@ -26,6 +26,8 @@ import javax.validation.Valid;
 import java.time.LocalDate;
 import java.util.List;
 
+import static com.llmall.common.constant.AuthConstants.HEADER_SERVICE_TOKEN;
+
 /**
  * 门店接口。
  *
@@ -55,18 +57,17 @@ public class ShopController {
     /** 访问统计落库任务：手动触发入口（定时触发见 ShopStatRollupTask#scheduledRollup） */
     private final ShopStatRollupTask shopStatRollupTask;
 
-    /**
-     * 运维接口总开关（llmall.maintenance.enabled，application.yaml 中默认 true）。
-     *
-     * 【注意】重建 GEO 索引、重算热度分、失效缓存属"一人执行、全站受影响"的动作，必须能一键停掉而非等发版；
-     * 关闭后统一返回 403，便于一眼区分是开关还是故障。项目无 RBAC，不为此另造权限体系。
-     */
+    /** 维护动作需同时开启开关并验证服务凭据；登录身份不代表运维权限。 */
     @Value("${llmall.maintenance.enabled:false}")
     private boolean maintenanceEnabled;
 
-    private void checkMaintenanceEnabled() {
-        if (!maintenanceEnabled) {
-            throw new ForbiddenException("运维接口已关闭");
+    @Value("${llmall.internal.service-token:}")
+    private String serviceToken;
+
+    private void checkMaintenanceAccess(String token) {
+        if (!maintenanceEnabled || serviceToken == null || serviceToken.trim().length() < 32
+                || !serviceToken.equals(token)) {
+            throw new ForbiddenException("运维接口未授权或已关闭");
         }
     }
 
@@ -238,24 +239,25 @@ public class ShopController {
 
     @Operation(summary = "重算门店热度分（评价事件到达后由 MQ 消费方调用）")
     @PostMapping("/{id}/hot/recompute")
-    public double recomputeHotScore(@PathVariable("id") Long id) {
-        checkMaintenanceEnabled();
+    public double recomputeHotScore(@PathVariable("id") Long id,
+            @RequestHeader(value = HEADER_SERVICE_TOKEN, required = false) String token) {
+        checkMaintenanceAccess(token);
         return shopService.recomputeHotScore(id);
     }
 
     @Operation(summary = "对账：检查已投递的门店热度事件搜索域处理了没有，明确未处理则补发（审计 B4，运维/排障用）")
     @PostMapping("/hot/reconcile")
-    public HotReconcileResultVO reconcileHotChanged() {
+    public HotReconcileResultVO reconcileHotChanged(@RequestHeader(value = HEADER_SERVICE_TOKEN, required = false) String token) {
         // 与其它运维接口共用开关：手动对账会请求下游并可能触发补发，属"一人执行、全站受影响"的动作。
         // 手动入口的另一用途是排障与验证：定时对账默认 5 分钟一轮，且需要一个可重复触发的入口确认补发是否真的发生。
-        checkMaintenanceEnabled();
+        checkMaintenanceAccess(token);
         return shopSearchReconcileTask.reconcile();
     }
 
     @Operation(summary = "重建 GEO 索引（首次部署/坐标批量变更后调用）")
     @PostMapping("/cache/geo/rebuild")
-    public int rebuildGeoIndex() {
-        checkMaintenanceEnabled();
+    public int rebuildGeoIndex(@RequestHeader(value = HEADER_SERVICE_TOKEN, required = false) String token) {
+        checkMaintenanceAccess(token);
         return shopService.rebuildGeoIndex();
     }
 
@@ -267,15 +269,17 @@ public class ShopController {
 
     @Operation(summary = "主动失效门店缓存")
     @DeleteMapping("/cache/{id}")
-    public void evictCache(@PathVariable("id") Long id) {
-        checkMaintenanceEnabled();
+    public void evictCache(@PathVariable("id") Long id,
+            @RequestHeader(value = HEADER_SERVICE_TOKEN, required = false) String token) {
+        checkMaintenanceAccess(token);
         shopService.evictCache(id);
     }
 
     @Operation(summary = "门店下线：清理详情缓存 + 热度榜成员 + GEO 坐标（门店下架/删除后调用）")
     @DeleteMapping("/cache/{id}/offline")
-    public void markOffline(@PathVariable("id") Long id) {
-        checkMaintenanceEnabled();
+    public void markOffline(@PathVariable("id") Long id,
+            @RequestHeader(value = HEADER_SERVICE_TOKEN, required = false) String token) {
+        checkMaintenanceAccess(token);
         shopService.markShopOffline(id);
     }
 
@@ -292,8 +296,9 @@ public class ShopController {
     @PostMapping("/stat/rollup")
     public int rollupVisitStat(
             @RequestParam(value = "date", required = false)
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
-        checkMaintenanceEnabled();
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestHeader(value = HEADER_SERVICE_TOKEN, required = false) String token) {
+        checkMaintenanceAccess(token);
         return date == null
                 ? shopStatRollupTask.rollupYesterday()
                 : shopStatRollupTask.rollup(date);

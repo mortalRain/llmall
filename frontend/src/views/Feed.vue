@@ -10,6 +10,7 @@ import { getErrorMessage } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
 import type { FeedCursor, FeedItem, FeedQuery, Shop } from '@/api/types'
 import { formatMoney } from '@/utils/format'
+import { feedHasMore } from '@/utils/feed'
 
 const PAGE_SIZE = 10
 
@@ -72,9 +73,7 @@ async function loadFeed(reset = false): Promise<void> {
       ci: page.nextCi ?? undefined,
       ai: page.nextAuthorId ?? undefined,
     }
-    hasMore.value =
-      list.length >= PAGE_SIZE &&
-      Boolean(cursor.value.li || cursor.value.ct || cursor.value.ci || cursor.value.ai)
+    hasMore.value = feedHasMore(page, PAGE_SIZE)
   } catch (error) {
     if (reset) {
       errorMessage.value = getErrorMessage(error, '动态加载失败')
@@ -164,8 +163,8 @@ onMounted(() => {
             <span class="empty-ring"></span>
             <span class="empty-avatar">L</span>
           </div>
-          <h3>还没有关注动态</h3>
-          <p>关注同城作者后，他们的探店笔记会出现在这里。先去发现几家好店吧。</p>
+          <h3>{{ hasMore ? '这页暂无可展示的动态' : '还没有关注动态' }}</h3>
+          <p>{{ hasMore ? '可以继续加载后面的动态。' : '关注同城作者后，他们的探店笔记会出现在这里。先去发现几家好店吧。' }}</p>
           <el-button type="primary" @click="goShops">
             去逛门店
             <el-icon><ArrowRight /></el-icon>
@@ -179,7 +178,7 @@ onMounted(() => {
         </div>
 
         <div v-else class="feed-list">
-          <FeedCard v-for="item in filteredItems" :key="item.feedId" :item="item" />
+          <FeedCard v-for="item in filteredItems" :key="item.blogId" :item="item" />
         </div>
 
         <div v-if="!loading && !errorMessage && hasMore && !keyword" class="load-more">

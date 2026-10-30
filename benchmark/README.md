@@ -1,3 +1,5 @@
+> 当前数据策略：旧 rollback 与清理 SQL 已停用，见 [测试数据安全](../docs/test-data-safety.md)。本文历史压测数据不代表后续改造版本的性能收益，复测需记录版本、环境和数据规模。
+
 # benchmark · 压测计划与结论（2026-10-17）
 
 > 目的不是刷 QPS 数字，而是给台账里的三个靶子补数据：
@@ -38,7 +40,7 @@
 - 熔断条件：CPU 持续 >90% 达 30 秒 / 内存 >90% / C 盘剩余 <5GB → 立即停 JMeter 并标记 `Aborted`。
   本轮**没有触发熔断**（单点峰值到过 100%，但从未连续 30 秒 >90%，见下表 PeakCpu 列）；
 - 只压容器；写路径只写容器库（`127.0.0.1:3307`），**绝不写 VM 演示库 <vm-ip>**；
-- 写压测前用 `scripts/SmokeRollback.java capture` 记水位线，压完 `rollback` 复原并复核。
+- 当前写压测保留业务数据；`capture` 仅作只读比较。旧 `rollback` 已停用，复测使用可完整重建的独立测试环境。
 
 ---
 
@@ -216,7 +218,7 @@ jmeter -n -t benchmark/write-order-pay.jmx -Jthreads=50 -Jramp=10 -Jloops=30 -Jd
 |---|---|---|
 | 余额 | 60,000,000 → 21,600,000 = **38,400,000 分** | 38,400,000 ÷ 25,600 = **1,500.0**，与支付成功次数**精确相等** |
 | 库存 / 销量 | stock 5,000→3,500（−1,500）、sold 255→1,755（+1,500） | 与下单数一致 |
-| 压后复原 | 按水位线回滚：balance 923,200 / stock 173 / sold 255 / pay_order 2 / order 8 | 跑完立即还原，不污染演示库 |
+| 历史压后操作 | 旧水位工具曾显示：balance 923,200 / stock 173 / sold 255 / pay_order 2 / order 8 | 仅旧版局部核对记录，不能证明完整还原；该工具写入能力现已停用 |
 
 > **口径**：这一轮是「完成 N 笔完整业务」口径，**不是**「60 秒稳态吞吐」口径，两者不混用 ——
 > 吞吐仍以上面 60 秒那一轮为准，**账实核对以本轮的闭合漏斗为准**（无需向人解释递减）。
@@ -240,7 +242,7 @@ jmeter -n -t benchmark/write-order-pay.jmx -Jthreads=50 -Jramp=10 -Jloops=30 -Jd
 **怎么做的**：在容器库里造 50 个压测专用账号（`bench1`~`bench50`，登录口令 123456、支付口令 888888，
 各带一条自己的收货地址），新增 `write-order-pay-multi.jmx`：线程 i 登录 `bench<i>`、用 `addressBase+i`
 的地址下单，其余参数与单账号版完全一致（50 线程 × 60 秒）。账号与地址都用 `SmokeRollback --extra-tables`
-记了水位线，压完全部按水位线删除并复核。
+记了水位线，历史运行曾按水位线删除并复核；这不能证明完整业务恢复，当前已停用该删除能力。
 
 | 指标（50 并发 × 60 秒） | A 组：单账号（Jack） | B 组：多账号（50 个 benchNN） | 变化 |
 |---|---|---|---|
@@ -289,10 +291,11 @@ foreach ($t in 10,50,100) {
 #   curl -X DELETE http://127.0.0.1:9201/shop_search      # 空索引（复现"静默空结果"及其修复后的回落）
 #   或先用 gates/EsBulkLoad.java 灌 30 条                 # 有索引
 
-# 2) 写路径（先 capture 水位线，压完 rollback）
+# 2) 写路径（仅独立、可丢弃测试环境；数据保留，不再按水位回滚）
+# 可选：只读快照，仅作比较，不能用于完整回滚。
 java -cp <mysql-connector.jar> scripts\SmokeRollback.java capture 127.0.0.1:3307 root 123 logs\benchmark\watermark.json
 pwsh -File benchmark\bench-guard.ps1 -Jmx benchmark\write-order-pay.jmx -Tag write-t50 -Threads 50 -Duration 60
-java -cp <mysql-connector.jar> scripts\SmokeRollback.java rollback 127.0.0.1:3307 root 123 logs\benchmark\watermark.json
+# 压后保留订单、流水与恢复记录。需要干净基线时完整重建独立测试环境。
 ```
 
 守卫脚本 `benchmark/bench-guard.ps1` 负责"取令牌 + 每 N 秒采样宿主 + 熔断 + 跑 JMeter + 从 `.jtl` 算 P95/P99/错误率"，
@@ -352,7 +355,7 @@ pwsh -File benchmark/bench-guard.ps1 -Jmx benchmark/read-c02-search.jmx -Tag c02
 - **非隔离环境**：宿主同时跑浏览器/IDE/一台 VM；三次 100 并发档的宿主峰值 CPU 到过 94%~100%（未连续 30 秒 >90%）；
 - **为腾内存临时停过部分服务**：读路径阶段停过 shop/cart/trade/pay/promotion，写路径阶段停过 search/content/bench-es；
   因此**没有在同一时刻压全部 10 个服务**；
-- **写压测把 `stock` 与 `balance` 临时抬高过**（否则 60 秒内会被库存/余额提前卡住），压完由 `SmokeRollback` 按水位线复原并复核通过；
+- **历史写压测把 `stock` 与 `balance` 临时抬高过**（否则 60 秒内会被库存/余额提前卡住），旧工具曾报告水位复核通过；该结果只覆盖局部表和列，不能证明完整还原，现已停用回写。新版复测需在独立环境重新准备基线；
 - **门店详情（`GET /shops/{id}` 的缓存读）**：本轮（10-17）**未采集**，环境回收前没跑这一档；
   **2026-10-21 已补测**，完整结果见 `benchmark/门店详情压测结果-20261021.md` —— 100 并发 / 12 万请求：
   P99 **18 ms**、零错误、稳态吞吐 **≈7,500 QPS**，读路径仅 0.03% 请求触达 DB；

@@ -1,5 +1,9 @@
 # 同城生活电商平台 · llmall
 
+**2026-10-30 优化收尾：** [项目完整分析](docs/项目完整分析-优化版.md)与[面试手册](docs/项目面试手册-优化版.md)已分为两个独立文件；本批改密入口、通用消息确认/重试/死信及私有基础闭环验证见[最终收尾记录](docs/最终收尾验证-20261030.md)。下文历史压测保留原版本口径，不代表新版全栈容量；现有业务库 64/65/66 迁移未执行。
+
+**2026-10-27 交易可靠性更新：** 支付尝试账本、原子撤销、持久化订单补偿与退券并发保护已加入。升级已有环境前请先阅读[设计、验证与迁移步骤](docs/payment-reliability.md)；需要维护窗口和新增表，历史压测结果不代表新版本性能。
+
 > **一句话**：**10 个服务、一服务一库**的同城生活电商后端（1 个网关 + 9 个业务域），跑通
 > 「逛商城 / 逛门店 → 加购 → 下单支付 → 到店核销 → 写评价 → 门店热度/榜单」的完整闭环，
 > 并支持门店收藏与评价浏览。
@@ -196,20 +200,11 @@ curl -s http://localhost:8080/actuator/health
 > 跑的还是旧镜像里的 jar（表现为"接口 404 / 403 策略没变"）。镜像 ID 与构建耗时可在
 > `docker image inspect local-life/llmall:1.0.0 --format '{{.Id}}'` 与 `docker history` 查看。
 
-### 4.5 清理 E2E 数据并恢复余额
+### 4.5 冒烟与压测数据保留
 
-E2E 会不断新建订单/地址/券并消耗 Jack 余额。清理脚本按 `client_token` / `E2E*` 标识精确删除，
-**不写死目标余额**：用待删 `balance_flow` 汇总反推测试前余额。
+`demo.ps1` 默认保留冒烟业务数据，`-NoCleanup` 保留为兼容参数。旧的水位回滚、E2E/压测清理 SQL 和 52 号直接退款脚本已停用，调用会明确报错。
 
-```bash
-# 盘点 + 清理（脚本会先输出 BEFORE 明细，再删除，最后输出 AFTER 对比）
-docker exec -i mysql mysql --default-character-set=utf8mb4 -uroot -p123 < sql/cleanup-e2e-data.sql
-# 或本机 mysql：mysql -uroot -p < sql/cleanup-e2e-data.sql
-```
-
-脚本细节、识别口径与"种子数据不动"的边界见 [`sql/cleanup-e2e-data.sql`](sql/cleanup-e2e-data.sql) 文件头；
-本轮实测的前后对比（38 单 / 27 地址 / 余额 869200 → 974400）见
-[`docs/verification/e2e-cleanup-2026-10-26.md`](docs/verification/e2e-cleanup-2026-10-26.md)。
+测试会消耗余额、改变库存并产生异步任务，不能靠删除订单和流水或覆盖统计列安全还原。请在可丢弃的独立测试环境运行，复测需要干净数据时完整重建该环境；重建前确认环境并保存需要保留的证据。操作边界见 [测试数据安全](docs/test-data-safety.md)。历史清理报告只记录旧版本结果，不适用于当前账本。
 
 ---
 
@@ -570,7 +565,7 @@ cd frontend && npm install && npm run dev   # http://localhost:5173，/api 代�
 
 - 指标：10 个服务统一暴露 `/actuator/prometheus`，覆盖 HTTP、JVM、连接池，以及 7 类业务指标（鉴权降级、验证码失败、登录失败、扣款未知、补偿失败、检索回落、Feed 跳推）。
 - 看板与告警：`deploy/observability/` 提供 Prometheus 抓取配置、7 条告警规则与 Grafana 看板；启动方式见 [`docs/可观测性-看板与告警.md`](docs/可观测性-看板与告警.md)。
-- 一键验证：`pwsh -File scripts/verify.ps1`（62 个单测 + 八道闸门；`-SkipTests` 只跑闸门）。
+- 测试：`mvn test`（2026-10-27：154 项单元/事务回归通过）。原一键入口 `pwsh -File scripts/verify.ps1` 还会执行八道闸门；涉及旧实现的指纹基线需经行为审核后更新，不能据本轮测试结果声称闸门全部通过。
 - 验证证据：[八道闸门全绿](docs/images/gates-green.png)、[完整日志](docs/verification/gates-2026-10-24.log)（2026-10-24 实跑，退出码 0）。
 - 演练证据：[鉴权降级看板](docs/images/auth-degrade-grafana.png)、[告警 firing](docs/images/auth-degrade-alerts.png)、[演练记录](docs/可观测性-演练记录-2026-10-24.md)。
 

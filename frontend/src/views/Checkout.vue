@@ -806,14 +806,14 @@ onBeforeUnmount(() => {
             </el-alert>
 
             <label class="pay-label">支付口令</label>
-            <p class="pay-demo-tip">演示环境支付口令为 <code>888888</code>（与登录密码不同）</p>
+            <p class="pay-demo-tip">请输入已设置的支付口令。需要修改时可前往<router-link to="/profile">我的账户</router-link>。</p>
             <el-input
               v-model="payPassword"
               size="large"
               type="password"
               show-password
               :prefix-icon="Lock"
-              placeholder="请输入支付口令（演示支付口令：888888）"
+              placeholder="请输入支付口令"
               @keyup.enter="payNow"
             />
 

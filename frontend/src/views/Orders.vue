@@ -124,7 +124,7 @@ async function cancelOrder(order: Order): Promise<void> {
   cancelingId.value = order.id
   try {
     await orderApi.cancel(order.id)
-    ElMessage.success('订单已取消')
+    ElMessage.success('取消请求已受理，请以订单状态为准')
     await loadOrders()
     if (detailVisible.value && detail.value?.id === order.id) {
       await openDetail(order)
@@ -247,7 +247,7 @@ onMounted(() => {
             </div>
           </div>
 
-          <div v-if="order.verifyCode && Number(order.status) !== 5" class="verify-strip">
+          <div v-if="order.verifyCode && Number(order.status) === 2" class="verify-strip">
             <span>核销码</span>
             <b class="mono">{{ order.verifyCode }}</b>
             <small>到店出示给店员核销</small>
@@ -306,7 +306,7 @@ onMounted(() => {
           <el-step title="到店核销" />
         </el-steps>
 
-        <div v-if="detail.verifyCode" class="big-verify">
+        <div v-if="detail.verifyCode && Number(detail.status) === 2" class="big-verify">
           <span>核销码</span>
           <b>{{ detail.verifyCode }}</b>
           <small>到店出示给店员，由店员在核销台完成核销</small>

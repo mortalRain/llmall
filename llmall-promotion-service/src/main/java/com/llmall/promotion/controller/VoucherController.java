@@ -7,6 +7,7 @@ import com.llmall.promotion.domain.dto.VoucherPwDTO;
 import com.llmall.promotion.domain.vo.SeckillResultVO;
 import com.llmall.promotion.domain.vo.UserVoucherVO;
 import com.llmall.promotion.domain.vo.VoucherVO;
+import com.llmall.promotion.domain.vo.VoucherPurchaseVO;
 import com.llmall.promotion.service.IVoucherService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -68,7 +69,7 @@ public class VoucherController {
         return voucherService.getVoucherDetail(id);
     }
 
-    @Operation(summary = "领取普通券（一人一张；有库存配置的券会条件扣减库存），返回 user_voucher.id")
+    @Operation(summary = "领取普通券（一人一张；付费需requestId；秒杀券走独立入口），返回 user_voucher.id")
     @PostMapping("/{id}/receive")
     public Long receive(@PathVariable("id") Long id,
                         @RequestBody(required = false) VoucherPwDTO body) {
@@ -76,7 +77,13 @@ public class VoucherController {
         // 所以这里把支付密码透传给业务层；pay_value=0 的营销券仍然免费领取。
         // 【注意】密码走请求体而不是 URL query：query 会进访问日志/浏览器历史/Referer。
         String pw = body == null ? null : body.getPw();
-        return voucherService.receive(id, pw);
+        return voucherService.receive(id, pw, body == null ? null : body.getRequestId());
+    }
+
+    @Operation(summary = "查询自己的普通券购买请求；未找到时返回NOT_FOUND")
+    @GetMapping("/purchases/{requestId}")
+    public VoucherPurchaseVO purchase(@PathVariable("requestId") String requestId) {
+        return voucherService.purchase(requestId);
     }
 
     @Operation(summary = "秒杀抢券（Redis+Lua 原子预扣，返回秒杀凭证 token；落库由 MQ 异步完成）")

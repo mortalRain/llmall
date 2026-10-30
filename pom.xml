@@ -42,6 +42,7 @@
         <maven.compiler.target>11</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <excludedGroups>integration</excludedGroups>
         <org.projectlombok.version>1.18.30</org.projectlombok.version>
         <!-- 版本组合说明（成套对齐，别再单独动其中一个）：
              Spring Boot 2.7.18 = 2.7 线最终版（含安全补丁）
@@ -144,7 +145,7 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <configuration>
-                        <excludedGroups>integration</excludedGroups>
+                        <excludedGroups>${excludedGroups}</excludedGroups>
                     </configuration>
                 </plugin>
             </plugins>

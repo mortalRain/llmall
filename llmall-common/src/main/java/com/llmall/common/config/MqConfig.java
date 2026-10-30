@@ -3,6 +3,9 @@ package com.llmall.common.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.llmall.common.trace.TraceContext;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import java.util.concurrent.ThreadPoolExecutor;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.config.BeanPostProcessor;
@@ -14,6 +17,32 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 @ConditionalOnClass(RabbitTemplate.class)
 public class MqConfig {
+
+    @Bean(name = "outboxDispatchExecutor")
+    public ThreadPoolTaskExecutor outboxDispatchExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(2);
+        executor.setQueueCapacity(64);
+        executor.setThreadNamePrefix("outbox-");
+        executor.setTaskDecorator(task -> {
+            String captured = TraceContext.current();
+            return () -> {
+                String previous = TraceContext.current();
+                try {
+                    if (captured == null) TraceContext.clear(); else TraceContext.set(captured);
+                    task.run();
+                } finally {
+                    if (previous == null) TraceContext.clear(); else TraceContext.set(previous);
+                }
+            };
+        });
+        executor.setAllowCoreThreadTimeOut(true);
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(5);
+        return executor;
+    }
 
     /**
      * MQ 消息序列化复用容器内的 ObjectMapper（已注册 JavaTimeModule 与项目定制），与 HTTP 接口同一套规则。
@@ -42,6 +71,13 @@ public class MqConfig {
             @Override
             public Object postProcessAfterInitialization(Object bean, String beanName) {
                 if (bean instanceof RabbitTemplate) {
+                    RabbitTemplate template = (RabbitTemplate) bean;
+                    template.setMandatory(true);
+                    if (template.getConnectionFactory() instanceof CachingConnectionFactory) {
+                        CachingConnectionFactory factory = (CachingConnectionFactory) template.getConnectionFactory();
+                        factory.setPublisherConfirmType(CachingConnectionFactory.ConfirmType.CORRELATED);
+                        factory.setPublisherReturns(true);
+                    }
                     ((RabbitTemplate) bean).setBeforePublishPostProcessors(message -> {
                         // 只在没有 traceId 时补一个，绝不覆盖已有的：死信重投（DeadLetterPublisher）
                         // 会把"最初那条消息的 traceId"原样带过来，覆盖掉它等于切断死信与最初那次请求的联系。

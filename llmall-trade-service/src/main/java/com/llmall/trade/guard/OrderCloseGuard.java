@@ -74,6 +74,11 @@ public class OrderCloseGuard {
             return Outcome.MARKED_PAID;
         }
         // 走到这里 = 确认未支付：found=false（从没发起过支付）或 payStatus∈{0,1,2}（未提交/待支付/已关闭）
+        if (status.isFound() && !Integer.valueOf(0).equals(status.getPayStatus())
+                && !Integer.valueOf(1).equals(status.getPayStatus())
+                && !Integer.valueOf(2).equals(status.getPayStatus())) {
+            return Outcome.UNKNOWN;
+        }
         orderService.cancelOrder(orderId);
         log.info("支付状态已确认为未支付，关单并回滚库存: orderId={}, found={}, payStatus={}",
                 orderId, status.isFound(), status.getPayStatus());

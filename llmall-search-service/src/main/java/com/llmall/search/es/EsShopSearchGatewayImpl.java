@@ -28,11 +28,14 @@ import org.springframework.data.elasticsearch.core.IndexOperations;
 import org.springframework.data.elasticsearch.core.SearchHit;
 import org.springframework.data.elasticsearch.core.SearchHits;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
+import org.springframework.data.elasticsearch.core.query.UpdateQuery;
+import org.springframework.data.elasticsearch.core.document.Document;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Collections;
 
 /**
  * ES 检索网关实现（Elasticsearch 7.17.x + spring-data-elasticsearch 4.4）。
@@ -55,6 +58,10 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
     private static final int STATUS_OPEN = 1;
     private static final int REINDEX_PAGE_SIZE = 200;
     private static final int REINDEX_MAX_PAGES = 200;
+    private static final String VERSIONED_UPSERT =
+            "def incoming = params.doc.eventTimestamp; def current = ctx._source.eventTimestamp; "
+            + "if (ctx.op == 'create' || current == null || (incoming != null && incoming >= current)) "
+            + "{ ctx._source = params.doc; } else { ctx.op = 'noop'; }";
 
     private final ElasticsearchOperations operations;
     private final ShopSearchDocMapper shopSearchDocMapper;
@@ -176,7 +183,7 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
         if (document == null || document.getShopId() == null) {
             return;
         }
-        operations.save(document);
+        operations.update(versionedUpdate(document), operations.getIndexCoordinatesFor(ShopSearchDocument.class));
     }
 
     @Override
@@ -184,8 +191,22 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
         if (documents == null || documents.isEmpty()) {
             return 0;
         }
-        operations.save(documents);
+        List<UpdateQuery> updates = new ArrayList<>(documents.size());
+        for (ShopSearchDocument document : documents) {
+            if (document == null || document.getShopId() == null) {
+                throw new IllegalArgumentException("批量搜索文档及id不能为空");
+            }
+            updates.add(versionedUpdate(document));
+        }
+        operations.bulkUpdate(updates, operations.getIndexCoordinatesFor(ShopSearchDocument.class));
         return documents.size();
+    }
+
+    private UpdateQuery versionedUpdate(ShopSearchDocument document) {
+        Document source = operations.getElasticsearchConverter().mapObject(document);
+        return UpdateQuery.builder(String.valueOf(document.getShopId())).withLang("painless")
+                .withScript(VERSIONED_UPSERT).withParams(Collections.singletonMap("doc", source))
+                .withScriptedUpsert(true).withUpsert(Document.create()).withRetryOnConflict(3).build();
     }
 
     @Override
@@ -216,7 +237,7 @@ public class EsShopSearchGatewayImpl implements EsShopSearchGateway {
         } catch (Exception e) {
             log.warn("[ES] 重建后 refresh 失败（数据已写入，稍后即可见）: {}", e.getMessage());
         }
-        log.info("[ES] 全量重建索引完成，共写入 {} 条", total);
+        log.info("[ES] 全量重建索引完成，共提交 {} 条文档（旧版本可能no-op）", total);
         return total;
     }
 

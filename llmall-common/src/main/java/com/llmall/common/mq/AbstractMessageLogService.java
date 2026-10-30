@@ -11,6 +11,14 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.transaction.annotation.Transactional;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +65,13 @@ public abstract class AbstractMessageLogService<M extends MessageLogSupport, MP 
     private static final String COL_NEXT_RETRY_TIME = "next_retry_time";
     private static final String COL_ERROR_MSG = "error_msg";
 
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+    @Autowired
+    @Qualifier("outboxDispatchExecutor")
+    private Executor dispatchExecutor;
+    @Value("${llmall.mq.confirm-timeout-ms:5000}")
+    private long confirmTimeoutMillis = 5000;
     private final RabbitTemplate rabbitTemplate;
     private final ObjectMapper objectMapper;
 
@@ -107,42 +122,78 @@ public abstract class AbstractMessageLogService<M extends MessageLogSupport, MP 
      */
     @Override
     public void dispatchAfterCommit(String bizType, String bizId) {
-        Runnable action = () -> {
-            M messageLog = getByBiz(bizType, bizId);
-            if (messageLog != null) {
-                dispatch(messageLog);
+        TxAfterCommit.run("enqueue " + bizType + ":" + bizId, () -> {
+            try {
+                dispatchExecutor.execute(() -> {
+                    try {
+                        M row = independently(() -> getByBiz(bizType, bizId));
+                        if (row != null) dispatch(row);
+                    } catch (RuntimeException failure) {
+                        log.warn("消息后台投递暂不可用，持久待办将重试: type={}, id={}", bizType, bizId, failure);
+                    }
+                });
+            } catch (RuntimeException saturated) {
+                log.warn("消息投递队列繁忙，保留持久待办: type={}, id={}", bizType, bizId);
             }
-        };
-        // 回调里抛异常会让已提交成功的事务在调用方看来是失败的（MQ 消费方可能因此重投整条事件）；
-        // dispatch 内部已把所有异常吞成日志 + 失败状态，TxAfterCommit 亦保证不抛出。
-        TxAfterCommit.run("dispatch " + bizType + ":" + bizId, action);
+        });
     }
 
     @Override
     public boolean dispatch(M messageLog) {
+        return dispatch(messageLog, false);
+    }
+
+    private boolean dispatch(M messageLog, boolean force) {
+        if (messageLog == null || messageLog.getId() == null) return false;
         try {
-            Object payload = readPayload(messageLog);
-            rabbitTemplate.convertAndSend(messageLog.getExchange(), messageLog.getRoutingKey(), payload);
-            update(new UpdateWrapper<M>()
-                    .eq(COL_ID, messageLog.getId())
-                    .set(COL_STATUS, MessageLogSupport.STATUS_SENT)
-                    .set(COL_ERROR_MSG, null));
-            log.info("消息投递成功: bizType={}, bizId={}", messageLog.getBizType(), messageLog.getBizId());
+            M row = independently(() -> getById(messageLog.getId()));
+            if (row == null) return false;
+            if (Integer.valueOf(MessageLogSupport.STATUS_DONE).equals(row.getStatus())
+                    || (!force && Integer.valueOf(MessageLogSupport.STATUS_SENT).equals(row.getStatus()))) return true;
+            Object payload = readPayload(row);
+            transaction(TransactionDefinition.PROPAGATION_NOT_SUPPORTED, () -> {
+                ConfirmedMessagePublisher.convertAndSend(rabbitTemplate, row.getExchange(), row.getRoutingKey(), payload, confirmTimeoutMillis);
+                return null;
+            });
+            saveDeliveryState(row.getId(), true, null);
             return true;
-        } catch (Exception e) {
-            int retry = (messageLog.getRetryCount() == null ? 0 : messageLog.getRetryCount()) + 1;
-            long delaySeconds = Math.min(RETRY_BASE_SECONDS * (1L << Math.min(retry, RETRY_SHIFT_CAP)),
-                    RETRY_MAX_SECONDS);
-            update(new UpdateWrapper<M>()
-                    .eq(COL_ID, messageLog.getId())
-                    .set(COL_STATUS, MessageLogSupport.STATUS_FAILED)
-                    .set(COL_RETRY_COUNT, retry)
-                    .set(COL_NEXT_RETRY_TIME, LocalDateTime.now().plusSeconds(delaySeconds))
-                    .set(COL_ERROR_MSG, truncate(e.getMessage(), ERROR_MSG_MAX_LENGTH)));
-            log.error("消息投递失败，将在 {} 秒后重试(第 {} 次): bizType={}, bizId={}",
-                    delaySeconds, retry, messageLog.getBizType(), messageLog.getBizId(), e);
+        } catch (Exception failure) {
+            try { saveDeliveryState(messageLog.getId(), false, failure.getMessage()); }
+            catch (RuntimeException unavailable) { log.error("投递状态未能落库，保留原状态待重试: id={}", messageLog.getId(), unavailable); }
+            log.warn("消息未确认，保留重试: type={}, id={}", messageLog.getBizType(), messageLog.getBizId(), failure);
             return false;
         }
+    }
+
+    private void saveDeliveryState(Long id, boolean confirmed, String error) {
+        independently(() -> {
+            M row = getOne(new QueryWrapper<M>().eq(COL_ID, id).last("FOR UPDATE"), false);
+            if (row == null || Integer.valueOf(MessageLogSupport.STATUS_DONE).equals(row.getStatus())) return null;
+            // A late failed publisher must not erase a peer's acknowledged result.
+            if (!confirmed && Integer.valueOf(MessageLogSupport.STATUS_SENT).equals(row.getStatus())) return null;
+            UpdateWrapper<M> change = new UpdateWrapper<M>().eq(COL_ID, id);
+            if (confirmed) {
+                change.set(COL_STATUS, MessageLogSupport.STATUS_SENT).set(COL_ERROR_MSG, null);
+            } else {
+                int retry = (int) Math.min(Integer.MAX_VALUE, Math.max(0L, row.getRetryCount() == null ? 0L : row.getRetryCount().longValue()) + 1L);
+                long delay = Math.min(RETRY_BASE_SECONDS * (1L << Math.min(retry, RETRY_SHIFT_CAP)), RETRY_MAX_SECONDS);
+                change.set(COL_STATUS, MessageLogSupport.STATUS_FAILED).set(COL_RETRY_COUNT, retry)
+                        .set(COL_NEXT_RETRY_TIME, LocalDateTime.now().plusSeconds(delay)).set(COL_ERROR_MSG, truncate(error, ERROR_MSG_MAX_LENGTH));
+            }
+            update(change);
+            return null;
+        });
+    }
+
+    private <T> T independently(Supplier<T> action) {
+        return transaction(TransactionDefinition.PROPAGATION_REQUIRES_NEW, action);
+    }
+
+    private <T> T transaction(int propagation, Supplier<T> action) {
+        if (transactionManager == null) throw new IllegalStateException("Missing message transaction manager");
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setPropagationBehavior(propagation);
+        return template.execute(status -> action.get());
     }
 
     @Override
@@ -174,7 +225,7 @@ public abstract class AbstractMessageLogService<M extends MessageLogSupport, MP 
             return false;
         }
         log.warn("触发对账补偿重发: bizType={}, bizId={}", bizType, bizId);
-        return dispatch(messageLog);
+        return dispatch(messageLog, true);
     }
 
     @Override

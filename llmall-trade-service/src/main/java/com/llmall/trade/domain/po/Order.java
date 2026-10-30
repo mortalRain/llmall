@@ -26,6 +26,9 @@ public class Order implements Serializable {
     public static final int STATUS_CANCELED = 5;
     /** 已核销（门店套餐/团购券到店使用后） */
     public static final int STATUS_VERIFIED = 7;
+    /** Cancellation/refund accepted; remote compensation is durable and retryable. */
+    public static final int STATUS_CANCELING = 8;
+    public static final int STATUS_REFUNDING = 9;
 
     @TableId(value = "id", type = IdType.ASSIGN_ID)
     private Long id;
@@ -55,7 +58,7 @@ public class Order implements Serializable {
 
     private Long userId;
 
-    /** 订单状态：1 未付款 2 已付款（待发货/待核销） 5 交易取消/订单关闭 7 已核销，取值见上方 STATUS_* 常量 */
+    /** 订单状态：1 未付款、2 已付款、5 已关闭、7 已核销、8 取消处理中、9 退款处理中 */
     private Integer status;
 
     private LocalDateTime createTime;

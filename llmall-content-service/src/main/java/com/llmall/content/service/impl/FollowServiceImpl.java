@@ -3,6 +3,7 @@ package com.llmall.content.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.llmall.common.exception.BizIllegalException;
+import com.llmall.common.exception.BadRequestException;
 import com.llmall.common.exception.UnauthorizedException;
 import com.llmall.common.metrics.BizMetrics;
 import com.llmall.common.utils.CollUtils;
@@ -30,8 +31,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -54,15 +54,6 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
 
     /** 笔记状态"已发布"：对外可见的唯一状态（与笔记详情的可见性判据保持一致） */
     private static final int STATUS_PUBLISHED = 1;
-
-    /** 补拉时每个大V 作者最多取几条：取页面上限的一半，既能让单个作者填满半页，也不让每批回表量翻倍 */
-    private static final int FEED_PULL_PER_AUTHOR = 20;
-
-    /** 补拉按作者分批的批大小：每批一条 SQL，批大小同时决定 IN 参数长度与批数 */
-    private static final int FEED_PULL_AUTHOR_BATCH = 20;
-
-    /** 单页参与补拉的大V 作者数上限：条数上界靠它卡死；超出时在响应里显式标记 pullTruncated */
-    private static final int FEED_PULL_AUTHOR_CAP = 200;
 
     private final FeedInboxMapper feedInboxMapper;
     private final BlogMapper blogMapper;
@@ -271,105 +262,47 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
 
     @Override
     public FeedPageVO queryFeedItemsV2(Long userId, Long lastInboxId, LocalDateTime lastCt, Long lastBlogId,
-                                       Long afterAuthorId, Integer size) {
-        if (userId == null) {
-            return new FeedPageVO().setItems(CollUtils.emptyList());
+                                      Long afterAuthorId, Integer size) {
+        FeedPageVO page = new FeedPageVO().setItems(CollUtils.emptyList()).setHasMore(false)
+                .setPullApplied(false).setPullTruncated(false).setNextAuthorId(null)
+                .setNextLi(lastInboxId).setNextCt(lastCt).setNextCi(lastBlogId);
+        if (userId == null) return page;
+        if ((lastCt == null) != (lastBlogId == null)
+                || (lastBlogId != null && lastBlogId <= 0)
+                || (lastCt == null && (lastInboxId != null || afterAuthorId != null))) {
+            throw new BadRequestException("分页请同时提供发布时间ct和正数笔记id ci");
         }
         int limit = (size == null || size <= 0) ? 10 : Math.min(size, 50);
+        List<FeedInbox> inbox = feedInboxMapper.selectFeedPage(userId, lastCt, lastBlogId, limit + 1);
+        List<Blog> pulled = blogMapper.selectBigvFeedPage(userId, FEED_PUSH_THRESHOLD, lastCt, lastBlogId, limit + 1);
+        page.setPullApplied(!pulled.isEmpty());
 
-        // 【条数上界第一笔】关注列表单独一条 SQL。afterAuthorId 是补拉作者游标：
-        // 关注数超过单页上限时，下一页从本页最后一个作者继续，不会永久漏内容。
-        List<Follow> followingRows = baseMapper.selectFollowingPage(userId, afterAuthorId, FEED_PULL_AUTHOR_CAP + 1);
-        boolean pullTruncated = followingRows.size() > FEED_PULL_AUTHOR_CAP;
-        Long nextAuthorId = null;
-        if (pullTruncated) {
-            followingRows = new ArrayList<>(followingRows.subList(0, FEED_PULL_AUTHOR_CAP));
-            nextAuthorId = followingRows.get(followingRows.size() - 1).getId();
-            log.warn("[Feed] 关注作者数超过单页补拉上限 {}，本页只覆盖到作者游标 {}，下一页请回传 nextAuthorId: userId={}",
-                    FEED_PULL_AUTHOR_CAP, nextAuthorId, userId);
-        }
-        List<Long> following = followingRows.stream()
-                .map(Follow::getFollowUserId)
-                .collect(Collectors.toList());
-
-        // 收件箱侧仍按主键倒序取：feed_inbox 的索引是 (user_id, id DESC)，按发布时间过滤没有索引可用，
-        // 因此这里不按时间游标过滤，改为归并时统一时间轴。取 limit 条足够：两路各自降序时，
-        // 各自的前 limit 条就足以算出归并后的前 limit 条，多取无益。
-        // 该查询的访问路径由 (user_id, id DESC) 保证；数据量很小时优化器可能改用 uk_user_blog
-        // 并对该用户自己的收件箱排一次序，两种走法都只读取当前用户的行，不随全表规模增长。
-        List<FeedInbox> inbox = feedInboxMapper.selectList(new LambdaQueryWrapper<FeedInbox>()
-                .eq(FeedInbox::getUserId, userId)
-                .lt(lastInboxId != null, FeedInbox::getId, lastInboxId)
-                .orderByDesc(FeedInbox::getId)
-                .last("LIMIT " + limit));
-
-        // 【条数上界其余各笔】补拉按作者分批，每批一条 SQL：
-        // 条数 = 收件箱 1 + 详情批量 1 + 关注列表 1 + 批数，批数 = 关注作者数除以批大小向上取整。
-        List<Blog> pulled = new ArrayList<>();
-        for (int i = 0; i < following.size(); i += FEED_PULL_AUTHOR_BATCH) {
-            List<Long> batch = following.subList(i, Math.min(i + FEED_PULL_AUTHOR_BATCH, following.size()));
-            pulled.addAll(blogMapper.selectBigvRecentBlogs(batch, FEED_PUSH_THRESHOLD, lastCt, lastBlogId,
-                    batch.size() * FEED_PULL_PER_AUTHOR));
-        }
-        // 每作者截断：SQL 只做全局 LIMIT，某个作者在同一时间窗内发得特别密会把其他作者的候选挤掉，
-        // 因此在内存里再按作者取前 N 条，保证一页不被单个作者占满。
-        Map<Long, Integer> perAuthor = new HashMap<>();
-        List<Blog> candidates = new ArrayList<>();
-        for (Blog blog : pulled) {
-            if (perAuthor.merge(blog.getUserId(), 1, Integer::sum) <= FEED_PULL_PER_AUTHOR) {
-                candidates.add(blog);
-            }
-        }
-
-        // 归并去重：作者昨天粉丝未过阈值时笔记已被推进收件箱，今天过阈值后新笔记只走补拉；
-        // 跨阈值那一刻两路数据集相交，同一篇笔记会同时出现在两边，按 blog_id 去重是这条链路的必需品。
-        Set<Long> seenBlogIds = new HashSet<>();
-        List<FeedCandidate> merged = new ArrayList<>(inbox.size() + candidates.size());
+        // 两路都已按同一二元组排序、过滤，各取前limit+1足以得到全局前limit+1。
+        Map<Long, FeedCandidate> byBlog = new LinkedHashMap<>();
         for (FeedInbox row : inbox) {
-            if (seenBlogIds.add(row.getBlogId())) {
-                merged.add(new FeedCandidate(row.getBlogId(), row.getCreateTime(), row.getId(), row.getAuthorId()));
-            }
+            byBlog.putIfAbsent(row.getBlogId(), new FeedCandidate(row.getBlogId(), row.getCreateTime(), row.getId(), row.getAuthorId()));
         }
-        for (Blog blog : candidates) {
-            if (seenBlogIds.add(blog.getId())) {
-                merged.add(new FeedCandidate(blog.getId(), blog.getCreateTime(), null, blog.getUserId()));
-            }
+        for (Blog blog : pulled) {
+            byBlog.putIfAbsent(blog.getId(), new FeedCandidate(blog.getId(), blog.getCreateTime(), null, blog.getUserId()));
         }
-        merged.sort(Comparator
-                .comparing(FeedCandidate::getCreateTime, Comparator.nullsLast(Comparator.reverseOrder()))
+        List<FeedCandidate> merged = new ArrayList<>(byBlog.values());
+        merged.sort(Comparator.comparing(FeedCandidate::getCreateTime, Comparator.reverseOrder())
                 .thenComparing(FeedCandidate::getBlogId, Comparator.reverseOrder()));
-        if (merged.size() > limit) {
-            merged = merged.subList(0, limit);
-        }
-
-        FeedPageVO page = new FeedPageVO().setPullApplied(!candidates.isEmpty())
-                .setPullTruncated(pullTruncated)
-                .setNextAuthorId(nextAuthorId)
-                .setNextLi(lastInboxId).setNextCt(lastCt).setNextCi(lastBlogId);
-        if (merged.isEmpty()) {
-            return page.setItems(CollUtils.emptyList());
-        }
-
-        List<Long> blogIds = merged.stream().map(FeedCandidate::getBlogId).collect(Collectors.toList());
+        page.setHasMore(merged.size() > limit);
+        if (merged.isEmpty()) return page;
+        List<FeedCandidate> consumed = merged.subList(0, Math.min(limit, merged.size()));
+        List<Long> blogIds = consumed.stream().map(FeedCandidate::getBlogId).collect(Collectors.toList());
         Map<Long, Blog> detail = blogMapper.selectBatchIds(blogIds).stream()
                 .collect(Collectors.toMap(Blog::getId, blog -> blog, (left, right) -> left));
-        Long currentUserId = UserContext.getUser();
-        List<FeedItemVO> items = new ArrayList<>(merged.size());
-        for (FeedCandidate candidate : merged) {
-            Blog blog = detail.get(candidate.getBlogId());
-            if (blog == null) {
-                // 笔记被物理删除：收件箱里还留着指针，跳过而不是抛异常
-                continue;
-            }
-            boolean authorSelf = currentUserId != null && currentUserId.equals(blog.getUserId());
-            if (!Integer.valueOf(STATUS_PUBLISHED).equals(blog.getStatus()) && !authorSelf) {
-                continue;
-            }
-            items.add(toFeedItem(candidate.getFeedId(), candidate.getAuthorId(), blog));
-            // 游标只随真正返回的条目前进：被跳过的条目不参与翻页，否则一次跳过就会翻丢一页
+        List<FeedItemVO> items = new ArrayList<>(consumed.size());
+        for (FeedCandidate candidate : consumed) {
+            // 详情查询前内容可能被删/屏蔽。仍消费候选推进游标，避免空页卡住；hasMore不依赖可见条数。
             page.setNextCt(candidate.getCreateTime()).setNextCi(candidate.getBlogId());
-            if (candidate.getFeedId() != null) {
-                page.setNextLi(candidate.getFeedId());
+            if (candidate.getFeedId() != null) page.setNextLi(candidate.getFeedId());
+            Blog blog = detail.get(candidate.getBlogId());
+            if (blog != null && (Integer.valueOf(STATUS_PUBLISHED).equals(blog.getStatus())
+                    || userId.equals(blog.getUserId()))) {
+                items.add(toFeedItem(candidate.getFeedId(), candidate.getAuthorId(), blog));
             }
         }
         return page.setItems(items);

@@ -33,10 +33,10 @@ public interface EsShopSearchGateway {
      */
     PageDTO<ShopDTO> search(String keyword, Long typeId, int page, int size, Double x, Double y);
 
-    /** 写入/覆盖单个文档（幂等：以 shopId 为主键） */
+    /** 按shopId原子比较版本后写完整文档，迟到旧版本不覆盖新文档。 */
     void saveDocument(ShopSearchDocument document);
 
-    /** 批量写入（全量重建用） */
+    /** 批量版本upsert（重建用），返回提交条数，包含被判为旧版本的no-op。 */
     int saveDocuments(Collection<ShopSearchDocument> documents);
 
     /** 用 MySQL 读模型全量重建索引，返回写入条数 */

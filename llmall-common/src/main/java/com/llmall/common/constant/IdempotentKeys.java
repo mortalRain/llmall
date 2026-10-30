@@ -1,40 +1,10 @@
 package com.llmall.common.constant;
 
 /**
- * 全局幂等键统一收口：跨服务的幂等键前缀与完整格式只在本类定义，业务代码一律调用本类方法取键。
- *
- * 【键的构成】三段拼接，缺一不可：
- * 1. 业务前缀：标明该动作属于哪个业务域，是对账时按业务归类查询的依据；
- * 2. 业务主键：支付单 id、券 id + 用户 id、订单号等，由服务端产生；
- * 3. 口径区分：同一业务的不同口径必须拼成不同字符串（扣款与退款、收款与退款、关单回滚与退款回滚）。
- *
- * 【为什么必须集中定义而不能各处手拼】键一旦允许在各服务手拼，会出现三类失效：
- * 1. 扣款键与退款键共用一个格式，并发下第二个请求的退款会把第一个请求已成功的扣款退走，直接资损；
- * 2. 键里混入客户端可控的 traceId 或按次随机值，重放与重试会落到不同的键上，重复扣款；
- * 3. 改一处漏一处，前缀在 A 服务改了、B 服务的对账查询仍用旧前缀，对账静默查不到、也无法按前缀归类。
- * 集中到本类后键的形态只有一个定义点，评审时能一眼看全。
- *
- * 【两条硬性设计约束】
- * 1. 扣款键必须确定（同一逻辑动作恒定），退款键必须与扣款键不同值。
- *    扣款键确定才能保证"重复点击 / 网络重发"不重复扣款；
- *    退款键不同值才能保证"某次尝试失败要退款"时，不会把另一次尝试的扣款退掉。
- * 2. 禁止把客户端可控的值（traceId / 请求头 / 前端传参）放进键，也禁止用按次随机值当扣款键。
- *    幂等键一旦可被调用方选择，就等于把"是否重复扣款"的决定权交给了调用方；
- *    只有业务口径本身就按次区分时才允许随机成分，见本类 voucherRefund。
- *
- * 【生命周期】这些键最终都落到下游用户域 {@code balance_flow.biz_no} 或库存域 {@code stock_flow}
- * 的唯一索引上：它们不是 Redis 键，而是数据库唯一键 ——
- * 生命周期由数据保留策略决定，不依赖 Redis TTL，不会因缓存丢失而失效
- * （这正是把幂等锚定在数据库而非 Redis 的原因：缓存可以丢，唯一键不会）。
- * 落库位置、唯一索引与保留期：
- * 1. 支付扣款 / 退款：balance_flow，uk_biz(biz_type, biz_no)，随流水永久保留（对账依据）；
- * 2. 领券收款 / 退款：balance_flow，uk_biz(biz_type, biz_no)，同上；
- * 3. 库存扣减 / 回补：stock_flow，uk_biz(biz_type, biz_id, item_id)，同上；
- * 4. MQ 消费幂等：consume_record，uk_consume(biz_type, biz_id, consumer)，同上。
- * 【注意】需要 TTL 的是与键配套的 Redis 锁与结果标记，不是键本身，它们登记在本类第五分区。
- *
- * @author 同城生活
- * @since 2026-10
+ * 跨服务业务键的统一构造入口，数据库流水或消费记录负责最终去重。
+ * 同一尝试的重试必须复用原键；退款后的新购买必须使用新尝试。
+ * 业务唯一性与资金尝试唯一性不同：一人一券由券表约束，不能据此复用已退款扣款。
+ * 需要跨进程恢复的尝试ID还必须持久化，仅生成业务键不能保证恢复。
  */
 public final class IdempotentKeys {
 
@@ -77,7 +47,7 @@ public final class IdempotentKeys {
 
     // 二、营销域（llmall-promotion-service）：收款键确定，退款键按次唯一
 
-    /** 付费券收款键前缀，完整格式：{@code VOUCHER_BUY_<券id>_<用户id>} */
+    /** 普通券收款键前缀；新请求还需包含购买尝试ID。 */
     public static final String VOUCHER_BUY_PREFIX = "VOUCHER_BUY_";
 
     /** 付费券退款键前缀，完整格式：{@code VOUCHER_REFUND_<券id>_<用户id>_<尝试uuid>} */
@@ -89,25 +59,17 @@ public final class IdempotentKeys {
     /** 秒杀券退款键前缀，完整格式：{@code SECKILL_REFUND:<token>} */
     public static final String SECKILL_REFUND_PREFIX = "SECKILL_REFUND:";
 
-    /**
-     * 付费券收款幂等键（确定性）：同一用户对同一券恒定，保证重复点击不重复扣款。
-     *
-     * 【为什么按"一人一张券"取】{@code uk_user_voucher(user_id, voucher_id)} 已保证
-     * 一个用户对一张券只能买一次，因此用（券 id, 用户 id）作键与业务唯一性完全对齐。
-     */
+    /** 历史收款键；不能用于退款后可重试的新购买流程。 */
     public static String voucherBuy(Long voucherId, Long userId) {
         return VOUCHER_BUY_PREFIX + voucherId + "_" + userId;
     }
 
-    /**
-     * 付费券退款幂等键（按次唯一）。
-     *
-     * 【为什么不能沿用收款键】并发的第二个请求会因为"扣款被下游幂等跳过，但仍返回成功"
-     * 而误判为自己付过钱；它失败后若用同一个键退款，就会把第一个请求已经成功的扣款退回去，
-     * 等于用户不付钱就拿到付费券。故退款键必须按"这一次尝试"唯一。
-     *
-     * @param attemptId 本次尝试的唯一标识（调用方生成，如 {@code IdUtil.fastSimpleUUID()}）
-     */
+    /** 同一购买尝试始终使用同一扣款键；退款后重新购买必须使用新尝试。 */
+    public static String voucherBuy(Long voucherId, Long userId, String attemptId) {
+        return voucherBuy(voucherId, userId) + "_" + attemptId;
+    }
+
+    /** 退款与扣款使用同一个attemptId；退款重试不得重新生成它。 */
     public static String voucherRefund(Long voucherId, Long userId, String attemptId) {
         return VOUCHER_REFUND_PREFIX + voucherId + "_" + userId + "_" + attemptId;
     }

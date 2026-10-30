@@ -1,7 +1,7 @@
 import axios, { AxiosHeaders } from 'axios'
 import type { AxiosError, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import JSONBig from 'json-bigint'
-import { clearSession, getAccessToken, getRefreshToken, saveTokens } from '@/utils/session'
+import { clearSession, getAccessToken, getRefreshToken, getStoredUser, saveTokens } from '@/utils/session'
 
 export const API_BASE_URL = '/api'
 
@@ -39,6 +39,7 @@ function authorizationValue(token: string): string {
 }
 
 interface RetryableConfig extends InternalAxiosRequestConfig {
+  expectedUserId?: string
   /** 已用新令牌重放过一次，避免刷新后仍 401 时无限循环 */
   _retried?: boolean
   /** 匿名接口：不附加 authorization */
@@ -61,6 +62,9 @@ const http = axios.create({
 
 http.interceptors.request.use((config) => {
   const requestConfig = config as RetryableConfig
+  if (requestConfig.expectedUserId && getStoredUser()?.userId !== requestConfig.expectedUserId) {
+    throw new Error('登录账号已变化，请刷新后重试')
+  }
   if (!requestConfig.skipAuth) {
     const token = getAccessToken()
     if (token) {
@@ -128,6 +132,10 @@ function handleSessionExpired(): void {
 
 http.interceptors.response.use(
   (response) => {
+    const expectedUserId = (response.config as RetryableConfig).expectedUserId
+    if (expectedUserId && getStoredUser()?.userId !== expectedUserId) {
+      throw new Error('登录账号已变化，请刷新后重试')
+    }
     // 网关在 access 过期但 refresh 有效时会无感换发，并通过响应头回传新 access
     const renewed = response.headers['x-access-token']
     if (typeof renewed === 'string' && renewed && renewed !== getAccessToken()) {
@@ -216,6 +224,7 @@ export function getAuthErrorReason(error: unknown): string {
 
 /** api/modules.ts 可用的扩展请求配置 */
 export interface RequestOptions extends AxiosRequestConfig {
+  expectedUserId?: string
   skipAuth?: boolean
   skipAuthRefresh?: boolean
 }

@@ -6,6 +6,7 @@ import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cloud.openfeign.EnableFeignClients;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 营销域服务：优惠券与秒杀券、领券（一人一单）、券核销。
@@ -14,6 +15,7 @@ import org.springframework.cloud.openfeign.EnableFeignClients;
 @EnableFeignClients(basePackages = "com.llmall.api.client", defaultConfiguration = {DefaultFeignConfig.class, NoRetryFeignConfig.class})
 @MapperScan("com.llmall.promotion.mapper")
 @SpringBootApplication
+@EnableScheduling
 public class PromotionApplication {
     public static void main(String[] args) {
         SpringApplication.run(PromotionApplication.class, args);

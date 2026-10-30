@@ -32,6 +32,8 @@ import com.llmall.user.service.IUserService;
 import com.llmall.user.sms.CodeSender;
 import com.llmall.user.support.VerificationCodePolicy;
 import com.llmall.user.support.WeakPasswordPolicy;
+import com.llmall.user.support.PasswordAttemptGuard;
+import com.llmall.user.support.PayPasswordVerifier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
@@ -62,8 +64,7 @@ import java.util.stream.Collectors;
  *
  * 【口令职责分离】user 表用两列分别存两种口令，两列禁止互相读写：
  * 1. password（登录口令）：只在 login 校验，只由 changeLoginPassword 与自动注册写入；
- * 2. pay_password（支付口令）：只经 UserMapper.selectPayPassword 取出，在 deductMoney 与
- *    changePayPassword 校验，只由 changePayPassword 与自动注册写入。
+ * 2. pay_password（支付口令）：由 PayPasswordVerifier 统一读取和校验，扣款与支付改密共用错误锁定。
  *
  * 【为什么必须分两列】两种口令的强度要求相反：登录口令必须不可预期（自动注册用随机值，
  * 否则"用户名由手机号推导 + 口令固定"就等于知道手机号即可接管账号）；
@@ -112,12 +113,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
      * 且到期时间自然错开，避免集中到期。
      */
     private static final Duration WEAK_PASSWORD_GRACE = WeakPasswordPolicy.GRACE;
-
-    /** 口令错误锁定阈值与锁定时长 */
-    private static final int PWD_MAX_FAIL = 5;
-    private static final Duration PWD_LOCK_DURATION = Duration.ofMinutes(30);
-    /** 口令错误计数的保留时间：比锁定时长略长，使"锁定解除后计数也重置" */
-    private static final Duration PWD_FAIL_TTL = Duration.ofMinutes(31);
 
     /** 登录口令连续错误阈值与锁定时间，防止在线撞库 */
     private static final int LOGIN_MAX_FAIL = 5;
@@ -168,6 +163,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             Long.class);
 
     private final PasswordEncoder passwordEncoder;
+    private final PasswordAttemptGuard passwordAttempts;
+    private final PayPasswordVerifier payPasswords;
 
     private final ITokenService tokenService;
     private final StringRedisTemplate redisTemplate;
@@ -370,6 +367,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     @Transactional(rollbackFor = Exception.class)
     public void deductMoney(String pw, Integer totalFee, String bizNo) {
         Long userId = UserContext.getUser();
+        if (userId == null) throw new UnauthorizedException("未登录");
         log.info("开始扣款: userId={}, amount={}, bizNo={}", userId, totalFee, bizNo);
         if (totalFee == null || totalFee <= 0) {
             throw new BizIllegalException("支付金额非法");
@@ -382,24 +380,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         if (user == null) {
             throw new BizIllegalException("用户不存在");
         }
-        // 【注意】只校验 pay_password 列，禁止改读 password：两列一旦互相读写，
-        // 用户改登录口令就会顺带改变支付能力，且把登录口令牵进支付链路
-        String payPasswordHash = baseMapper.selectPayPassword(userId);
-        if (payPasswordHash == null || !passwordEncoder.matches(pw, payPasswordHash)) {
-            // 不回显任何默认口令：错误提示里带口令等于把攻击所需的最后一个信息直接送给调用方
-            throw new BizIllegalException("支付密码错误");
-        }
-        // 【首次支付前强制改密】仍在使用初始支付口令时拦截本次扣款，引导用户先改密。
-        //   · 判据是"当前口令是否等于初始口令"，不是"是否改过" —— 用户把口令改成其它值后即永久放行，
-        //     即使后来又把口令改回初始值也无所谓（那已是用户的自主选择，不再是"从未设置过"）；
-        //   · 放在密码校验之后：先证明"你知道当前口令"，避免把"没设过口令"这一状态
-        //     泄露给不知道口令的调用方（否则等于给攻击者一个免费的状态探测接口）；
-        //   · 已自行设置过支付密码的账号完全无感，支付主流程不变。
-        if (passwordEncoder.matches(INITIAL_PASSWORD, payPasswordHash)) {
-            log.warn("拦截余额支付：账号仍在使用初始支付口令，需先修改支付密码: userId={}, bizNo={}",
-                    userId, bizNo);
-            throw new BizIllegalException("请先修改支付密码（当前仍为初始密码），修改后再进行余额支付");
-        }
+        payPasswords.verifyForPayment(userId, pw);
 
         int balanceBefore = user.getBalance() == null ? 0 : user.getBalance();
         Long flowId;
@@ -634,90 +615,11 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
     }
 
-    /** 口令错误锁定校验：锁定期内直接拒绝，连密码比对都不做（避免用比对耗时做侧信道探测） */
-    private void assertNotPasswordLocked(Long userId) {
-        String lockKey = AuthConstants.REDIS_PWD_LOCK + userId;
-        try {
-            if (Boolean.TRUE.equals(redisTemplate.hasKey(lockKey))) {
-                Long ttl = redisTemplate.getExpire(lockKey);
-                long minutes = ttl == null || ttl < 0 ? PWD_LOCK_DURATION.toMinutes() : (ttl + 59) / 60;
-                log.warn("账号处于口令锁定状态，拒绝验证: userId={}, 剩余约 {} 分钟", userId, minutes);
-                throw new BizIllegalException("支付密码连续输错次数过多，账号已临时锁定，请 "
-                        + minutes + " 分钟后再试");
-            }
-        } catch (BizIllegalException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("口令锁定状态查询失败（放行）: userId={}", userId, e);
-        }
-    }
-
-    /**
-     * 记录一次口令错误：达到阈值即锁定。
-     *
-     * 【计数与锁定分开两个 key 的原因】计数需要"锁定解除后归零"，
-     * 若与锁定共用一个 key，锁定到期时计数也跟着消失是恰好想要的；
-     * 但二者 TTL 不同（计数略长于锁定），分开写更直观且便于运维单查锁定状态。
-     */
-    private void recordPasswordFailure(Long userId) {
-        String failKey = AuthConstants.REDIS_PWD_FAIL_COUNT + userId;
-        try {
-            Long fails = redisTemplate.opsForValue().increment(failKey);
-            redisTemplate.expire(failKey, PWD_FAIL_TTL);
-            if (fails != null && fails >= PWD_MAX_FAIL) {
-                redisTemplate.opsForValue().set(AuthConstants.REDIS_PWD_LOCK + userId, "1", PWD_LOCK_DURATION);
-                redisTemplate.delete(failKey);
-                log.error("【安全】支付密码连续错误 {} 次，账号已锁定 {} 分钟: userId={}",
-                        PWD_MAX_FAIL, PWD_LOCK_DURATION.toMinutes(), userId);
-            } else if (fails != null) {
-                log.warn("支付密码错误（第 {}/{} 次）: userId={}", fails, PWD_MAX_FAIL, userId);
-            }
-        } catch (Exception e) {
-            log.warn("记录口令错误次数失败: userId={}", userId, e);
-        }
-    }
-
-    /**
-     * 查询支付密码锁定状态。
-     *
-     * 【实现说明】直接查锁定 key 的剩余 TTL，而不是自己维护"锁定到什么时候"：
-     * key 的 TTL 就是锁定的权威剩余时间，自己再存一份时间戳会引入第二个真相源。
-     *
-     * 【异常处理】Redis 不可用时返回"未锁定"而不是报错：
-     * 这是展示态接口，把它变成 500 会让支付页整页报错；
-     * 真到了校验环节，{@link #assertNotPasswordLocked} 会按自己的判据处理（找不到 key 即放行），
-     * 两者对"Redis 不可用"的取向一致 —— 保可用。
-     */
+    /** 只暴露锁定与剩余时间；Redis不可用时不伪报“未锁定”。 */
     @Override
     public PwdLockStatusVO queryPayPasswordLockStatus() {
-        Long userId = UserContext.getUser();
-        if (userId == null) {
-            throw new UnauthorizedException("未登录");
-        }
-        PwdLockStatusVO vo = new PwdLockStatusVO().setLocked(false).setRemainMinutes(0L);
-        try {
-            Long ttlSeconds = redisTemplate.getExpire(AuthConstants.REDIS_PWD_LOCK + userId);
-            if (ttlSeconds != null && ttlSeconds > 0) {
-                // 向上取整：剩余 10 秒若显示 0 分钟，用户会立刻重试并再次失败
-                long minutes = Math.max(1L, (ttlSeconds + 59) / 60);
-                vo.setLocked(true).setRemainMinutes(minutes);
-            }
-        } catch (Exception e) {
-            log.warn("查询支付密码锁定状态失败（按未锁定返回，不影响页面渲染）: userId={}", userId, e);
-        }
-        return vo;
+        return passwordAttempts.paymentStatus(UserContext.getUser());
     }
-
-    /** 口令校验通过后清零失败计数与锁定标记 */
-    private void clearPasswordFailure(Long userId) {
-        try {
-            redisTemplate.delete(AuthConstants.REDIS_PWD_FAIL_COUNT + userId);
-            redisTemplate.delete(AuthConstants.REDIS_PWD_LOCK + userId);
-        } catch (Exception e) {
-            log.warn("清除口令错误计数失败: userId={}", userId, e);
-        }
-    }
-
     /**
      * 登录锁定检查：连续失败达阈值后，在一段时间内直接拒绝，不再消耗 bcrypt 计算。
      *
@@ -939,20 +841,13 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
         // ⓪ 防暴力破解：频控 + 锁定（在任何口令比对之前）
         assertPasswordChangeAllowed(userId);
-        assertNotPasswordLocked(userId);
+        passwordAttempts.check(userId, PasswordAttemptGuard.Purpose.PAYMENT);
 
         // ① 短信验证码：证明操作者持有该账号绑定的手机号（改密场景独立，登录码不能复用）
         consumeCode(user.getPhone(), VerificationCodePolicy.SCENE_PAY_PASSWORD, form.getCode());
 
-        // ② 原支付密码：只比对 pay_password 列，与登录口令严格分离
-        String currentHash = baseMapper.selectPayPassword(userId);
-        if (currentHash == null || !passwordEncoder.matches(form.getOldPassword(), currentHash)) {
-            // 记录失败次数（达阈值即锁定）。注意：验证码已在 ① 被核销，
-            // 用户需要重新获取验证码才能再试 —— 这本身就是一道额外的成本。
-            recordPasswordFailure(userId);
-            // 不回显任何默认口令：错误提示里带口令等于把攻击所需的最后一个信息送给调用方
-            throw new BizIllegalException("原支付密码错误");
-        }
+        // 与扣款共用支付口令错误预算，初始口令允许在此修改。
+        String currentHash = payPasswords.verifyForChange(userId, form.getOldPassword());
 
         // ③ 新旧必须不同：否则"改密"是空操作，强制改密会被绕过
         if (passwordEncoder.matches(form.getNewPassword(), currentHash)) {
@@ -969,7 +864,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
                 .set(User::getPayPassword, passwordEncoder.encode(form.getNewPassword()))
                 .update();
         // ④ 改密成功：清零失败计数 + 强制全部会话下线（口令是最高凭证，改密即等于全设备登出）
-        clearPasswordFailure(userId);
         // 会话失效放在事务提交之后：本方法带 @Transactional，若提交阶段失败（口令实际未变），
         // 提前踢人会让用户在什么都没改成的情况下被登出，且旧口令仍有效 —— 语义矛盾。
         invalidateSessionsAfterCommit(userId);
@@ -998,7 +892,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     /**
      * 修改登录密码（需登录）。
      *
-     * 【与 {@link #changePayPassword} 的关系】两者共用同一套防护（频控、锁定、验证码、
+     * 【与 {@link #changePayPassword} 的关系】两者共用防护机制，但错误计数按口令用途隔离（频控、锁定、验证码、
      * 会话失效），差别只在"改哪一列"与"原始口令取哪列"：
      * 本方法动 {@code password}，支付密码方法动 {@code pay_password}，二者互不干扰。
      *
@@ -1018,14 +912,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
         // ⓪ 防暴力破解：频控 + 锁定
         assertPasswordChangeAllowed(userId);
-        assertNotPasswordLocked(userId);
+        passwordAttempts.check(userId, PasswordAttemptGuard.Purpose.LOGIN_CHANGE);
 
         // ① 短信验证码：证明持有账号绑定的手机号（改密场景独立，登录码不能复用）
         consumeCode(user.getPhone(), VerificationCodePolicy.SCENE_LOGIN_PASSWORD, form.getCode());
 
         // ② 原登录口令：只比对 password 列
         if (user.getPassword() == null || !passwordEncoder.matches(form.getOldPassword(), user.getPassword())) {
-            recordPasswordFailure(userId);
+            passwordAttempts.failure(userId, PasswordAttemptGuard.Purpose.LOGIN_CHANGE);
             throw new BizIllegalException("原登录密码错误");
         }
 
@@ -1043,7 +937,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
                 .set(User::getPassword, passwordEncoder.encode(form.getNewPassword()))
                 .update();
         // ④ 改密成功：清零失败计数、清除弱口令缓冲期标记、全部会话下线
-        clearPasswordFailure(userId);
+        passwordAttempts.success(userId, PasswordAttemptGuard.Purpose.LOGIN_CHANGE);
         clearWeakPasswordGrace(userId);
         // 同 changePayPassword：会话失效等提交后再执行，避免"提交失败却已踢人"
         invalidateSessionsAfterCommit(userId);

@@ -50,4 +50,5 @@ public interface IOrderService extends IService<Order> {
      * 关闭支付单，四件事都要落地，缺一件就是一笔对不上的账。
      */
     void refundMyOrder(Long orderId);
+    void recoverCompensation(Long orderId);
 }

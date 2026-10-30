@@ -18,6 +18,10 @@ public class PayClientFallback implements FallbackFactory<PayClient> {
     public PayClient create(Throwable cause) {
         return new PayClient() {
             @Override
+            public PayOrderStatusDTO closeUnpaid(com.llmall.api.dto.TradeOrderDTO order) {
+                return PayOrderStatusDTO.unknown("支付服务不可用，未执行关闭");
+            }
+            @Override
             public PayOrderStatusDTO queryPayOrderByBizOrderNo(Long id) {
                 log.error("远程调用PayClient的queryPayOrderByBizOrderNo失败，支付状态未知，bizOrderNo：{}", id, cause);
                 // 关键：返回"未知"而不是 null / notFound。后两者都会被误读成"未支付"
@@ -25,12 +29,13 @@ public class PayClientFallback implements FallbackFactory<PayClient> {
             }
 
             /**
-             * 【注意】关闭支付单的降级只记日志，不做任何"假装成功"的动作：支付单状态是钱的账本，
+             * 【注意】关闭支付单失败必须抛出异常，使交易域保留退款待办：支付单状态是钱的账本，
              * 静默成功会让交易域以为已经关闭，从而留下"订单已退款关闭、支付单仍待支付"的不一致。
              */
             @Override
             public void closePayOrder(Long bizOrderNo) {
                 log.error("远程调用PayClient的closePayOrder失败，未关闭支付单，bizOrderNo：{}", bizOrderNo, cause);
+                throw new com.llmall.common.exception.BizIllegalException("支付服务不可用，关闭操作未完成", cause);
             }
         };
     }

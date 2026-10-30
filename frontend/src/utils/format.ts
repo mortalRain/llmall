@@ -169,6 +169,10 @@ export function orderStatusMeta(status: number): StatusMeta {
       return { text: '已核销', type: 'success', hint: '门店已完成核销，交易完成' }
     case 5:
       return { text: '已关闭', type: 'info', hint: '订单已取消或已退款关闭' }
+    case 8:
+      return { text: '取消处理中', type: 'warning', hint: '取消已受理，正在恢复库存与优惠券，请稍后刷新' }
+    case 9:
+      return { text: '退款处理中', type: 'warning', hint: '退款已受理，处理期间不可核销，请稍后刷新' }
     default:
       return { text: `状态 ${status}`, type: 'info', hint: '' }
   }

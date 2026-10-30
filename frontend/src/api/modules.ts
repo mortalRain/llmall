@@ -29,6 +29,7 @@ import type {
   UserVoucher,
   VerifyOrderPayload,
   Voucher,
+  VoucherPurchase,
 } from '@/api/types'
 
 /** 认证与当前用户 */
@@ -41,6 +42,12 @@ export const authApi = {
   },
   logout(): Promise<void> {
     return post<void>('/users/logout')
+  },
+  sendPayPasswordCode(phone: string): Promise<void> {
+    return post<void>('/users/code', undefined, { params: { phone, scene: 'change-pay-password' } })
+  },
+  changePayPassword(payload: { oldPassword: string; newPassword: string; code: string }): Promise<void> {
+    return post<void>('/users/pay-password', payload)
   },
 }
 
@@ -173,8 +180,13 @@ export const voucherApi = {
   my(status?: number): Promise<UserVoucher[]> {
     return get<UserVoucher[]>('/vouchers/my', { params: status ? { status } : undefined })
   },
-  receive(id: Id, pw?: string): Promise<Id> {
-    return post<Id>(`/vouchers/${id}/receive`, pw ? { pw } : undefined)
+  receive(id: Id, pw?: string, requestId?: string, expectedUserId?: Id): Promise<Id> {
+    // 付费请求不自动重放密码；错误后由持久化状态查询恢复。
+    return post<Id>(`/vouchers/${id}/receive`, pw || requestId ? { pw, requestId } : undefined,
+      requestId ? { skipAuthRefresh: true, expectedUserId } : undefined)
+  },
+  purchase(requestId: string, expectedUserId?: Id): Promise<VoucherPurchase> {
+    return get<VoucherPurchase>(`/vouchers/purchases/${encodeURIComponent(requestId)}`, { expectedUserId, skipAuthRefresh: true })
   },
 }
 

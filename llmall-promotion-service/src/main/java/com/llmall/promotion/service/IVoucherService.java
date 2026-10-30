@@ -5,6 +5,7 @@ import com.llmall.promotion.domain.po.Voucher;
 import com.llmall.promotion.domain.vo.SeckillResultVO;
 import com.llmall.promotion.domain.vo.UserVoucherVO;
 import com.llmall.promotion.domain.vo.VoucherVO;
+import com.llmall.promotion.domain.vo.VoucherPurchaseVO;
 import com.llmall.promotion.mq.SeckillMessage;
 
 import java.util.List;
@@ -20,20 +21,19 @@ public interface IVoucherService extends IService<Voucher> {
     /** 券详情 */
     VoucherVO getVoucherDetail(Long voucherId);
 
-    /** 领取普通券，返回 user_voucher.id；免费券入口，付费券必须用 receive(Long, String) 提交支付密码 */
+    /** 领取普通券，返回 user_voucher.id；免费券入口；付费券必须使用带requestId的重载 */
     Long receive(Long voucherId);
 
     /** 秒杀抢券：返回秒杀凭证 token（落库异步完成）；免费券入口，付费券必须用 seckill(Long, String) 提交支付密码 */
     String seckill(Long voucherId);
 
-    /**
-     * 领取普通券（付费券需校验支付密码），返回 user_voucher.id。
-     *
-     * 付费券走"先收款、再发券"：收款失败不发券，收款成功但发券失败则显式退款。
-     *
-     * @param pw 支付密码：仅当券的 payValue &gt; 0 时必填，免费券传 null 即可
-     */
+    /** 历史免费券重载；付费普通券必须显式传入requestId。 */
     Long receive(Long voucherId, String pw);
+
+    /** Paid ordinary purchases require a stable client requestId; repeat requests return their original result. */
+    Long receive(Long voucherId, String pw, String requestId);
+
+    VoucherPurchaseVO purchase(String requestId);
 
     /**
      * 秒杀抢券（付费券需校验支付密码）：返回秒杀凭证 token。

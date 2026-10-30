@@ -55,6 +55,7 @@ export interface FeedItem {
 
 export interface FeedPage {
   items: FeedItem[]
+  hasMore?: boolean
   nextLi: Id | null
   nextCt: string | null
   nextCi: Id | null
@@ -232,6 +233,14 @@ export interface Voucher {
   remainingStock: number | null
   inSeckillTime: boolean | null
   received: boolean
+}
+
+export interface VoucherPurchase {
+  requestId: string
+  state: 'ACTIVE' | 'ISSUED' | 'CANCELING' | 'CANCELED' | 'NOT_FOUND'
+  voucherId: Id | null
+  amount: number | null
+  userVoucherId: Id | null
 }
 
 export interface UserVoucher {

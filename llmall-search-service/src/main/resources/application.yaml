@@ -36,13 +36,14 @@ llmall:
       time-decay-scale: 30d
       score-boost: 0.5
       comments-boost: 0.3
-  # 运维接口总开关：false 时 /search/view/rebuild 一律 403；默认 true，线上需关闭重建类接口时改这里。
+  # 维护接口默认关闭；开启后仍需强服务令牌，不能只凭登录调用。
   maintenance:
-    enabled: true
+    enabled: false
   # 服务间内部调用凭证：UserInfoInterceptor 仅在该请求头与本值完全一致时才采信 user-info 头。
   # 【注意】全项目所有服务必须配成同一个值，否则表现为"请求全部未登录"；生产应由网关注入或配置中心下发。
   internal:
     token: ${LLMALL_INTERNAL_TOKEN:llmall-internal-demo-token}
+    service-token: ${LLMALL_SERVICE_TOKEN:}
 
 # 接口文档：knife4j 4.x（openapi3），UI 地址 /doc.html，OpenAPI JSON /v3/api-docs。
 knife4j:

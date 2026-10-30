@@ -17,14 +17,21 @@ public class UserContextTaskDecorator implements TaskDecorator {
         // 必须在提交任务的线程里捕获用户：执行时已经是异步线程，取不到原上下文
         Long userId = UserContext.getUser();
         return () -> {
+            Long previousUser = UserContext.getUser();
             try {
                 if (userId != null) {
                     UserContext.setUser(userId);
+                } else {
+                    UserContext.removeUser();
                 }
                 runnable.run();
             } finally {
-                // 线程池线程会被复用，必须清理，否则会把上一个任务的身份带给下一个任务（串号）
-                UserContext.removeUser();
+                // CallerRuns 和嵌套任务可能复用调用者线程，恢复原身份；原本匿名才清理。
+                if (previousUser == null) {
+                    UserContext.removeUser();
+                } else {
+                    UserContext.setUser(previousUser);
+                }
             }
         };
     }

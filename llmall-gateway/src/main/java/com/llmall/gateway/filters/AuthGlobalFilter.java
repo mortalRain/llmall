@@ -35,52 +35,11 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 网关统一鉴权入口：外部流量的唯一身份裁决点，先剥离伪造头，再校验令牌，最后把可信身份注入下游。
- *
- * 【核心职责】
- * 1. 剥离：无条件删除客户端自带的 user-info / x-internal-token / x-service-token，下游只信网关写入的值。
- * 2. 放行判定：按"路径 + HTTP 方法"两个维度决定是否免鉴权，只读白名单只对安全方法生效（见 {@link #isExclude}）。
- * 3. 令牌校验：验签、令牌类型隔离（access 与 refresh 不得混用）、黑名单（主动注销/踢人）、
- *    会话失效水位（口令变更后旧令牌全量失效）。
- * 4. 无感刷新：access 过期但 refresh 有效时，网关本地签发新 access，经响应头 {@code x-access-token} 回给客户端。
- * 5. 注入：把可信 userId 写入 {@code user-info}，并带上内部凭证 {@code x-internal-token} 后转给下游。
- *
- * 【鉴权顺序】固定四步，顺序即安全边界，每步各自失败时的响应如下：
- * 1. 放行白名单判定：命中即按"可选身份"匿名放行，本步不产生 401（见 {@link #forwardOptionalIdentity}）；
- * 2. 令牌解析：未带令牌 → not-login；已过期 → 先试无感刷新，刷新不成 → token-expired；
- *    验签失败或缺少必需 claim → invalid-token；
- * 3. 状态校验：类型不是 access → wrong-token-type；jti 命中黑名单 → revoked；
- *    iat 早于会话失效水位 → session-invalidated；
- * 4. 注入用户头：只有前三步全部通过，才写入 user-info 与 x-internal-token 后放行下游。
- * 原因码的字面量与完整触发条件见 {@link #unauthorized}。
- *
- * 【严禁】把第 3 步提到第 2 步之前：状态校验要拿令牌里的 jti 与 userId 去查 Redis，
- * 若先用未验签的载荷去查，等于把攻击者可控的字符串直接送进 Redis 查询 ——
- * 既让"某个 jti 是否已被注销"变成可探测的信息，也把无关 key 的查询放大面交给了外部。
- * 同理第 4 步必须排在状态校验之后，否则改密后未被水位拦下的旧令牌仍能换到可信 userId 进入业务。
- *
- * 【设计意图】两条互补的失效机制：黑名单按 jti 索引，回答"这个令牌被注销了吗"；会话失效水位按 userId 索引，
- * 回答"这个用户改密之后签发的令牌才算数吗"。缺任一条都会留下窗口（只注销当前令牌则其它设备仍在线；
- * 只做水位则单令牌注销无抓手）。
- *
- * 【注意】本类是 Spring Cloud Gateway 的 {@link GlobalFilter}，对每一个路由到网关的请求生效；
- * 网关是外部流量的唯一入口，因此本类的判断结果直接等于"这个请求能不能进业务"。
- * 执行顺序 0（见 {@link #getOrder()}），排在 {@link TraceGlobalFilter} 之后，使 401 的日志也带 traceId。
- *
- * 【注意】Redis 异常时黑名单与会话失效水位的校验都按放行处理（fail-open，见 {@link #checkAuthState}）：
- * 这是可用性取舍 —— 该窗口内已注销 / 被踢下线的令牌仍能通过网关。降级会累加
- * llmall.auth.degrade 指标（reason 区分 blacklist / watermark / token-state），可据此告警。
- * 与之相反，白名单未配置、令牌缺 jti、脚本无返回值这些分支一律 fail-closed，两类口径不得混为一谈。
- *
- * 【注意】以下内容是既有实现的不变量，改动等于破坏功能：
- * 1. {@code x-auth-error} 的原因码字面量与 401 响应体结构是对外契约，改一个字母前端就认不出来；
- * 2. 请求头名取值来自 {@link AuthConstants}，改了下游取不到身份，表现为"用户莫名丢失"；
- * 3. 两条 Lua 的返回值语义（1 / 0 / -1）分别被主流程与刷新流程使用：
- *    {@link #BLACKLIST_CHECK_SCRIPT} 只判存在性，{@link #AUTH_CHECK_SCRIPT} 还要校验 refresh 归属，
- *    改语义或把两者合并会让鉴权链路整体失效。
- *
- * @author 同城生活
- * @since 2026-01-15
+ * 网关身份入口：先剥离外部身份/服务凭据头，再验签、检查令牌类型及Redis撤销状态。
+ * 检查成功才向下游注入user-info和内部凭据，不向外部用户注入服务间凭据。
+ * Redis状态不可用时，受保护请求/续签返回503；公开路由仅匿名访问。
+ * 已确认令牌失效仍返回401及既有x-auth-error；503不表示退出登录。
+ * 黑名单与refresh白名单使用不同脚本，避免把access误当refresh校验。
  */
 @Slf4j
 @Component
@@ -96,7 +55,7 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
     private final AuthProperties authProperties;
     private final JwtProperties jwtProperties;
     private final ReactiveStringRedisTemplate redisTemplate;
-    /** 降级指标：fail-open 是可用性取舍，但必须可告警，不能只留日志 */
+    /** 保留现有鉴权依赖故障指标，标签口径不变。 */
     private final BizMetrics metrics;
     private final AntPathMatcher antPathMatcher = new AntPathMatcher();
 
@@ -165,8 +124,7 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
      * 【边界约束】白名单分支（第 ② 步）只能返回"匿名放行"，绝不返回 401；只有认证全通过（第 ⑤ 步）
      * 才会写入 {@code user-info} 与 {@code x-internal-token}；{@code x-service-token} 在本类中永远只被删除、绝不写入。
      *
-     * 【异常】本方法不向外抛异常：所有失败路径都收敛为 {@link #unauthorized} 的 401 + 原因码，
-     * 避免异常冒泡到网关默认处理器而丢掉 {@code x-auth-error}。
+     * 鉴权拒绝直接写响应：令牌无效返回401，鉴权依赖故障返回503；下游错误保持原样传播。
      *
      * @param exchange 当前请求交换对象（含请求头、路径、方法与响应），由网关框架传入，不为 null
      * @param chain    网关过滤器链，非白名单且鉴权通过时以变异后的请求继续向后传递
@@ -228,56 +186,20 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
                 // ⑤ 注入身份：把可信 userId 写进 user-info 并带上内部凭证 x-internal-token，然后放行下游
                 return forward(sanitized, chain, payload.getUserId());
             });
-        });
+        }).onErrorResume(AuthStateUnavailable.class, e -> unavailable(sanitized));
     }
 
-    /**
-     * 校验该令牌是否已被"全量会话失效水位"覆盖（口令变更 / 账号冻结 / 管理员踢人）。
-     *
-     * 【判定规则】令牌签发时间（iat）早于水位 {@code auth:logoutat:{userId}} → 失效。
-     * 用"签发时间"而不是"逐条拉黑"：黑名单按 jti 索引，而服务端不记录每个用户已签发的全部 access jti
-     * （access 不落白名单，只记 refresh），逐条拉黑不可行；一个用户维度的时间水位即可覆盖全部旧令牌。
-     *
-     * 【边界约束】下面两条都是刻意的取舍，不是漏判，不得当成缺陷"修掉"：
-     * 1. 兼容性取舍：旧版本签发的令牌没有 iat（{@code issuedAt == null}）或没有 userId 时跳过校验并放行，
-     *    而不是拒绝 —— 否则灰度发布瞬间全站在用令牌会集体失效，表现为"所有用户被强制登出"。
-     *    代价：这些旧令牌无法被水位机制召回，最迟在自身剩余寿命内自然过期（access 寿命由 llmall.jwt.tokenTTL 决定），
-     *    即"改密后一段时间内、无 iat 的旧令牌仍可用"。
-     * 2. 可用性取舍：Redis 异常或水位值不是时间戳时放行并打日志（fail-open，代价与风险窗口见 {@link #checkAuthState}）——
-     *    期间已改密用户的旧令牌仍可通过网关，但整站不会因 Redis 抖动而全部 401。
-     *
-     * @param payload 已通过验签与类型校验的 access 令牌载荷；{@code userId} 为 {@code null} 时直接按"未失效"返回
-     *                （宁可放行也不因缺字段误杀在线用户，缺字段的令牌在解析阶段已被拒绝）
-     * @return {@code true} 表示已被水位覆盖（调用方应返回 401 且原因码 {@code session-invalidated}）；
-     *         {@code false} 表示未失效、或无法判定（无 iat / Redis 异常）时的保守放行
-     */
+    /** 无水位表示尚未全量撤销；无法读取或解析水位不等于状态有效。保留无iat旧令牌兼容。 */
     private Mono<Boolean> isSessionInvalidated(TokenPayload payload) {
         Date issuedAt = payload.getIssuedAt();
         if (issuedAt == null || payload.getUserId() == null) {
             return Mono.just(Boolean.FALSE);
         }
-        return redisTemplate.opsForValue()
-                .get(AuthConstants.REDIS_GLOBAL_LOGOUT_AT + payload.getUserId())
-                .map(at -> {
-                    try {
-                        return Long.parseLong(at) > issuedAt.getTime();
-                    } catch (NumberFormatException e) {
-                        // 值不是时间戳：无法判定，按"未失效"处理并告警（宁可放行也不误杀在线用户）
-                        log.warn("会话失效水位值非法，按未失效处理: userId={}, value={}", payload.getUserId(), at);
-                        return Boolean.FALSE;
-                    }
-                })
-                // 水位 key 不存在（该用户从未改密）= 未失效；这正是绝大多数请求的分支
+        return Mono.defer(() -> redisTemplate.opsForValue()
+                        .get(AuthConstants.REDIS_GLOBAL_LOGOUT_AT + payload.getUserId()))
+                .map(at -> Long.parseLong(at) > issuedAt.getTime())
                 .defaultIfEmpty(Boolean.FALSE)
-                .onErrorResume(e -> {
-                    // 【鉴权降级 · fail-open】Redis 异常时放行。风险窗口 = Redis 故障持续期：
-                    // 已改密/被冻结用户的旧令牌在窗口内仍可通过网关；收益是整站不会因 Redis 抖动全线 401。
-                    // 这里只打 ERROR 日志：本类没有上报任何降级指标，也没有配套告警规则，
-                    // "降级正在发生"只能靠检索这条日志发现，禁止改成静默返回或降级为 WARN。
-                    log.error("【鉴权降级】查询会话失效水位失败，本次请求按未失效放行: userId={}", payload.getUserId(), e);
-                    metrics.authDegrade("watermark");
-                    return Mono.just(Boolean.FALSE);
-                });
+                .onErrorMap(e -> stateUnavailable("watermark", e));
     }
 
     /**
@@ -328,15 +250,16 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
                         }
                         return unauthorized(exchange, "刷新令牌已失效，请重新登录", "refresh-revoked");
                     }
-                    String newAccessToken = jwtTool.createToken(
-                            payload.getUserId(), IdUtil.fastSimpleUUID(),
-                            AuthConstants.TOKEN_TYPE_ACCESS, jwtProperties.getTokenTTL());
-                    // 把新 access 经响应头 x-access-token 回给客户端（拒绝分支由 unauthorized 写 x-auth-error）。
-                    //    用 add 而非 set：即使上游已写过同名头，也不覆盖客户端可能已放置的值造成误读
-                    exchange.getResponse().getHeaders().add(AuthConstants.HEADER_NEW_ACCESS_TOKEN, newAccessToken);
-                    log.info("access token 已自动刷新, userId={}", payload.getUserId());
-                    return forward(exchange, chain, payload.getUserId());
-                });
+                    return isSessionInvalidated(payload).flatMap(invalidated -> {
+                        if (Boolean.TRUE.equals(invalidated)) {
+                            return unauthorized(exchange, "登录状态已失效，请重新登录", "session-invalidated");
+                        }
+                        String newAccessToken = jwtTool.createToken(payload.getUserId(), IdUtil.fastSimpleUUID(),
+                                AuthConstants.TOKEN_TYPE_ACCESS, jwtProperties.getTokenTTL());
+                        exchange.getResponse().getHeaders().add(AuthConstants.HEADER_NEW_ACCESS_TOKEN, newAccessToken);
+                        return forward(exchange, chain, payload.getUserId());
+                    });
+                }).onErrorResume(AuthStateUnavailable.class, e -> unavailable(exchange));
     }
 
     /**
@@ -375,71 +298,55 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
         }
         // 命中黑名单（已注销）时降级为匿名，而不是 401 —— 白名单接口匿名本来就能访问，
         // 用 401 会让"刚注销的用户连商品列表都刷不出来"
-        return isBlacklisted(payload).flatMap(blacklisted ->
-                Boolean.TRUE.equals(blacklisted)
-                        ? chain.filter(exchange)
-                        : forward(exchange, chain, payload.getUserId()));
+        return isBlacklisted(payload).flatMap(blacklisted -> {
+            if (Boolean.TRUE.equals(blacklisted)) {
+                return chain.filter(exchange);
+            }
+            return isSessionInvalidated(payload).flatMap(invalidated -> Boolean.TRUE.equals(invalidated)
+                    ? chain.filter(exchange) : forward(exchange, chain, payload.getUserId()));
+        }).onErrorResume(AuthStateUnavailable.class, e -> chain.filter(exchange));
     }
 
-    /**
-     * 校验黑名单，并可选地同时校验 refresh 白名单，一次 Redis 往返完成。
-     *
-     * 【设计意图】把两条判定合并进一条 Lua（原子性理由见 {@link #AUTH_CHECK_SCRIPT}）：省一次网络往返，
-     * 且不会出现"查黑名单时未注销、查白名单时已作废"的中间态。
-     *
-     * 【fail 策略】本方法里两种"拿不到结论"的口径相反，不得混为一谈：
-     * 1. Redis 异常（onErrorResume）是 fail-open：返回 1 放行并打 ERROR。收益是整站不会因 Redis 抖动全线不可用
-     *    （连未登录的浏览请求都进不来）；代价是故障窗口内已注销/被踢的令牌仍能通过网关，
-     *    即"提前失效"的能力在窗口内暂时失效（令牌本身仍在自身有效期内，不是新增长期风险）。
-     *    降级会累加 llmall.auth.degrade 指标，可据此配置告警。
-     * 2. 脚本无返回值（defaultIfEmpty）是 fail-closed：按 0 拒绝。它不代表 Redis 故障，而属异常输入，宁严不宽。
-     *
-     * @param jti            令牌唯一编号；为 {@code null} 时黑名单 key 换成永不存在的值
-     * @param refreshKey     refresh 白名单 key，只有刷新流程会传真实 key
-     * @param expectedUserId 期望的 userId 字符串，与 refresh 白名单 value 比对
-     * @return {@code 1} = 校验通过；{@code 0} = 黑名单命中或 refresh 无效；{@code -1} = refresh 存在但 userId 不匹配
-     */
+    /** 刷新必须同时通过黑名单、refresh归属检查；依赖异常不作为检查成功。 */
     private Mono<Long> checkAuthState(String jti, String refreshKey, String expectedUserId) {
-        // jti 为空时把黑名单 key 设成永不存在的值，使脚本结论只取决于 refresh 判定
         String blacklistKey = AuthConstants.REDIS_BLACKLIST + (jti == null ? "\u0000-no-jti" : jti);
-        return redisTemplate.execute(AUTH_CHECK_SCRIPT,
-                        Arrays.asList(blacklistKey, refreshKey),
-                        Collections.singletonList(expectedUserId))
-                .next()
-                .map(Long::valueOf)
-                // 脚本没有返回值（理论不会发生）按 0 处理，即"判定失败按拒绝"；与下面的 Redis 异常分支口径相反，
-                // 无返回值不等于 Redis 故障，属异常输入，宁严不宽
+        return Mono.defer(() -> redisTemplate.execute(AUTH_CHECK_SCRIPT,
+                        Arrays.asList(blacklistKey, refreshKey), Collections.singletonList(expectedUserId)).next())
                 .defaultIfEmpty(0L)
-                .onErrorResume(e -> {
-                    // 【鉴权降级 · fail-open】见方法注释的【fail 策略】；返回 1 = 放行
-                    log.error("【鉴权降级】查询令牌黑名单/白名单失败，本次请求按已登录放行: jti={}", jti, e);
-                    metrics.authDegrade("token-state");
-                    return Mono.just(1L);
-                });
+                .onErrorMap(e -> stateUnavailable("token-state", e));
     }
 
-    /** 黑名单查询，使用只判存在的 {@link #BLACKLIST_CHECK_SCRIPT}；Redis 异常时的放行取舍见 checkAuthState */
+    /** 仅检查access黑名单；没有脚本结果时不采信身份。 */
     private Mono<Boolean> isBlacklisted(TokenPayload payload) {
         if (payload.getJti() == null) {
-            // 令牌缺 jti 时无法被主动失效（黑名单按 jti 索引）。解析阶段已拒绝缺 jti 的令牌，本分支是防御性兜底：
-            // 一旦走到这里说明解析侧口径被放松了，按拒绝（fail-closed）比放行安全
-            log.warn("access token 缺少 jti，无法校验黑名单，按拒绝处理: userId={}", payload.getUserId());
             return Mono.just(Boolean.TRUE);
         }
-        // 只判"该 jti 是否在吊销黑名单里"。不能借道 refresh 白名单（jti 不同源，理由见 BLACKLIST_CHECK_SCRIPT 注释）
         String blacklistKey = AuthConstants.REDIS_BLACKLIST + payload.getJti();
-        return redisTemplate.execute(BLACKLIST_CHECK_SCRIPT, Collections.singletonList(blacklistKey))
-                .next()
-                .map(Long::valueOf)
-                // 脚本返回 0 = 命中黑名单（注销/踢人后立即失效），其余按"未吊销"处理
-                .map(code -> code != null && code == 0L)
-                .defaultIfEmpty(Boolean.FALSE)
-                .onErrorResume(e -> {
-                    // 【鉴权降级 · fail-open】口径与 checkAuthState 一致：Redis 故障不整站 401
-                    log.error("【鉴权降级】查询令牌黑名单失败，本次请求按未命中黑名单放行: jti={}", payload.getJti(), e);
-                    metrics.authDegrade("blacklist");
-                    return Mono.just(Boolean.FALSE);
-                });
+        return Mono.defer(() -> redisTemplate.execute(BLACKLIST_CHECK_SCRIPT,
+                        Collections.singletonList(blacklistKey)).next())
+                .map(code -> code != 1L)
+                .defaultIfEmpty(Boolean.TRUE)
+                .onErrorMap(e -> stateUnavailable("blacklist", e));
+    }
+
+    private AuthStateUnavailable stateUnavailable(String stage, Throwable cause) {
+        metrics.authDegrade(stage);
+        log.error("鉴权状态检查失败，暂不采信身份: stage={}, failure={}", stage, cause.getClass().getSimpleName());
+        return new AuthStateUnavailable(cause);
+    }
+
+    private Mono<Void> unavailable(ServerWebExchange exchange) {
+        ServerHttpResponse response = exchange.getResponse();
+        response.setRawStatusCode(503);
+        response.getHeaders().set("Content-Type", "application/json;charset=UTF-8");
+        byte[] body = "{\"code\":503,\"msg\":\"登录状态暂时无法确认，请稍后重试\"}".getBytes(StandardCharsets.UTF_8);
+        return response.writeWith(Mono.just(response.bufferFactory().wrap(body)));
+    }
+
+    private static class AuthStateUnavailable extends RuntimeException {
+        AuthStateUnavailable(Throwable cause) {
+            super(cause);
+        }
     }
 
     /**

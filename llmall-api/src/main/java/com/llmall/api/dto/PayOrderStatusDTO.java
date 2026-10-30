@@ -43,7 +43,8 @@ public class PayOrderStatusDTO {
      * 能拿到状态就说明这次查询真的成功过）二者满足其一；"未知"绝不允许被调用方读成"未支付"。
      */
     public boolean isDetermined() {
-        return Boolean.TRUE.equals(determined) || payStatus != null;
+        return !Boolean.FALSE.equals(determined) && !Integer.valueOf(4).equals(payStatus)
+                && (Boolean.TRUE.equals(determined) || payStatus != null);
     }
 
     /** 是否确认存在支付单：显式 found，或返回体里带了状态（有状态必然有支付单） */

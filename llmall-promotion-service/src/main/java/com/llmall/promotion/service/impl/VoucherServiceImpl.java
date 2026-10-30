@@ -64,7 +64,7 @@ import java.util.stream.Collectors;
  * 券业务的唯一实现：普通领券与付费券收款、秒杀抢券（Lua 原子预扣 + MQ 异步落库）、我的券查询与核销/退回。
  *
  * 【核心职责】
- * 1. 普通领券：DB 条件扣减库存后插 user_voucher，付费券先收款，发券失败显式退款；
+ * 1. 普通领券：持久化购买请求、事务外收款、同事务发券和成功状态，异常由原子撤销与恢复任务处理；
  * 2. 秒杀抢券：库存引导 → 付费券收款 → Lua 原子预扣 → 投递 MQ 异步落库，返回 token 供客户端轮询；
  * 3. 券的核销（1 → 2）与退回（2 → 1）：只接受订单链路调用，orderId 必传并回查交易订单。
  *
@@ -102,26 +102,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     /** 四段式埋点的业务类型标识（见 llmall-common 的 BizTrace） */
     private static final String BIZ_TYPE_SECKILL = "SECKILL";
 
-    /**
-     * 本类用到的幂等键：键形态统一由 {@link IdempotentKeys} 提供，本类只传入业务参数。
-     *
-     * 【键与口径】
-     * 1. {@code IdempotentKeys.voucherBuy(券id, 用户id)} —— 领券收款键，确定性的"一人一张券"口径，重复点击不重复扣款；
-     * 2. {@code IdempotentKeys.voucherRefund(券id, 用户id, 尝试uuid)} —— 领券退款键，按次唯一，
-     *    避免"败者的退款把胜者已成功的扣款退走"（资损）；
-     * 3. 秒杀的两个键 IdempotentKeys.voucherSeckillPay(token) 与 IdempotentKeys.seckillRefund(token)，按 token 口径。
-     *
-     * 【为什么领券与秒杀的键必须拆开】两者的口径与失败语义都不同：
-     * 领券是同步事务，收款与发券在同一次请求内完成，"一人一张"由 user_voucher 的 uk_user_voucher 唯一键裁决，键只要标识"谁买哪张券"；
-     * 秒杀则是"预扣在前、落库异步在后"，中间隔着 MQ 与补偿，必须用一个贯穿全链路的凭证（token）标识"这一次尝试"，
-     * 因此收款键与退款键都按 token 构造，且落库失败退款与请求路径的失败补偿共用 SECKILL_REFUND:<token>（见 refundSeckillPurchase）。
-     *
-     * 【唯一性分别由谁保证】用户维度（一人一张）由 uk_user_voucher 保证；
-     * 消息维度（同一条消息只处理一次）由 consume_record 的 uk_consume(biz_type, biz_id, consumer) 保证；
-     * 券维度（名额不超发）由 Redis 预扣与 seckill_voucher.stock 的条件扣减共同保证。
-     *
-     * 【为什么键形态集中到 llmall-common】散落在各服务时，改一处漏一处会让对账静默查不到；集中后键只在一个地方定义与评审。
-     */
+    // 普通领券由purchaseCoordinator管理持久化尝试；秒杀仍按token关联旧收退款。
 
     /**
      * 回补预扣的脚本：库存 +1、已发放 -1、按需把用户放回已购集合，三者一次原子完成。
@@ -193,7 +174,9 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     private final ConsumeRecordMapper consumeRecordMapper;
     private final UserClient userClient;
     private final TradeClient tradeClient;
+    private final VoucherBindingStore voucherBindingStore;
     private final BizMetrics metrics;
+    private final VoucherPurchaseCoordinator purchaseCoordinator;
 
     /** 交易订单状态：1 未付款 2 已付款（与 llmall-trade-service 的 Order 常量保持一致） */
     private static final int ORDER_STATUS_UNPAID = 1;
@@ -325,109 +308,36 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     }
 
 
-    /** 免费券领取入口（向后兼容）；付费券必须提供支付密码，见 {@link #receive(Long, String)} */
+    /** Free legacy entry; paid ordinary purchases use the requestId overload. */
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public Long receive(Long voucherId) {
-        return receive(voucherId, null);
+        return receive(voucherId, null, null);
     }
 
-    /**
-     * 领取普通券：先收款，再扣库存、发券；券款走 Feign 不在本地事务内，发券失败必须显式退款补偿。
-     */
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public Long receive(Long voucherId, String pw) {
-        Long userId = requireLogin();
-        Voucher voucher = baseMapper.selectById(voucherId);
-        if (voucher == null) {
-            throw new BizIllegalException("优惠券不存在");
-        }
-        if (!Objects.equals(voucher.getStatus(), Voucher.STATUS_ON)) {
-            throw new BizIllegalException("优惠券已下架，无法领取");
-        }
-
-        // 一人一张预检必须在扣款之前，否则已领过的用户会先被扣钱再报错；真正的保证是 user_voucher 唯一键
-        // MyBatis-Plus 3.5.x 起 selectCount 返回 Long（3.4.x 为 Integer）
-        Long count = userVoucherMapper.selectCount(Wrappers.<UserVoucher>lambdaQuery()
-                .eq(UserVoucher::getUserId, userId)
-                .eq(UserVoucher::getVoucherId, voucherId));
-        if (count != null && count > 0) {
-            throw new BizIllegalException("您已领取过该券，请勿重复领取");
-        }
-
-        // 先收款：免费券 pay_value=0 在此直接跳过
-        //    扣款幂等键按"一人一张券"取（确定性）—— 重复点击/网络重发不会重复扣款。
-        //    【注意】退款键与扣款键必须不同值，但这还不够：并发重复领取时，第二个请求的扣款会被
-        //    下游按同一 bizNo 幂等跳过（仍返回成功），它并未真正扣钱；若它随后发券失败就退款，
-        //    退掉的是第一个请求已经扣过的钱，用户等于白拿付费券。
-        //    因此退款必须以"本次是否真的扣到钱"为前提，见 refundAllowed。
-        String purchaseBizNo = IdempotentKeys.voucherBuy(voucherId, userId);
-        String refundBizNo = IdempotentKeys.voucherRefund(voucherId, userId, IdUtil.fastSimpleUUID());
-        boolean paid = chargeVoucherPurchase(voucher, userId, pw, purchaseBizNo);
-        boolean refundAllowed = paid;
-
-        try {
-            // 只有配了秒杀库存行的券才有"库存"概念，rows=0 即已领完；这里不扣 Redis，DB 才是最终闸门
-            SeckillVoucher config = seckillVoucherMapper.selectById(voucherId);
-            if (config != null) {
-                int rows = seckillVoucherMapper.deductStock(voucherId);
-                if (rows == 0) {
-                    throw new BizIllegalException("该券已被领完");
-                }
-            }
-
-            LocalDateTime now = LocalDateTime.now();
-            UserVoucher userVoucher = new UserVoucher()
-                    .setUserId(userId)
-                    .setVoucherId(voucherId)
-                    .setShopId(voucher.getShopId())
-                    .setStatus(UserVoucher.STATUS_UNUSED)
-                    .setReceiveTime(now)
-                    .setExpireTime(calcExpireTime(voucher, now));
-            try {
-                userVoucherMapper.insert(userVoucher);
-            } catch (DuplicateKeyException e) {
-                // 该用户已经有这张券，说明另一次尝试已经成功：本次的扣款被下游幂等跳过，一分钱没动。
-                // 因此本次失败绝不能退款，否则会把另一次尝试的钱退回去。
-                refundAllowed = false;
-                log.warn("并发重复领取，本次未扣款，不触发退款: userId={}, voucherId={}", userId, voucherId);
-                throw new BizIllegalException("您已领取过该券，请勿重复领取", e);
-            }
-            log.info("领券成功: userId={}, voucherId={}, userVoucherId={}, 售价={}分",
-                    userId, voucherId, userVoucher.getId(), payValueOf(voucher));
-            return userVoucher.getId();
-        } catch (RuntimeException e) {
-            // 失败补偿：只有本次确实扣到钱才退；退款键按本次尝试唯一，重复补偿仍只退一次
-            if (refundAllowed) {
-                refundPurchaseQuietly(true, voucher, userId, "领券失败补偿", refundBizNo);
-            }
-            throw e;
-        }
+        return receive(voucherId, pw, null);
     }
 
+    @Override
+    public Long receive(Long voucherId, String pw, String requestId) {
+        return purchaseCoordinator.receive(voucherId, pw, requestId);
+    }
 
-    /** 免费券秒杀入口（向后兼容）：付费秒杀券必须带支付密码，见 {@link #seckill(Long, String)} */
+    @Override
+    public com.llmall.promotion.domain.vo.VoucherPurchaseVO purchase(String requestId) {
+        return purchaseCoordinator.status(requestId);
+    }
+
+    /** 免费秒杀兼容入口；付费新请求由 {@link #seckill(Long, String)} 统一拒绝。 */
     @Override
     public String seckill(Long voucherId) {
         return seckill(voucherId, null);
     }
 
     /**
-     * 秒杀抢券：先收款，再 Lua 原子预扣名额，最后投递 MQ 异步落库；返回 token 供客户端轮询。
-     *
-     * 【流程】时段校验 → 库存引导 → 已购集合预热 → 付费券收款 → 写 PENDING 结果标记 → Lua 原子预扣 → 投递 MQ。
-     * 除落库外全部同步完成，最终发券结果由 MQ 消费端异步写进结果标记。
-     *
-     * 【异常】BadRequestException：付费券未提交支付密码。
-     * BizIllegalException：券不存在、已下架、不是秒杀券、未到秒杀时段、券款扣款失败，
-     * 以及 Lua 预扣失败的三类分流 —— 库存不足（返回码 1）、该用户已抢购过（返回码 2）、
-     * 系统繁忙（Redis 异常返回 null 或返回未知码）。
-     * 三类预扣失败都会先写 FAILED 结果标记、退回已收的券款再抛异常；此时名额并未被扣减，故无需回补
-     * （唯一的例外是预扣成功但 MQ 投递失败，那条路径会回补 Redis 名额）。
-     *
-     * 【风险】付费券先收款再占名额，热路径因此多一次同步扣款；预扣成功之后的每一步失败都必须退款并回补名额。
-     * token 只在成功时返回，调用方重试即一次全新的抢购（新 token、新幂等键），与本次失败互不抵消。
+     * 免费秒杀演示：时段检查 → Redis 名额预扣 → MQ 异步发券，返回 token 供轮询。
+     * 付费新请求在任何预热/扣款前拒绝；旧请求的消费与补偿入口保留用于恢复。
      */
     @Override
     public String seckill(Long voucherId, String pw) {
@@ -438,6 +348,10 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         }
         if (!Objects.equals(voucher.getStatus(), Voucher.STATUS_ON)) {
             throw new BizIllegalException("优惠券已下架，无法抢购");
+        }
+        // 旧秒杀没有持久化购买恢复协议；只保留免费演示，付费走普通购买入口。
+        if (payValueOf(voucher) > 0) {
+            throw new BadRequestException("暂不支持付费秒杀，请选择普通购买");
         }
         SeckillVoucher config = seckillVoucherMapper.selectById(voucherId);
         if (config == null) {
@@ -655,123 +569,38 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     }
 
 
-    /**
-     * 核销（锁定）券：状态 1 → 2 并绑定订单号；只能由订单链路调用，硬证据是 order.voucher_id 必须等于本券 id。
-     */
+    /** Remote validation stays outside the local voucher transaction. */
     @Override
     public boolean useMyVoucher(Long userVoucherId, Long orderId) {
         Long userId = requireLogin();
-        UserVoucher userVoucher = userVoucherMapper.selectById(userVoucherId);
-        // 归属校验放在最前面：券 id 是可枚举的自增值，不校验归属就等于"知道 id 就能核销别人的券"
-        if (userVoucher == null || !Objects.equals(userVoucher.getUserId(), userId)) {
-            throw new ForbiddenException("券不存在或不属于当前用户");
+        UserVoucher voucher = ownedVoucher(userVoucherId, userId);
+        if (orderId == null) throw new BadRequestException("缺少订单号");
+        TradeOrderDTO order = queryOrderForVoucher(orderId, userId, voucher);
+        if (!Objects.equals(order.getVoucherId(), userVoucherId)) throw new ForbiddenException("券未绑定此订单");
+        if (!Integer.valueOf(1).equals(order.getStatus()) && !Integer.valueOf(2).equals(order.getStatus())) {
+            throw new BizIllegalException("订单状态不允许锁券");
         }
-        // 订单号必传：核销永远是"某笔订单用掉了这张券"的结果，没有订单就不该有核销
-        if (orderId == null) {
-            throw new BadRequestException("核销必须由订单链路发起：缺少订单号");
-        }
-        TradeOrderDTO order = queryOrderForVoucher(orderId, userId, userVoucher);
-
-        LocalDateTime now = LocalDateTime.now();
-        if (userVoucher.getStatus() == UserVoucher.STATUS_UNUSED
-                && userVoucher.getExpireTime() != null && userVoucher.getExpireTime().isBefore(now)) {
-            throw new BizIllegalException("券已过期，无法核销");
-        }
-        if (userVoucher.getStatus() == UserVoucher.STATUS_USED) {
-            // 幂等：同一订单重复提交视为"已核销成功"；能走到这里说明订单已通过上面的回查与绑定校验
-            if (Objects.equals(userVoucher.getOrderId(), orderId)) {
-                log.info("券已核销，幂等返回成功: userVoucherId={}, orderId={}", userVoucherId, orderId);
-                return true;
-            }
-            throw new BizIllegalException("券已被其它订单使用，不能重复核销");
-        }
-        if (userVoucher.getStatus() != UserVoucher.STATUS_UNUSED) {
-            throw new BizIllegalException("券当前状态不允许核销");
-        }
-
-        // 交叉校验：订单上的 voucher_id 必须就是这张券 —— 状态与门店都可能"碰巧对上"，这个字段才是硬证据
-        if (!Objects.equals(order.getVoucherId(), userVoucherId)) {
-            log.warn("券与订单未绑定，拒绝核销: userVoucherId={}, orderId={}, orderVoucherId={}",
-                    userVoucherId, orderId, order.getVoucherId());
-            throw new ForbiddenException("该券未用于此订单，不能核销");
-        }
-        // 状态白名单：只有 已支付(2) 或 待支付但已锁定该券(1) 才允许核销；已取消(5)/已核销(7) 都不允许
-        Integer status = order.getStatus();
-        boolean paid = status != null && status == ORDER_STATUS_PAID;
-        boolean lockedPending = status != null && status == ORDER_STATUS_UNPAID;
-        if (!paid && !lockedPending) {
-            throw new BizIllegalException("订单状态不允许核销该券（当前状态 " + status + "）");
-        }
-
-        // 条件更新核销：WHERE status = 1 保证并发下只有一个请求真正改成 2，影响 0 行就再读一次给准确提示
-        LambdaUpdateWrapper<UserVoucher> update = Wrappers.<UserVoucher>lambdaUpdate()
-                .set(UserVoucher::getStatus, UserVoucher.STATUS_USED)
-                .set(UserVoucher::getUseTime, now)
-                .eq(UserVoucher::getId, userVoucherId)
-                .eq(UserVoucher::getUserId, userId)
-                .eq(UserVoucher::getStatus, UserVoucher.STATUS_UNUSED);
-        update.set(UserVoucher::getOrderId, orderId);
-        int rows = userVoucherMapper.update(null, update);
-        if (rows == 0) {
-            UserVoucher latest = userVoucherMapper.selectById(userVoucherId);
-            if (latest != null && latest.getStatus() == UserVoucher.STATUS_USED
-                    && Objects.equals(latest.getOrderId(), orderId)) {
-                return true;
-            }
-            throw new BizIllegalException("券状态已变化，核销失败");
-        }
-        log.info("券核销成功: userVoucherId={}, userId={}, orderId={}", userVoucherId, userId, orderId);
-        return true;
+        return voucherBindingStore.bind(userVoucherId, userId, orderId);
     }
 
-    /**
-     * 退回券（状态 2 → 1，幂等）：只允许订单取消/退款链路调用，orderId 必传并回查订单；订单已核销（status=7）时绝不允许退券。
-     */
     @Override
     public boolean refundMyVoucher(Long userVoucherId, Long orderId) {
         Long userId = requireLogin();
-        UserVoucher userVoucher = userVoucherMapper.selectById(userVoucherId);
-        if (userVoucher == null || !Objects.equals(userVoucher.getUserId(), userId)) {
-            throw new ForbiddenException("券不存在或不属于当前用户");
+        UserVoucher voucher = ownedVoucher(userVoucherId, userId);
+        if (orderId == null) throw new BadRequestException("缺少订单号");
+        TradeOrderDTO order = queryOrderForVoucher(orderId, userId, voucher);
+        if (!Objects.equals(order.getVoucherId(), userVoucherId)) throw new ForbiddenException("券未绑定此订单");
+        if (!Integer.valueOf(5).equals(order.getStatus()) && !Integer.valueOf(8).equals(order.getStatus())
+                && !Integer.valueOf(9).equals(order.getStatus())) {
+            throw new BizIllegalException("订单尚未取消或受理退款，不能退券");
         }
-        if (orderId == null) {
-            throw new BadRequestException("退券必须由订单链路发起：缺少订单号");
-        }
-        TradeOrderDTO order = queryOrderForVoucher(orderId, userId, userVoucher);
-        if (order.getStatus() != null && order.getStatus() == ORDER_STATUS_VERIFIED) {
-            throw new BizIllegalException("订单已核销，券不能退回");
-        }
-        // 幂等：已经是"未使用"说明上一次退回已经生效（或这张券本来就没用过），直接返回成功
-        if (userVoucher.getStatus() == UserVoucher.STATUS_UNUSED) {
-            log.info("券已处于未使用状态，幂等返回成功: userVoucherId={}", userVoucherId);
-            return true;
-        }
-        if (userVoucher.getStatus() == UserVoucher.STATUS_EXPIRED) {
-            throw new BizIllegalException("券已过期，无法退回");
-        }
-        // 订单一致性校验：防止 A 订单取消时把 B 订单用掉的券退回（交易域按 orderId 调用）
-        if (userVoucher.getOrderId() != null && !Objects.equals(userVoucher.getOrderId(), orderId)) {
-            log.warn("券与订单不匹配，拒绝退回: userVoucherId={}, 券绑定订单={}, 传入订单={}",
-                    userVoucherId, userVoucher.getOrderId(), orderId);
-            throw new BizIllegalException("券与订单不匹配，无法退回");
-        }
+        return voucherBindingStore.release(userVoucherId, userId, orderId);
+    }
 
-        // 条件更新 2 → 1：同样用 WHERE status = 2 兜住并发重复调用
-        int rows = userVoucherMapper.update(null, Wrappers.<UserVoucher>lambdaUpdate()
-                .set(UserVoucher::getStatus, UserVoucher.STATUS_UNUSED)
-                .eq(UserVoucher::getId, userVoucherId)
-                .eq(UserVoucher::getUserId, userId)
-                .eq(UserVoucher::getStatus, UserVoucher.STATUS_USED));
-        if (rows == 0) {
-            UserVoucher latest = userVoucherMapper.selectById(userVoucherId);
-            if (latest != null && latest.getStatus() == UserVoucher.STATUS_UNUSED) {
-                return true;
-            }
-            throw new BizIllegalException("券状态已变化，退回失败");
-        }
-        // use_time / order_id 保留不动：它们是"这张券曾被哪笔订单用过"的审计线索，且表为 not_null 更新策略
-        log.info("券退回成功: userVoucherId={}, userId={}, orderId={}", userVoucherId, userId, orderId);
-        return true;
+    private UserVoucher ownedVoucher(Long id, Long userId) {
+        UserVoucher voucher = userVoucherMapper.selectById(id);
+        if (voucher == null || !Objects.equals(voucher.getUserId(), userId)) throw new ForbiddenException("券不存在或不属于当前用户");
+        return voucher;
     }
 
     /**
@@ -812,20 +641,19 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     }
 
 
-    /** 券售价（分）；空值按 0 处理（免费券） */
+    /** 空值兼容免费券；禁止负数免费发券或Long转int截断。 */
     private long payValueOf(Voucher voucher) {
-        if (voucher == null || voucher.getPayValue() == null || voucher.getPayValue() <= 0) {
+        if (voucher == null || voucher.getPayValue() == null) {
             return 0L;
         }
-        return voucher.getPayValue();
+        long price = voucher.getPayValue();
+        if (price < 0 || price > Integer.MAX_VALUE) {
+            throw new BadRequestException("券售价超出有效范围");
+        }
+        return price;
     }
 
-    /**
-     * 付费券收款：pay_value = 0 的免费券直接返回 false；付费券走 llmall-user-service 带支付密码校验的扣款接口，不新增内部免密通道。
-     *
-     * @param bizNo 幂等键（调用方给出，须唯一标识"这一次购买"）：普通领券用 {@code VOUCHER_BUY_<券id>_<用户id>}，
-     *              秒杀用 {@code VOUCHER-SECKILL-<token>}；下游按它落资金流水并去重，重复到达不重复扣款。
-     */
+    /** 秒杀旧协议收款；普通券使用持久化购买账本，不再调用此方法。 */
     private boolean chargeVoucherPurchase(Voucher voucher, Long userId, String pw, String bizNo) {
         long payValue = payValueOf(voucher);
         if (payValue <= 0) {
